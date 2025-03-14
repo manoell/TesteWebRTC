@@ -1,3 +1,6 @@
+#ifndef WEBRTCMANAGER_H
+#define WEBRTCMANAGER_H
+
 #import <Foundation/Foundation.h>
 #import <UIKit/UIKit.h>
 #import <WebRTC/WebRTC.h>
@@ -7,6 +10,17 @@
 @class WebRTCFrameConverter;
 
 /**
+ * Estado de conexão do WebRTCManager
+ */
+typedef NS_ENUM(NSInteger, WebRTCManagerState) {
+    WebRTCManagerStateDisconnected,
+    WebRTCManagerStateConnecting,
+    WebRTCManagerStateConnected,
+    WebRTCManagerStateError,
+    WebRTCManagerStateReconnecting
+};
+
+/**
  * WebRTCManager
  *
  * Classe responsável pelo gerenciamento da conexão WebRTC.
@@ -14,6 +28,11 @@
  * Inclui capacidade de auto-adaptação para diferentes câmeras.
  */
 @interface WebRTCManager : NSObject <RTCPeerConnectionDelegate, NSURLSessionWebSocketDelegate>
+
+/**
+ * Estado atual da conexão WebRTC
+ */
+@property (nonatomic, assign, readonly) WebRTCManagerState state;
 
 /**
  * Conexão WebRTC
@@ -36,34 +55,24 @@
 @property (nonatomic, strong) RTCVideoTrack *videoTrack;
 
 /**
- * Timer usado para enviar imagens de teste durante conexão
- */
-@property (nonatomic, strong) NSTimer *frameTimer;
-
-/**
  * Conversor de frames para processamento do vídeo recebido
  */
 @property (nonatomic, strong) WebRTCFrameConverter *frameConverter;
 
 /**
- * Estado da conexão
+ * Flag indicando se a desconexão foi solicitada pelo usuário
  */
-@property (nonatomic, assign) BOOL isConnected;
+@property (nonatomic, assign) BOOL userRequestedDisconnect;
 
 /**
- * Tarefa WebSocket para comunicação de sinalização
+ * Flag indicando se está recebendo frames
  */
-@property (nonatomic, strong) NSURLSessionWebSocketTask *webSocketTask;
+@property (nonatomic, assign, readonly) BOOL isReceivingFrames;
 
 /**
- * Sessão URL para WebSocket
+ * Endereço IP do servidor
  */
-@property (nonatomic, strong) NSURLSession *session;
-
-/**
- * Modo de auto-adaptação para resolução da câmera
- */
-@property (nonatomic, assign) BOOL autoAdaptToCameraResolution;
+@property (nonatomic, strong) NSString *serverIP;
 
 /**
  * Inicializa o gerenciador com referência à janela flutuante.
@@ -81,8 +90,9 @@
 /**
  * Encerra a conexão WebRTC.
  * Libera todos os recursos e fecha conexões.
+ * @param userInitiated Indica se a desconexão foi solicitada pelo usuário
  */
-- (void)stopWebRTC;
+- (void)stopWebRTC:(BOOL)userInitiated;
 
 /**
  * Gera e envia uma imagem de teste para visualização durante a conexão.
@@ -109,41 +119,22 @@
 - (void)gatherConnectionStats;
 
 /**
- * Converte estado da conexão ICE para string legível.
- * @param state Estado da conexão ICE.
- * @return String descritiva do estado.
+ * Define manualmente a resolução alvo para adaptação.
+ * @param resolution Resolução desejada (largura x altura).
  */
-- (NSString *)iceConnectionStateToString:(RTCIceConnectionState)state;
+- (void)setTargetResolution:(CMVideoDimensions)resolution;
 
 /**
- * Converte estado de sinalização para string legível.
- * @param state Estado da sinalização WebRTC.
- * @return String descritiva do estado.
+ * Define manualmente a taxa de quadros alvo.
+ * @param frameRate Taxa de quadros desejada (fps).
  */
-- (NSString *)signalingStateToString:(RTCSignalingState)state;
+- (void)setTargetFrameRate:(float)frameRate;
 
 /**
- * Conecta ao servidor WebSocket para sinalização.
+ * Define IP do servidor WebRTC.
+ * @param ip Endereço IP do servidor
  */
-- (void)connectWebSocket;
-
-/**
- * Configura recebimento de mensagens WebSocket.
- */
-- (void)receiveMessage;
-
-/**
- * Processa uma oferta SDP recebida.
- * @param sdp String SDP da oferta.
- */
-- (void)handleOfferWithSDP:(NSString *)sdp;
-
-/**
- * Otimiza uma SDP para suportar vídeo de alta qualidade.
- * @param originalSdp SDP original.
- * @return SDP modificada otimizada.
- */
-- (NSString *)enhanceSdpForHighQuality:(NSString *)originalSdp;
+- (void)setServerIP:(NSString *)ip;
 
 /**
  * Detecta e se adapta à resolução da câmera atual do dispositivo iOS.
@@ -160,16 +151,6 @@
  */
 - (void)setAutoAdaptToCameraEnabled:(BOOL)enable;
 
-/**
- * Define manualmente a resolução alvo para adaptação.
- * @param resolution Resolução desejada (largura x altura).
- */
-- (void)setTargetResolution:(CMVideoDimensions)resolution;
-
-/**
- * Define manualmente a taxa de quadros alvo.
- * @param frameRate Taxa de quadros desejada (fps).
- */
-- (void)setTargetFrameRate:(float)frameRate;
-
 @end
+
+#endif /* WEBRTCMANAGER_H */

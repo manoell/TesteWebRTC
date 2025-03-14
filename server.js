@@ -1,9 +1,13 @@
+/**
+ * Servidor WebRTC otimizado para transmissão em alta qualidade
+ * Focado em rede local com mínima latência
+ */
+
 const express = require('express');
 const http = require('http');
 const WebSocket = require('ws');
 const cors = require('cors');
 const path = require('path');
-const bodyParser = require('body-parser');
 const { v4: uuidv4 } = require('uuid');
 const fs = require('fs');
 
@@ -11,29 +15,28 @@ const fs = require('fs');
 const PORT = process.env.PORT || 8080;
 const LOGGING_ENABLED = true;
 const LOG_FILE = './server.log';
-const MAX_CONNECTIONS_PER_ROOM = 20;
+const MAX_CONNECTIONS = 2; // Limitado a transmissor + receptor
 
 // Inicializar aplicativo Express
 const app = express();
 app.use(cors());
-app.use(bodyParser.json());
+app.use(express.json());
 app.use(express.static(__dirname));
 
 // Criar servidor HTTP e servidor WebSocket
 const server = http.createServer(app);
 const wss = new WebSocket.Server({ server });
 
-// Armazenar conexões por sala
+// Armazenar conexões
 const rooms = {};
-// Armazenar SDPs e ICE candidates
 const roomData = {};
-// Armazenar estatísticas de conexão
 const roomStats = {};
+const clients = new Map();
 
 /**
  * Função para logging com timestamp
  * @param {string} message - Mensagem para registro
- * @param {boolean} consoleOnly - Se true, registra apenas no console, não no arquivo
+ * @param {boolean} consoleOnly - Se true, registra apenas no console
  */
 const log = (message, consoleOnly = false) => {
     if (!LOGGING_ENABLED) return;
@@ -101,13 +104,21 @@ wss.on('connection', (ws) => {
     log('Nova conexão estabelecida via WebSocket');
     
     // Identificar cliente
-    ws.id = uuidv4();
+    const clientId = uuidv4();
+    ws.id = clientId;
     ws.isAlive = true;
+    clients.set(clientId, ws);
+    
     let roomId = null;
     
-    // Ping para manter conexão viva
+    // Ping para manter conexão viva - intervalo reduzido para rede local
     ws.on('pong', () => {
         ws.isAlive = true;
+    });
+    
+    // Tratamento de erros específico
+    ws.on('error', (error) => {
+        log(`Erro WebSocket para cliente ${ws.id}: ${error.message}`);
     });
     
     // Processar mensagens
@@ -116,23 +127,23 @@ wss.on('connection', (ws) => {
             const data = JSON.parse(message);
             
             // Obter roomId da mensagem ou usar padrão
-            const msgRoomId = data.roomId || 'default';
+            const msgRoomId = data.roomId || 'ios-camera';
             
             if (data.type === 'join') {
-				roomId = data.roomId || 'default';
-				
-				// Garantir que a sala exista
-				if (!rooms[roomId]) {
-					rooms[roomId] = [];
-					roomData[roomId] = { offers: [], answers: [], iceCandidates: [] };
-					console.log(`Nova sala criada: ${roomId}`);
-				}
+                roomId = data.roomId || 'ios-camera';
+                
+                // Garantir que a sala exista
+                if (!rooms[roomId]) {
+                    rooms[roomId] = [];
+                    roomData[roomId] = { offers: [], answers: [], iceCandidates: [] };
+                    log(`Nova sala criada: ${roomId}`);
+                }
                 
                 // Limitar número de conexões por sala
-                if (rooms[roomId].length >= MAX_CONNECTIONS_PER_ROOM) {
+                if (rooms[roomId].length >= MAX_CONNECTIONS) {
                     ws.send(JSON.stringify({
                         type: 'error',
-                        message: 'Room is full'
+                        message: 'Room is full, maximum 2 connections allowed'
                     }));
                     log(`Tentativa de conexão rejeitada - sala cheia: ${roomId}`, true);
                     return;
@@ -268,6 +279,22 @@ wss.on('connection', (ws) => {
                 
                 updateRoomActivity(roomId);
             } 
+            // Processar bye (desconexão)
+            else if (data.type === 'bye' && roomId) {
+                log(`Mensagem 'bye' recebida de ${ws.id}`);
+                
+                // Notificar outros clientes sobre desconexão
+                rooms[roomId].forEach(client => {
+                    if (client !== ws && client.readyState === WebSocket.OPEN) {
+                        client.send(JSON.stringify({
+                            type: 'peer-disconnected',
+                            userId: ws.id
+                        }));
+                    }
+                });
+                
+                updateRoomActivity(roomId);
+            }
             // Processar outras mensagens para a sala
             else if (roomId) {
                 log(`Mensagem tipo "${data.type}" recebida de ${ws.id}`, true);
@@ -293,6 +320,8 @@ wss.on('connection', (ws) => {
     // Manipular desconexão
     ws.on('close', () => {
         log(`Conexão com cliente ${ws.id} fechada`);
+        
+        clients.delete(clientId);
         
         if (roomId && rooms[roomId]) {
             // Remover cliente da sala
@@ -322,6 +351,7 @@ wss.on('connection', (ws) => {
 });
 
 // Configurar ping periódico para manter conexões vivas
+// Intervalo reduzido para 10 segundos para detectar desconexões mais rapidamente
 const pingInterval = setInterval(() => {
     wss.clients.forEach(ws => {
         if (ws.isAlive === false) {
@@ -332,60 +362,11 @@ const pingInterval = setInterval(() => {
         ws.isAlive = false;
         ws.ping(() => {});
     });
-}, 30000); // A cada 30 segundos
+}, 10000); // A cada 10 segundos em vez de 30
 
 // Limpar intervalo quando o servidor é fechado
 wss.on('close', () => {
     clearInterval(pingInterval);
-});
-
-// Endpoints REST para informações e diagnóstico
-
-// Listar salas ativas
-app.get('/api/rooms', (req, res) => {
-    const roomsList = Object.keys(rooms).map(roomId => {
-        const stats = getRoomStats(roomId);
-        return {
-            id: roomId,
-            clients: rooms[roomId].length,
-            created: stats.created,
-            messagesExchanged: stats.messagesExchanged,
-            lastActivity: stats.lastActivity
-        };
-    });
-    
-    res.json({ rooms: roomsList });
-});
-
-// Obter estatísticas de uma sala específica
-app.get('/api/rooms/:roomId', (req, res) => {
-    const roomId = req.params.roomId;
-    
-    if (!rooms[roomId]) {
-        return res.status(404).json({ error: 'Room not found' });
-    }
-    
-    const stats = getRoomStats(roomId);
-    
-    res.json({
-        id: roomId,
-        clients: rooms[roomId].length,
-        stats: stats,
-        offers: roomData[roomId].offers.length,
-        answers: roomData[roomId].answers.length,
-        iceCandidates: roomData[roomId].iceCandidates.length
-    });
-});
-
-// Obter estado do servidor
-app.get('/api/status', (req, res) => {
-    res.json({
-        status: 'running',
-        uptime: process.uptime(),
-        rooms: Object.keys(rooms).length,
-        connections: Array.from(wss.clients).length,
-        memoryUsage: process.memoryUsage()
-    });
 });
 
 // Rota padrão para o cliente WebRTC
@@ -393,8 +374,32 @@ app.get('/', (req, res) => {
     res.sendFile(path.join(__dirname, 'index.html'));
 });
 
+// Informações sobre o servidor
+app.get('/info', (req, res) => {
+    res.json({
+        clients: wss.clients.size,
+        rooms: Object.keys(rooms).length,
+        uptime: process.uptime()
+    });
+});
+
 // Iniciar servidor
 server.listen(PORT, () => {
+    const interfaces = require('os').networkInterfaces();
+    const addresses = [];
+    
+    // Encontrar endereços IP na rede
+    Object.keys(interfaces).forEach(interfaceName => {
+        interfaces[interfaceName].forEach(iface => {
+            // Ignorar endereços IPv6 e loopback
+            if (iface.family === 'IPv4' && !iface.internal) {
+                addresses.push(iface.address);
+            }
+        });
+    });
+    
     log(`Servidor WebRTC rodando na porta ${PORT}`);
+    //log(`Interfaces de rede disponíveis: ${addresses.join(', ')}`);
     log(`Interface web disponível em http://localhost:${PORT}`);
+    //log(`Substitua SEU_IP por um dos seguintes: ${addresses.join(', ')}`);
 });
