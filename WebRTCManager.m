@@ -12,15 +12,15 @@ static NSString *const AVCaptureDevicePositionDidChangeNotification = @"AVCaptur
 #define kPreferredMaxFPS 60
 
 // Tempos de espera (em segundos)
-#define kConnectionTimeout 30.0
-#define kPeerConnectionTimeout 15.0
-#define kReconnectInterval 2.0
-#define kStatsCollectionInterval 5.0
-#define kStatusCheckInterval 3.0
-#define kFrameMonitoringInterval 2.0
+#define kConnectionTimeout 15.0      // Reduzido para detecção mais rápida
+#define kPeerConnectionTimeout 10.0  // Reduzido para detecção mais rápida
+#define kReconnectInterval 1.5       // Reduzido para reconexão mais rápida
+#define kStatsCollectionInterval 3.0 // Aumentar para reduzir sobrecarga
+#define kStatusCheckInterval 1.5     // Reduzido para detecção de problemas mais rápida
+#define kFrameMonitoringInterval 1.0 // Reduzido para detecção mais rápida de frames
 
 // Número máximo de tentativas de reconexão (0 = infinito)
-#define kMaxReconnectAttempts 0
+#define kMaxReconnectAttempts 10
 
 @interface WebRTCManager ()
 @property (nonatomic, assign) WebRTCManagerState state;
@@ -43,6 +43,9 @@ static NSString *const AVCaptureDevicePositionDidChangeNotification = @"AVCaptur
 @property (nonatomic, strong) NSString *roomId;
 @property (nonatomic, strong) NSString *clientId;
 @property (nonatomic, assign) NSTimeInterval lastFrameReceivedTime;
+@property (nonatomic, assign) BOOL usingBackCamera;
+@property (nonatomic, assign) BOOL hasLocalStream;
+@property (nonatomic, assign) int consecutiveReconnectFailures;
 
 // Timer management
 @property (nonatomic, strong) NSMutableDictionary *activeTimers;
@@ -64,7 +67,10 @@ static NSString *const AVCaptureDevicePositionDidChangeNotification = @"AVCaptur
         _reconnectAttempts = 0;
         _hasReceivedFirstFrame = NO;
         _userRequestedDisconnect = NO;
-        _serverIP = @"192.168.0.178"; // Default IP
+        _usingBackCamera = NO;
+        _hasLocalStream = NO;
+        _consecutiveReconnectFailures = 0;
+        _serverIP = @"192.168.0.178"; // Default IP - deve ser personalizado pelo usuário
         _activeTimers = [NSMutableDictionary dictionary];
         
         // Inicializar o conversor de frame
@@ -90,8 +96,14 @@ static NSString *const AVCaptureDevicePositionDidChangeNotification = @"AVCaptur
                                                      name:@"UIDeviceOrientationDidChangeNotification"
                                                    object:nil];
         
+        // Notificações de mudança de câmera
+        [[NSNotificationCenter defaultCenter] addObserver:self
+                                                 selector:@selector(cameraDidChange:)
+                                                     name:AVCaptureDevicePositionDidChangeNotification
+                                                   object:nil];
+        
         // Log inicialização
-        writeLog(@"[WebRTCManager] WebRTCManager inicializado com configurações para alta qualidade");
+        writeLog(@"[WebRTCManager] WebRTCManager inicializado com configurações para alta qualidade 4K/60fps");
     }
     return self;
 }
@@ -198,9 +210,6 @@ static NSString *const AVCaptureDevicePositionDidChangeNotification = @"AVCaptur
                     selector:@selector(captureAndSendTestImage)
                      repeats:YES];
     
-    // Verificar status após alguns segundos
-    __weak typeof(self) weakSelf = self;
-    
     // Timeout para conexão
     [self startTimerWithName:@"connectionTimeout"
                     interval:kConnectionTimeout
@@ -244,6 +253,7 @@ static NSString *const AVCaptureDevicePositionDidChangeNotification = @"AVCaptur
    
    // Desativar recepção de frames
    self.isReceivingFrames = NO;
+   self.hasLocalStream = NO;
    
    // Limpar track de vídeo
    if (self.videoTrack) {
@@ -279,6 +289,9 @@ static NSString *const AVCaptureDevicePositionDidChangeNotification = @"AVCaptur
    self.roomId = nil;
    self.clientId = nil;
    
+   // Resetar flags
+   self.hasReceivedFirstFrame = NO;
+   
    // Se não está em reconexão, atualizar estado
    if (self.state != WebRTCManagerStateReconnecting || userInitiated) {
        self.state = WebRTCManagerStateDisconnected;
@@ -292,8 +305,6 @@ static NSString *const AVCaptureDevicePositionDidChangeNotification = @"AVCaptur
    
    __weak typeof(self) weakSelf = self;
    [self.peerConnection statisticsWithCompletionHandler:^(RTCStatisticsReport * _Nonnull report) {
-       writeLog(@"[WebRTCManager] Estatísticas de conexão coletadas");
-       
        NSMutableDictionary *statsData = [NSMutableDictionary dictionary];
        int totalPacketsReceived = 0;
        int totalPacketsLost = 0;
@@ -364,11 +375,16 @@ static NSString *const AVCaptureDevicePositionDidChangeNotification = @"AVCaptur
            statsData[@"lossRate"] = @(lossRate);
        }
        
-       // Log de estatísticas relevantes
-       writeLog(@"[WebRTCManager] Qualidade de vídeo: %dx%d @ %.1f fps, codec: %@",
-               frameWidth, frameHeight, frameRate, codecName);
-       writeLog(@"[WebRTCManager] Estatísticas de rede: %d pacotes recebidos, %.1f%% perdidos",
-               totalPacketsReceived, lossRate);
+       // Log de estatísticas relevantes a cada 5 coletas
+       static int statsLogCount = 0;
+       statsLogCount++;
+       if (statsLogCount % 5 == 0) {
+           writeLog(@"[WebRTCManager] Qualidade de vídeo: %dx%d @ %.1f fps, codec: %@",
+                   frameWidth, frameHeight, frameRate, codecName);
+           writeLog(@"[WebRTCManager] Estatísticas de rede: %d pacotes recebidos, %.1f%% perdidos",
+                   totalPacketsReceived, lossRate);
+           statsLogCount = 0;
+       }
        
        // Atualizar UI com informações relevantes de qualidade
        if (frameWidth > 0 && frameHeight > 0) {
@@ -384,15 +400,26 @@ static NSString *const AVCaptureDevicePositionDidChangeNotification = @"AVCaptur
 }
 
 - (void)checkWebRTCStatus {
-   writeLog(@"[WebRTCManager] Verificando status WebRTC:");
-   writeLog(@"  - PeerConnection: %@", self.peerConnection ? @"Inicializado" : @"NULL");
-   writeLog(@"  - VideoTrack: %@", self.videoTrack ? @"Recebido" : @"NULL");
-   writeLog(@"  - Estado: %@", [self stateToString:self.state]);
-   writeLog(@"  - IsReceivingFrames: %@", self.isReceivingFrames ? @"Sim" : @"Não");
+   if (self.state == WebRTCManagerStateDisconnected) {
+       return;
+   }
    
-   if (self.peerConnection) {
-       writeLog(@"  - ICE Connection State: %@", [self iceConnectionStateToString:self.peerConnection.iceConnectionState]);
-       writeLog(@"  - Signaling State: %@", [self signalingStateToString:self.peerConnection.signalingState]);
+   // Log menos frequente para reduzir spam nos logs
+   static int checkCount = 0;
+   checkCount++;
+   
+   if (checkCount % 5 == 0) {
+       writeLog(@"[WebRTCManager] Verificando status WebRTC:");
+       writeLog(@"  - PeerConnection: %@", self.peerConnection ? @"Inicializado" : @"NULL");
+       writeLog(@"  - VideoTrack: %@", self.videoTrack ? @"Recebido" : @"NULL");
+       writeLog(@"  - Estado: %@", [self stateToString:self.state]);
+       writeLog(@"  - IsReceivingFrames: %@", self.isReceivingFrames ? @"Sim" : @"Não");
+       
+       if (self.peerConnection) {
+           writeLog(@"  - ICE Connection State: %@", [self iceConnectionStateToString:self.peerConnection.iceConnectionState]);
+           writeLog(@"  - Signaling State: %@", [self signalingStateToString:self.peerConnection.signalingState]);
+       }
+       checkCount = 0;
    }
    
    // Verificar se estamos conectados mas não recebendo frames
@@ -456,6 +483,15 @@ static NSString *const AVCaptureDevicePositionDidChangeNotification = @"AVCaptur
        reason = @"Estado de sinalização fechado";
    }
    
+   // Se estava recebendo frames mas parou de receber por tempo demais
+   else if (self.hasReceivedFirstFrame && self.state == WebRTCManagerStateConnected) {
+       NSTimeInterval timeSinceLastFrame = CACurrentMediaTime() - self.lastFrameReceivedTime;
+       if (timeSinceLastFrame > 10.0) {
+           needsReconnection = YES;
+           reason = @"Sem recebimento de frames por 10 segundos";
+       }
+   }
+   
    // Se precisamos reconectar e não excedemos o número máximo de tentativas (ou ilimitado)
    if (needsReconnection && (kMaxReconnectAttempts == 0 || self.reconnectAttempts < kMaxReconnectAttempts)) {
        writeLog(@"[WebRTCManager] Necessário reconectar. Motivo: %@. Tentativa %d",
@@ -515,6 +551,26 @@ static NSString *const AVCaptureDevicePositionDidChangeNotification = @"AVCaptur
        dispatch_async(dispatch_get_main_queue(), ^{
            [self.floatingWindow updateConnectionStatus:@"Timeout na conexão"];
        });
+       
+       // Incrementar contador de falhas consecutivas
+       self.consecutiveReconnectFailures++;
+       
+       // Se muitas falhas consecutivas, tentar com menos qualidade
+       if (self.consecutiveReconnectFailures > 2) {
+           writeLog(@"[WebRTCManager] Múltiplas falhas de conexão, reduzindo qualidade para próxima tentativa");
+           
+           // Reduzir resolução para 1080p
+           if (self.targetResolution.width > 1920) {
+               self.targetResolution.width = 1920;
+               self.targetResolution.height = 1080;
+               [self.frameConverter setTargetResolution:self.targetResolution];
+           }
+           // Reduzir framerate
+           if (self.targetFrameRate > 30) {
+               self.targetFrameRate = 30;
+               [self.frameConverter setTargetFrameRate:self.targetFrameRate];
+           }
+       }
        
        // Iniciar processo de reconexão
        [self initiateReconnection];
@@ -656,6 +712,9 @@ static NSString *const AVCaptureDevicePositionDidChangeNotification = @"AVCaptur
            return;
        }
        
+       // Atualizar flag da câmera atual
+       self.usingBackCamera = (position == AVCaptureDevicePositionBack);
+       
        // Obter as capacidades da câmera
        [self extractCameraCapabilitiesAndAdapt:camera];
    });
@@ -685,6 +744,17 @@ static NSString *const AVCaptureDevicePositionDidChangeNotification = @"AVCaptur
        writeLog(@"[WebRTCManager] Formato ativo: %dx%d @ %.1f fps",
                dimensions.width, dimensions.height, maxFrameRate);
        
+       // Verificar se a câmera suporta 4K
+       BOOL supports4K = NO;
+       for (AVCaptureDeviceFormat *format in camera.formats) {
+           CMVideoDimensions formatDimensions = CMVideoFormatDescriptionGetDimensions(format.formatDescription);
+           if (formatDimensions.width >= 3840 || formatDimensions.height >= 2160) {
+               supports4K = YES;
+               writeLog(@"[WebRTCManager] Câmera suporta 4K");
+               break;
+           }
+       }
+       
        // Desbloquear dispositivo
        [camera unlockForConfiguration];
        
@@ -697,16 +767,40 @@ static NSString *const AVCaptureDevicePositionDidChangeNotification = @"AVCaptur
            // Configurar o conversor para a resolução da câmera
            [self setTargetResolution:dimensions];
            [self setTargetFrameRate:maxFrameRate];
+           
+           // Se estamos conectados, tentar atualizar o stream para a nova resolução
+           if (self.state == WebRTCManagerStateConnected && self.hasLocalStream) {
+               // Se mudarmos de câmera, podemos precisar recriar os tracks
+               [self updateVideoTrackWithNewCamera:camera];
+           }
        });
    } else {
        writeLog(@"[WebRTCManager] Erro ao bloquear câmera para configuração: %@", error);
    }
 }
 
+- (void)updateVideoTrackWithNewCamera:(AVCaptureDevice *)camera {
+    // Este método seria implementado para atualizar a resolução durante uma chamada ativa
+    // mas não é trivial e pode necessitar de renegociação completa do PeerConnection
+    // Nas versões mais recentes do WebRTC, é possível substituir apenas o capturer
+    
+    // Por enquanto, apenas logamos que seria necessário recriar a conexão
+    writeLog(@"[WebRTCManager] A substituição de câmera durante uma conexão ativa requer reimplementação da conexão");
+}
+
+- (void)cameraDidChange:(NSNotification *)notification {
+    // Acionado quando há uma mudança na câmera (como troca de câmera frontal/traseira)
+    AVCaptureDevice *device = notification.object;
+    if ([device hasMediaType:AVMediaTypeVideo]) {
+        writeLog(@"[WebRTCManager] Câmera alterada para: %@", device.localizedName);
+        [self adaptToNativeCameraWithPosition:device.position];
+    }
+}
+
 #pragma mark - WebRTC Configuration
 
 - (void)configureWebRTC {
-   writeLog(@"[WebRTCManager] Configurando WebRTC para alta qualidade");
+   writeLog(@"[WebRTCManager] Configurando WebRTC para alta qualidade 4K/60fps");
    
    // Configuração otimizada para WebRTC
    RTCConfiguration *config = [[RTCConfiguration alloc] init];
@@ -725,11 +819,11 @@ static NSString *const AVCaptureDevicePositionDidChangeNotification = @"AVCaptur
    config.sdpSemantics = RTCSdpSemanticsUnifiedPlan;
    
    // Configurar tempos de ICE para aceleração de conexão
-   config.iceConnectionReceivingTimeout = 15000; // 15 segundos
+   config.iceConnectionReceivingTimeout = 10000; // 10 segundos
    config.continualGatheringPolicy = RTCContinualGatheringPolicyGatherContinually;
    
    // Parâmetros para rede local
-   config.iceRegatherIntervalRange = [[RTCIntervalRange alloc] initWithMin:2.0 max:5.0];
+   config.iceRegatherIntervalRange = [[RTCIntervalRange alloc] initWithMin:1.0 max:3.0]; // Mais agressivo para rede local
    
    // Configurações específicas para receber vídeo de alta qualidade
    NSDictionary *mandatoryConstraints = [self.sdpMediaConstraints copy];
@@ -781,6 +875,9 @@ static NSString *const AVCaptureDevicePositionDidChangeNotification = @"AVCaptur
                // Parar timer de imagem de teste
                [weakSelf stopTimerWithName:@"frameTimer"];
                
+               // Resetar contador de falhas consecutivas, já que obtivemos sucesso
+               weakSelf.consecutiveReconnectFailures = 0;
+               
                // Atualizar UI
                dispatch_async(dispatch_get_main_queue(), ^{
                    [weakSelf.floatingWindow updateConnectionStatus:
@@ -794,6 +891,11 @@ static NSString *const AVCaptureDevicePositionDidChangeNotification = @"AVCaptur
            [weakSelf.floatingWindow updatePreviewImage:image];
        });
    };
+   
+   // Adicionar stream local
+   RTCMediaStream *localStream = [self createLocalMediaStream];
+   [self.peerConnection addStream:localStream];
+   self.hasLocalStream = YES;
    
    writeLog(@"[WebRTCManager] WebRTC configurado para recepção de vídeo em alta qualidade");
 }
@@ -815,8 +917,8 @@ static NSString *const AVCaptureDevicePositionDidChangeNotification = @"AVCaptur
    
    // Criar nova sessão e tarefa WebSocket
    NSURLSessionConfiguration *config = [NSURLSessionConfiguration defaultSessionConfiguration];
-   config.timeoutIntervalForRequest = 15.0;  // Reduzido para detectar problemas mais rápido
-   config.timeoutIntervalForResource = 30.0; // Reduzido para timeout mais rápido
+   config.timeoutIntervalForRequest = 10.0;  // Reduzido para detectar problemas mais rápido
+   config.timeoutIntervalForResource = 20.0; // Reduzido para timeout mais rápido
    
    self.session = [NSURLSession sessionWithConfiguration:config delegate:self delegateQueue:nil];
    
@@ -1093,7 +1195,7 @@ static NSString *const AVCaptureDevicePositionDidChangeNotification = @"AVCaptur
            // Modificar profile-level-id de H264 para suportar alta resolução
            if ([line containsString:@"profile-level-id"] && [line containsString:@"H264"]) {
                // Substituir por perfil de alta qualidade - 42e01f suporta até 1080p
-               // Para 4K, usamos perfil mais avançado
+               // Para 4K, usamos perfil mais avançado 640032 (Level 5.2, alta complexidade)
                modifiedLine = [line stringByReplacingOccurrencesOfString:@"profile-level-id=[0-9a-fA-F]+"
                                                              withString:@"profile-level-id=640032"
                                                                 options:NSRegularExpressionSearch
@@ -1105,7 +1207,7 @@ static NSString *const AVCaptureDevicePositionDidChangeNotification = @"AVCaptur
            if ([line hasPrefix:@"c="] && !videoSectionModified) {
                [result addObject:modifiedLine];
                // Adicionar linha de bitrate após a linha de conexão - valor alto para 4K
-               [result addObject:@"b=AS:8000"]; // 8 Mbps para 4K
+               [result addObject:@"b=AS:10000"]; // 10 Mbps para 4K, ajustável para sua rede local
                videoSectionModified = YES;
                continue;
            }
@@ -1320,133 +1422,3 @@ static NSString *const AVCaptureDevicePositionDidChangeNotification = @"AVCaptur
    NSString *state = [self signalingStateToString:stateChanged];
    writeLog(@"[WebRTCManager] Estado de sinalização mudou para: %@", state);
 }
-
-#pragma mark - NSURLSessionWebSocketDelegate
-
-- (void)URLSession:(NSURLSession *)session webSocketTask:(NSURLSessionWebSocketTask *)webSocketTask didOpenWithProtocol:(NSString *)protocol {
-   writeLog(@"[WebRTCManager] WebSocket aberto");
-   
-   // Reset contador de tentativas
-   self.reconnectAttempts = 0;
-   
-   // Enviar mensagem de join
-   NSDictionary *joinMsg = @{
-       @"type": @"join",
-       @"roomId": @"ios-camera"
-   };
-   
-   // Armazenar roomId
-   self.roomId = @"ios-camera";
-   
-   NSError *jsonError;
-   NSData *jsonData = [NSJSONSerialization dataWithJSONObject:joinMsg options:0 error:&jsonError];
-   
-   if (jsonError) {
-       writeLog(@"[WebRTCManager] Erro ao serializar mensagem de join: %@", jsonError);
-       return;
-   }
-   
-   NSString *jsonString = [[NSString alloc] initWithData:jsonData encoding:NSUTF8StringEncoding];
-   NSURLSessionWebSocketMessage *message = [[NSURLSessionWebSocketMessage alloc] initWithString:jsonString];
-   
-   [webSocketTask sendMessage:message completionHandler:^(NSError *error) {
-       if (error) {
-           writeLog(@"[WebRTCManager] Erro ao enviar mensagem de join: %@", error);
-       } else {
-           writeLog(@"[WebRTCManager] Mensagem de join enviada");
-       }
-   }];
-   
-   // Atualizar UI
-   dispatch_async(dispatch_get_main_queue(), ^{
-       [self.floatingWindow updateConnectionStatus:@"WebSocket Conectado"];
-   });
-}
-
-- (void)URLSession:(NSURLSession *)session task:(NSURLSessionTask *)task didCompleteWithError:(NSError *)error {
-   if ([task isKindOfClass:[NSURLSessionWebSocketTask class]]) {
-       if (error) {
-           if ([error.domain isEqualToString:NSURLErrorDomain] && error.code == NSURLErrorCancelled) {
-               // Cancelamento normal durante desconexão
-               writeLog(@"[WebRTCManager] WebSocket fechado (cancelamento esperado)");
-           } else {
-               // Erro real
-               writeLog(@"[WebRTCManager] WebSocket fechado com erro: %@", error);
-               
-               // Atualizar UI
-               dispatch_async(dispatch_get_main_queue(), ^{
-                   [self.floatingWindow updateConnectionStatus:@"Desconectado - Erro WebSocket"];
-               });
-               
-               // Tentar reconectar se não foi o usuário quem desconectou
-               if (!self.userRequestedDisconnect) {
-                   [self initiateReconnection];
-               }
-           }
-       } else {
-           writeLog(@"[WebRTCManager] WebSocket fechado normalmente");
-           
-           dispatch_async(dispatch_get_main_queue(), ^{
-               [self.floatingWindow updateConnectionStatus:@"Desconectado"];
-           });
-       }
-   }
-}
-
-#pragma mark - Helper Methods
-
-- (void)orientationChanged:(NSNotification *)notification {
-   UIDeviceOrientation orientation = [[UIDevice currentDevice] orientation];
-   if (UIDeviceOrientationIsLandscape(orientation) || UIDeviceOrientationIsPortrait(orientation)) {
-       writeLog(@"[WebRTCManager] Orientação mudou para %@",
-              UIDeviceOrientationIsLandscape(orientation) ? @"landscape" : @"portrait");
-   }
-}
-
-- (NSString *)iceConnectionStateToString:(RTCIceConnectionState)state {
-   switch (state) {
-       case RTCIceConnectionStateNew: return @"New";
-       case RTCIceConnectionStateChecking: return @"Checking";
-       case RTCIceConnectionStateConnected: return @"Connected";
-       case RTCIceConnectionStateCompleted: return @"Completed";
-       case RTCIceConnectionStateFailed: return @"Failed";
-       case RTCIceConnectionStateDisconnected: return @"Disconnected";
-       case RTCIceConnectionStateClosed: return @"Closed";
-       case RTCIceConnectionStateCount: return @"Count";
-       default: return @"Unknown";
-   }
-}
-
-- (NSString *)signalingStateToString:(RTCSignalingState)state {
-   switch (state) {
-       case RTCSignalingStateStable: return @"Stable";
-       case RTCSignalingStateHaveLocalOffer: return @"HaveLocalOffer";
-       case RTCSignalingStateHaveLocalPrAnswer: return @"HaveLocalPrAnswer";
-       case RTCSignalingStateHaveRemoteOffer: return @"HaveRemoteOffer";
-       case RTCSignalingStateHaveRemotePrAnswer: return @"HaveRemotePrAnswer";
-       case RTCSignalingStateClosed: return @"Closed";
-       default: return @"Unknown";
-   }
-}
-
-- (RTCMediaConstraints *)defaultAnswerConstraints {
-   NSArray *mandatoryConstraints = @[
-       [[RTCPair alloc] initWithKey:@"OfferToReceiveAudio" value:@"true"],
-       [[RTCPair alloc] initWithKey:@"OfferToReceiveVideo" value:@"true"]
-   ];
-   
-   RTCMediaConstraints* constraints =
-       [[RTCMediaConstraints alloc]
-           initWithMandatoryConstraints:mandatoryConstraints
-                    optionalConstraints:nil];
-   return constraints;
-}
-
-- (RTCICEServer *)defaultSTUNServer {
-   NSURL *defaultSTUNServerURL = [NSURL URLWithString:@"stun:stun.l.google.com:19302"];
-   return [[RTCICEServer alloc] initWithURI:defaultSTUNServerURL
-                                   username:@""
-                                   password:@""];
-}
-
-@end

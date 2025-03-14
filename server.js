@@ -1,5 +1,5 @@
 /**
- * Servidor WebRTC otimizado para transmissão em alta qualidade
+ * Servidor WebRTC otimizado para transmissão em alta qualidade 4K/60fps
  * Focado em rede local com mínima latência
  */
 
@@ -10,22 +10,31 @@ const cors = require('cors');
 const path = require('path');
 const { v4: uuidv4 } = require('uuid');
 const fs = require('fs');
+const os = require('os');
 
 // Configurações
 const PORT = process.env.PORT || 8080;
 const LOGGING_ENABLED = true;
 const LOG_FILE = './server.log';
 const MAX_CONNECTIONS = 2; // Limitado a transmissor + receptor
+const KEEP_ALIVE_INTERVAL = 5000; // 5 segundos para detecção rápida de desconexões
 
 // Inicializar aplicativo Express
 const app = express();
-app.use(cors());
+app.use(cors({
+    origin: '*',
+    methods: ['GET', 'POST', 'DELETE']
+}));
 app.use(express.json());
 app.use(express.static(__dirname));
 
 // Criar servidor HTTP e servidor WebSocket
 const server = http.createServer(app);
-const wss = new WebSocket.Server({ server });
+const wss = new WebSocket.Server({ 
+    server,
+    // Aumentar o tamanho máximo dos payloads para suportar vídeo 4K
+    maxPayload: 64 * 1024 * 1024 // 64MB
+});
 
 // Armazenar conexões
 const rooms = {};
@@ -67,8 +76,8 @@ const cleanupEmptyRooms = () => {
     });
 };
 
-// Configurar intervalo para limpeza de dados antigos
-setInterval(cleanupEmptyRooms, 60000); // A cada minuto
+// Configurar intervalo para limpeza de dados antigos (a cada minuto)
+setInterval(cleanupEmptyRooms, 60000);
 
 /**
  * Gera resumo de estatísticas para uma sala
@@ -82,7 +91,9 @@ const getRoomStats = (roomId) => {
             connections: 0,
             messagesExchanged: 0,
             peakConnections: 0,
-            lastActivity: new Date()
+            lastActivity: new Date(),
+            bandwidth: 0,
+            resolution: "unknown"
         };
     }
     
@@ -92,11 +103,49 @@ const getRoomStats = (roomId) => {
 /**
  * Atualiza estatísticas da sala quando uma mensagem é processada
  * @param {string} roomId - ID da sala
+ * @param {number} messageSize - Tamanho da mensagem em bytes
  */
-const updateRoomActivity = (roomId) => {
+const updateRoomActivity = (roomId, messageSize = 0) => {
     const stats = getRoomStats(roomId);
     stats.messagesExchanged++;
     stats.lastActivity = new Date();
+    
+    // Estimar a largura de banda utilizada
+    if (messageSize > 0) {
+        // Média móvel da largura de banda
+        stats.bandwidth = stats.bandwidth * 0.7 + messageSize * 0.3;
+    }
+};
+
+/**
+ * Analisa a qualidade da oferta SDP para logging
+ * @param {string} sdp - String SDP
+ * @returns {object} - Informações sobre a qualidade
+ */
+const analyzeSdpQuality = (sdp) => {
+    const result = {
+        hasVideo: sdp.includes('m=video'),
+        hasAudio: sdp.includes('m=audio'),
+        hasH264: sdp.includes('H264'),
+        hasVP8: sdp.includes('VP8'),
+        hasVP9: sdp.includes('VP9'),
+        resolution: "unknown",
+        fps: "unknown"
+    };
+    
+    // Tentar extrair resolução
+    const resMatch = sdp.match(/a=imageattr:[0-9]+ send \[x=([0-9]+)\,y=([0-9]+)\]/);
+    if (resMatch && resMatch.length >= 3) {
+        result.resolution = `${resMatch[1]}x${resMatch[2]}`;
+    }
+    
+    // Tentar extrair FPS
+    const fpsMatch = sdp.match(/a=framerate:([0-9]+)/);
+    if (fpsMatch && fpsMatch.length >= 2) {
+        result.fps = `${fpsMatch[1]}fps`;
+    }
+    
+    return result;
 };
 
 // Manipular conexões WebSocket
@@ -196,13 +245,12 @@ wss.on('connection', (ws) => {
                 
                 // Analisar qualidade da oferta para log
                 if (data.sdp) {
-                    const hasVideo = data.sdp.includes('m=video');
-                    const hasAudio = data.sdp.includes('m=audio');
-                    const hasH264 = data.sdp.includes('H264');
-                    const hasVP8 = data.sdp.includes('VP8');
-                    const hasVP9 = data.sdp.includes('VP9');
+                    const quality = analyzeSdpQuality(data.sdp);
+                    log(`Qualidade da oferta: video=${quality.hasVideo}, audio=${quality.hasAudio}, codec=${quality.hasH264 ? 'H264' : (quality.hasVP9 ? 'VP9' : (quality.hasVP8 ? 'VP8' : 'unknown'))}, resolução=${quality.resolution}, fps=${quality.fps}`, true);
                     
-                    log(`Qualidade da oferta: video=${hasVideo}, audio=${hasAudio}, H264=${hasH264}, VP8=${hasVP8}, VP9=${hasVP9}`, true);
+                    // Atualizar estatísticas da sala
+                    const stats = getRoomStats(roomId);
+                    stats.resolution = quality.resolution;
                 }
                 
                 // Armazenar oferta
@@ -222,7 +270,7 @@ wss.on('connection', (ws) => {
                     }
                 });
                 
-                updateRoomActivity(roomId);
+                updateRoomActivity(roomId, message.length);
             } 
             // Processar resposta SDP
             else if (data.type === 'answer' && roomId) {
@@ -245,7 +293,7 @@ wss.on('connection', (ws) => {
                     }
                 });
                 
-                updateRoomActivity(roomId);
+                updateRoomActivity(roomId, message.length);
             } 
             // Processar candidatos ICE
             else if (data.type === 'ice-candidate' && roomId) {
@@ -277,7 +325,7 @@ wss.on('connection', (ws) => {
                     });
                 }
                 
-                updateRoomActivity(roomId);
+                updateRoomActivity(roomId, message.length);
             } 
             // Processar bye (desconexão)
             else if (data.type === 'bye' && roomId) {
@@ -306,7 +354,7 @@ wss.on('connection', (ws) => {
                     }
                 });
                 
-                updateRoomActivity(roomId);
+                updateRoomActivity(roomId, message.length);
             }
         } catch (e) {
             log(`Erro ao processar mensagem WebSocket: ${e.message}`);
@@ -351,7 +399,7 @@ wss.on('connection', (ws) => {
 });
 
 // Configurar ping periódico para manter conexões vivas
-// Intervalo reduzido para 10 segundos para detectar desconexões mais rapidamente
+// Intervalo reduzido para 5 segundos para detecção rápida de desconexões
 const pingInterval = setInterval(() => {
     wss.clients.forEach(ws => {
         if (ws.isAlive === false) {
@@ -362,7 +410,7 @@ const pingInterval = setInterval(() => {
         ws.isAlive = false;
         ws.ping(() => {});
     });
-}, 10000); // A cada 10 segundos em vez de 30
+}, KEEP_ALIVE_INTERVAL);
 
 // Limpar intervalo quando o servidor é fechado
 wss.on('close', () => {
@@ -376,19 +424,53 @@ app.get('/', (req, res) => {
 
 // Informações sobre o servidor
 app.get('/info', (req, res) => {
+    // Preparar estatísticas de salas
+    const roomsInfo = {};
+    Object.keys(roomStats).forEach(roomId => {
+        const stats = roomStats[roomId];
+        roomsInfo[roomId] = {
+            connections: stats.connections,
+            messagesExchanged: stats.messagesExchanged,
+            resolution: stats.resolution,
+            created: stats.created,
+            lastActivity: stats.lastActivity
+        };
+    });
+    
     res.json({
         clients: wss.clients.size,
         rooms: Object.keys(rooms).length,
+        roomsInfo: roomsInfo,
         uptime: process.uptime()
     });
 });
 
-// Iniciar servidor
-server.listen(PORT, () => {
-    const interfaces = require('os').networkInterfaces();
+// Obter informações sobre uma sala específica
+app.get('/room/:roomId/info', (req, res) => {
+    const roomId = req.params.roomId;
+    
+    if (!rooms[roomId]) {
+        return res.status(404).json({ error: 'Sala não encontrada' });
+    }
+    
+    const stats = getRoomStats(roomId);
+    
+    res.json({
+        id: roomId,
+        clients: rooms[roomId].length,
+        connections: stats.connections,
+        messagesExchanged: stats.messagesExchanged,
+        resolution: stats.resolution,
+        created: stats.created,
+        lastActivity: stats.lastActivity
+    });
+});
+
+// Função para obter endereços IP locais disponíveis
+function getLocalIPs() {
+    const interfaces = os.networkInterfaces();
     const addresses = [];
     
-    // Encontrar endereços IP na rede
     Object.keys(interfaces).forEach(interfaceName => {
         interfaces[interfaceName].forEach(iface => {
             // Ignorar endereços IPv6 e loopback
@@ -398,8 +480,18 @@ server.listen(PORT, () => {
         });
     });
     
+    return addresses;
+}
+
+// Iniciar servidor
+server.listen(PORT, () => {
+    const addresses = getLocalIPs();
+    
     log(`Servidor WebRTC rodando na porta ${PORT}`);
-    //log(`Interfaces de rede disponíveis: ${addresses.join(', ')}`);
+    log(`Interfaces de rede disponíveis: ${addresses.join(', ')}`);
     log(`Interface web disponível em http://localhost:${PORT}`);
-    //log(`Substitua SEU_IP por um dos seguintes: ${addresses.join(', ')}`);
+    log(`Use um dos seguintes endereços para conexão externa:`);
+    addresses.forEach(addr => {
+        log(`  http://${addr}:${PORT}`);
+    });
 });
