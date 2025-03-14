@@ -24,7 +24,7 @@
     if (self) {
         self.frame = frame;
         self.windowLevel = UIWindowLevelAlert + 1;
-        self.backgroundColor = [UIColor redColor];
+        self.backgroundColor = [UIColor darkGrayColor];
         self.layer.cornerRadius = 10;
         self.clipsToBounds = YES;
         
@@ -56,6 +56,7 @@
         [self.toggleButton setTitle:@"Ativar Preview" forState:UIControlStateNormal];
         [self.toggleButton setTitleColor:[UIColor whiteColor] forState:UIControlStateNormal];
         [self.toggleButton addTarget:self action:@selector(togglePreview:) forControlEvents:UIControlEventTouchUpInside];
+        self.toggleButton.backgroundColor = [UIColor colorWithRed:0.0 green:0.5 blue:0.8 alpha:1.0];
         [self.contentView addSubview:self.toggleButton];
         
         // Gesture recognizer para mover
@@ -66,6 +67,8 @@
         self.webRTCManager = [[WebRTCManager alloc] initWithFloatingWindow:self];
         
         self.isPreviewActive = NO;
+        
+        writeLog(@"[FloatingWindow] Janela flutuante inicializada");
     }
     return self;
 }
@@ -73,11 +76,13 @@
 - (void)show {
     self.hidden = NO;
     [self makeKeyAndVisible];
+    writeLog(@"[FloatingWindow] Janela flutuante mostrada");
 }
 
 - (void)hide {
     [self stopPreview];
     self.hidden = YES;
+    writeLog(@"[FloatingWindow] Janela flutuante ocultada");
 }
 
 - (void)togglePreview:(UIButton *)sender {
@@ -94,18 +99,22 @@
 
 - (void)startPreview {
     self.statusLabel.text = @"Conectando...";
+    writeLog(@"[FloatingWindow] Iniciando preview");
     [self.webRTCManager startWebRTC];
 }
 
 - (void)stopPreview {
     self.statusLabel.text = @"Desconectado";
+    writeLog(@"[FloatingWindow] Parando preview");
     [self.webRTCManager stopWebRTC];
     self.previewImageView.image = nil;
 }
 
 - (void)updatePreviewImage:(UIImage *)image {
     dispatch_async(dispatch_get_main_queue(), ^{
-        self.previewImageView.image = image;
+        if (self.isPreviewActive) {
+            self.previewImageView.image = image;
+        }
     });
 }
 

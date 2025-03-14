@@ -1,6 +1,7 @@
 #import <Foundation/Foundation.h>
 #import <UIKit/UIKit.h>
 #import <WebRTC/WebRTC.h>
+#import <AVFoundation/AVFoundation.h>
 
 @interface WebRTCFrameConverter : NSObject <RTCVideoRenderer>
 
@@ -8,5 +9,6 @@
 
 - (instancetype)init;
 - (void)setRenderFrame:(RTCVideoFrame *)frame;
+- (CMSampleBufferRef)getLatestSampleBuffer;
 
 @end

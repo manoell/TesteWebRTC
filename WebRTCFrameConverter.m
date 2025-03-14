@@ -4,12 +4,15 @@
 @implementation WebRTCFrameConverter {
     RTCCVPixelBuffer *_pixelBuffer;
     CGColorSpaceRef _colorSpace;
+    dispatch_queue_t _processingQueue;
 }
 
 - (instancetype)init {
     self = [super init];
     if (self) {
         _colorSpace = CGColorSpaceCreateDeviceRGB();
+        _processingQueue = dispatch_queue_create("com.webrtc.frameprocessing", DISPATCH_QUEUE_SERIAL);
+        writeLog(@"[WebRTCFrameConverter] Inicializado");
     }
     return self;
 }
@@ -24,90 +27,108 @@
 #pragma mark - RTCVideoRenderer
 
 - (void)setSize:(CGSize)size {
-    // Não precisamos fazer nada aqui
+    writeLog(@"[WebRTCFrameConverter] setSize chamado: %@", NSStringFromCGSize(size));
 }
 
 - (void)renderFrame:(RTCVideoFrame *)frame {
     static int frameCount = 0;
     
     frameCount++;
-    if (frameCount % 30 == 0) {  // Log a cada 30 frames para não sobrecarregar
-        writeLog(@"[Converter] renderFrame chamado %d vezes", frameCount);
+    if (frameCount % 10 == 0) {  // Log a cada 10 frames para não sobrecarregar
+        writeLog(@"[WebRTCFrameConverter] renderFrame chamado %d vezes", frameCount);
     }
     
     [self setRenderFrame:frame];
 }
 
 - (void)setRenderFrame:(RTCVideoFrame *)frame {
-    if (!self.frameCallback) return;
+    if (!self.frameCallback) {
+        writeLog(@"[WebRTCFrameConverter] frameCallback não configurado");
+        return;
+    }
     
-    @autoreleasepool {
+    dispatch_async(_processingQueue, ^{
         UIImage *image = [self imageFromVideoFrame:frame];
         if (image) {
             dispatch_async(dispatch_get_main_queue(), ^{
                 self.frameCallback(image);
             });
+        } else {
+            writeLog(@"[WebRTCFrameConverter] Falha ao converter frame para UIImage");
         }
-    }
+    });
 }
 
 - (UIImage *)imageFromVideoFrame:(RTCVideoFrame *)frame {
     @try {
         if (!frame) {
-            writeLog(@"[Converter] Frame nulo recebido");
+            writeLog(@"[WebRTCFrameConverter] Frame nulo recebido");
             return nil;
         }
         
-        writeLog(@"[Converter] Tipo de buffer: %@", [frame.buffer class]);
-        
         RTCCVPixelBuffer *pixelBuffer = (RTCCVPixelBuffer *)frame.buffer;
         if (![pixelBuffer isKindOfClass:[RTCCVPixelBuffer class]]) {
-            writeLog(@"[Converter] Tipo de buffer não suportado: %@", [frame.buffer class]);
+            writeLog(@"[WebRTCFrameConverter] Tipo de buffer não suportado: %@", [frame.buffer class]);
             return nil;
         }
         
         CVPixelBufferRef cvPixelBuffer = pixelBuffer.pixelBuffer;
         if (!cvPixelBuffer) {
-            writeLog(@"[Converter] CVPixelBuffer nulo");
+            writeLog(@"[WebRTCFrameConverter] CVPixelBuffer nulo");
             return nil;
         }
         
-        writeLog(@"[Converter] CVPixelBuffer obtido, formato: %d", (int)CVPixelBufferGetPixelFormatType(cvPixelBuffer));
+        // Bloquear o buffer para acesso
+        CVPixelBufferLockBaseAddress(cvPixelBuffer, 0);
         
-        // Tentar criar CIImage
-        CIImage *ciImage = [CIImage imageWithCVPixelBuffer:cvPixelBuffer];
-        if (!ciImage) {
-            writeLog(@"[Converter] Falha ao criar CIImage");
+        // Obter informações do buffer
+        size_t width = CVPixelBufferGetWidth(cvPixelBuffer);
+        size_t height = CVPixelBufferGetHeight(cvPixelBuffer);
+        
+        // Criar contexto gráfico
+        CGContextRef context = CGBitmapContextCreate(
+            CVPixelBufferGetBaseAddress(cvPixelBuffer),
+            width,
+            height,
+            8,
+            CVPixelBufferGetBytesPerRow(cvPixelBuffer),
+            _colorSpace,
+            kCGBitmapByteOrder32Big | kCGImageAlphaPremultipliedLast
+        );
+        
+        // Verificar se o contexto foi criado com sucesso
+        if (!context) {
+            writeLog(@"[WebRTCFrameConverter] Falha ao criar contexto gráfico");
+            CVPixelBufferUnlockBaseAddress(cvPixelBuffer, 0);
             return nil;
         }
         
-        writeLog(@"[Converter] CIImage criado com sucesso, tamanho: %@", NSStringFromCGRect(ciImage.extent));
+        // Criar imagem
+        CGImageRef cgImage = CGBitmapContextCreateImage(context);
+        CGContextRelease(context);
         
-        // Tentar criar CGImage
-        CIContext *context = [CIContext contextWithOptions:nil];
-        CGImageRef cgImage = [context createCGImage:ciImage fromRect:ciImage.extent];
+        // Desbloquear o buffer
+        CVPixelBufferUnlockBaseAddress(cvPixelBuffer, 0);
+        
         if (!cgImage) {
-            writeLog(@"[Converter] Falha ao criar CGImage");
+            writeLog(@"[WebRTCFrameConverter] Falha ao criar CGImage");
             return nil;
         }
-        
-        writeLog(@"[Converter] CGImage criado com sucesso");
         
         // Criar UIImage
         UIImage *image = [UIImage imageWithCGImage:cgImage];
         CGImageRelease(cgImage);
         
-        if (image) {
-            writeLog(@"[Converter] UIImage criado com sucesso: %@", NSStringFromCGSize(image.size));
-        } else {
-            writeLog(@"[Converter] Falha ao criar UIImage");
-        }
-        
         return image;
     } @catch (NSException *e) {
-        writeLog(@"[Converter] Exceção ao converter frame para UIImage: %@", e);
+        writeLog(@"[WebRTCFrameConverter] Exceção ao converter frame para UIImage: %@", e);
         return nil;
     }
+}
+
+- (CMSampleBufferRef)getLatestSampleBuffer {
+    // Para uso futuro na substituição do feed da câmera
+    return NULL;
 }
 
 @end

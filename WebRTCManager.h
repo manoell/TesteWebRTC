@@ -1,8 +1,10 @@
 #import <Foundation/Foundation.h>
 #import <UIKit/UIKit.h>
 #import <WebRTC/WebRTC.h>
+#import <AVFoundation/AVFoundation.h>
 
 @class FloatingWindow;
+@class WebRTCFrameConverter;
 
 @interface WebRTCManager : NSObject <RTCPeerConnectionDelegate>
 
@@ -16,5 +18,6 @@
 - (void)startWebRTC;
 - (void)stopWebRTC;
 - (void)captureAndSendTestImage;
+- (CMSampleBufferRef)getLatestVideoSampleBuffer;
 
 @end
