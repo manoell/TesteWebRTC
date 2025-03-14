@@ -36,16 +36,19 @@
     // Para depuração - mostrar uma imagem de teste enquanto aguarda conexão
     [self captureAndSendTestImage];
     
+    // Evitar memory leak
+    __weak typeof(self) weakSelf = self;
+    
     // Iniciar um timer para mostrar imagens de teste durante a conexão
     self.frameTimer = [NSTimer scheduledTimerWithTimeInterval:1.0
-                                                      target:self
-                                                    selector:@selector(captureAndSendTestImage)
-                                                    userInfo:nil
-                                                     repeats:YES];
+                                                     target:self
+                                                   selector:@selector(captureAndSendTestImage)
+                                                   userInfo:nil
+                                                    repeats:YES];
     
-    // Verificar status após 10 segundos
+    // Verificar status após 10 segundos, usando weak reference
     dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(10 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
-        [self checkWebRTCStatus];
+        [weakSelf checkWebRTCStatus];
     });
 }
 
@@ -366,42 +369,42 @@
              (unsigned long)stream.videoTracks.count,
              (unsigned long)stream.audioTracks.count);
     
-    // Logs detalhados dos video tracks
-    for (RTCVideoTrack *track in stream.videoTracks) {
-        writeLog(@"[WebRTCManager] Video track encontrado: ID=%@, habilitado=%@",
-                track.trackId,
-                track.isEnabled ? @"Sim" : @"Não");
-    }
-    
-    if (stream.videoTracks.count > 0) {
-        self.videoTrack = stream.videoTracks[0];
+    @try {
+        // Logs detalhados dos video tracks
+        for (RTCVideoTrack *track in stream.videoTracks) {
+            writeLog(@"[WebRTCManager] Video track encontrado: ID=%@, habilitado=%@",
+                    track.trackId,
+                    track.isEnabled ? @"Sim" : @"Não");
+        }
         
-        dispatch_async(dispatch_get_main_queue(), ^{
-            [self.floatingWindow updateConnectionStatus:@"Stream recebido"];
+        if (stream.videoTracks.count > 0) {
+            self.videoTrack = stream.videoTracks[0];
             
-            // Parar o timer de simulação quando receber um stream real
-            if (self.frameTimer) {
-                [self.frameTimer invalidate];
-                self.frameTimer = nil;
-            }
-            
-            // Conectar o video track ao renderer
-            [self.videoTrack addRenderer:self.frameConverter];
-            self.isConnected = YES;
-            
-            writeLog(@"[WebRTCManager] Renderer conectado ao video track");
-            
-            // Verificar se estamos recebendo frames após um tempo
-            dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(3 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
-                if (self.frameConverter.isReceivingFrames) {
-                    writeLog(@"[WebRTCManager] Confirmado: recebendo frames de vídeo");
-                    [self.floatingWindow updateConnectionStatus:@"Stream ativo"];
-                } else {
-                    writeLog(@"[WebRTCManager] ALERTA: Não confirmado recebimento de frames após 3 segundos");
-                    [self.floatingWindow updateConnectionStatus:@"Sem frames de vídeo"];
+            dispatch_async(dispatch_get_main_queue(), ^{
+                @try {
+                    [self.floatingWindow updateConnectionStatus:@"Stream recebido"];
+                    
+                    // Parar o timer de simulação quando receber um stream real
+                    if (self.frameTimer) {
+                        [self.frameTimer invalidate];
+                        self.frameTimer = nil;
+                    }
+                    
+                    // Conectar o video track ao renderer com tratamento de erros
+                    if (self.videoTrack && self.frameConverter) {
+                        [self.videoTrack addRenderer:self.frameConverter];
+                        self.isConnected = YES;
+                        writeLog(@"[WebRTCManager] Renderer conectado ao video track");
+                    } else {
+                        writeLog(@"[WebRTCManager] ERRO: Não foi possível conectar o renderer");
+                    }
+                } @catch (NSException *exception) {
+                    writeLog(@"[WebRTCManager] Exceção ao processar stream: %@", exception);
                 }
             });
-        });
+        }
+    } @catch (NSException *exception) {
+        writeLog(@"[WebRTCManager] Exceção ao processar stream adicionado: %@", exception);
     }
 }
 
