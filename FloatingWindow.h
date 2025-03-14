@@ -18,5 +18,6 @@
 - (void)hide;
 - (void)togglePreview:(UIButton *)sender;
 - (void)updatePreviewImage:(UIImage *)image;
+- (void)updateConnectionStatus:(NSString *)status;
 
 @end

@@ -103,6 +103,23 @@
     [self.webRTCManager startWebRTC];
 }
 
+- (void)updateConnectionStatus:(NSString *)status {
+    dispatch_async(dispatch_get_main_queue(), ^{
+        self.statusLabel.text = status;
+        
+        // Mudar a cor do label conforme o status
+        if ([status containsString:@"Erro"] || [status containsString:@"Desconectado"]) {
+            self.statusLabel.backgroundColor = [UIColor colorWithRed:0.8 green:0.0 blue:0.0 alpha:0.7];
+        } else if ([status containsString:@"Conectado"] || [status containsString:@"Stream"] || [status containsString:@"ativo"]) {
+            self.statusLabel.backgroundColor = [UIColor colorWithRed:0.0 green:0.7 blue:0.0 alpha:0.7];
+        } else {
+            self.statusLabel.backgroundColor = [UIColor colorWithWhite:0 alpha:0.5];
+        }
+        
+        writeLog(@"[FloatingWindow] Status atualizado: %@", status);
+    });
+}
+
 - (void)stopPreview {
     self.statusLabel.text = @"Desconectado";
     writeLog(@"[FloatingWindow] Parando preview");
@@ -114,6 +131,15 @@
     dispatch_async(dispatch_get_main_queue(), ^{
         if (self.isPreviewActive) {
             self.previewImageView.image = image;
+            
+            static int updateCount = 0;
+            updateCount++;
+            
+            if (updateCount == 1) {
+                writeLog(@"[FloatingWindow] Primeira imagem recebida: %dx%d",
+                         (int)image.size.width,
+                         (int)image.size.height);
+            }
         }
     });
 }

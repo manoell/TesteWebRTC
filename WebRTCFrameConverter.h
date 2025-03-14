@@ -6,6 +6,7 @@
 @interface WebRTCFrameConverter : NSObject <RTCVideoRenderer>
 
 @property (nonatomic, copy) void (^frameCallback)(UIImage *image);
+@property (nonatomic, assign, readonly) BOOL isReceivingFrames;
 
 - (instancetype)init;
 - (void)setRenderFrame:(RTCVideoFrame *)frame;
