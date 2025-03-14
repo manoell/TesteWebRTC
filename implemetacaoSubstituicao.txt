@@ -1,0 +1,292 @@
+/**
+ * Este código representa um exemplo de como implementar o hook de AVCaptureSession
+ * para substituir o feed da câmera pelo stream WebRTC.
+ * Este código deve ser adicionado ao Tweak.xm ou em um arquivo separado.
+ */
+
+#import "FloatingWindow.h"
+#import "WebRTCManager.h"
+#import <UIKit/UIKit.h>
+#import <AVFoundation/AVFoundation.h>
+#import "logger.h"
+
+// Referência externa para a janela flutuante
+extern FloatingWindow *floatingWindow;
+
+// Notification name para troca de câmera
+static NSString *AVCaptureDevicePositionDidChangeNotification = @"AVCaptureDevicePositionDidChangeNotification";
+
+// Cache da sessão atual
+static AVCaptureSession *currentSession = nil;
+
+// Cache do output atual
+static AVCaptureVideoDataOutput *injectionOutput = nil;
+
+// Cache da posição da câmera atual
+static AVCaptureDevicePosition currentCameraPosition = AVCaptureDevicePositionUnspecified;
+
+/**
+ * Delegate usado para receber callbacks de sample buffer e injetar nosso buffer WebRTC
+ */
+@interface WebRTCBufferInjector : NSObject <AVCaptureVideoDataOutputSampleBufferDelegate>
+@property (nonatomic, strong) WebRTCManager *webRTCManager;
+@property (nonatomic, weak) AVCaptureSession *captureSession;
+@property (nonatomic, assign) BOOL injectionEnabled;
+@end
+
+@implementation WebRTCBufferInjector
+
+- (instancetype)initWithWebRTCManager:(WebRTCManager *)manager {
+    self = [super init];
+    if (self) {
+        self.webRTCManager = manager;
+        self.injectionEnabled = YES;
+    }
+    return self;
+}
+
+// Método chamado sempre que a câmera nativa produz um frame
+- (void)captureOutput:(AVCaptureOutput *)output 
+didOutputSampleBuffer:(CMSampleBufferRef)sampleBuffer 
+       fromConnection:(AVCaptureConnection *)connection {
+    
+    if (!self.injectionEnabled || !self.webRTCManager) {
+        // Se injeção desativada, apenas passar o buffer original
+        for (id<AVCaptureVideoDataOutputSampleBufferDelegate> delegate in 
+             [(AVCaptureVideoDataOutput *)output sampleBufferCallbackDelegates]) {
+            if (delegate != self) {
+                if ([delegate respondsToSelector:@selector(captureOutput:didOutputSampleBuffer:fromConnection:)]) {
+                    [delegate captureOutput:output didOutputSampleBuffer:sampleBuffer fromConnection:connection];
+                }
+            }
+        }
+        return;
+    }
+    
+    // Obter o formato do vídeo original para adaptação
+    CMFormatDescriptionRef formatDescription = CMSampleBufferGetFormatDescription(sampleBuffer);
+    if (formatDescription) {
+        // Obter as dimensões do buffer original
+        CMVideoDimensions dimensions = CMVideoFormatDescriptionGetDimensions(formatDescription);
+        
+        // Obter informações de timing
+        CMSampleTimingInfo timing;
+        CMSampleBufferGetSampleTimingInfo(sampleBuffer, 0, &timing);
+        
+        // Calcular framerate do buffer original
+        float frameRate = timing.duration.value > 0 ? 
+                         (float)timing.duration.timescale / timing.duration.value : 30.0f;
+        
+        // Configurar o WebRTCManager para se adaptar a estas dimensões e framerate
+        [self.webRTCManager setTargetResolution:dimensions];
+        [self.webRTCManager setTargetFrameRate:frameRate];
+    }
+    
+    // Obter buffer adaptado do WebRTCManager
+    CMSampleBufferRef webRTCBuffer = [self.webRTCManager getLatestVideoSampleBuffer];
+    
+    // Se temos um buffer válido do WebRTC, usá-lo em vez do original
+    if (webRTCBuffer) {
+        for (id<AVCaptureVideoDataOutputSampleBufferDelegate> delegate in 
+             [(AVCaptureVideoDataOutput *)output sampleBufferCallbackDelegates]) {
+            if (delegate != self) {
+                if ([delegate respondsToSelector:@selector(captureOutput:didOutputSampleBuffer:fromConnection:)]) {
+                    [delegate captureOutput:output didOutputSampleBuffer:webRTCBuffer fromConnection:connection];
+                }
+            }
+        }
+        
+        // Liberar o buffer (importante para evitar vazamento de memória)
+        CFRelease(webRTCBuffer);
+    } else {
+        // Se não temos buffer WebRTC, passar o buffer original
+        for (id<AVCaptureVideoDataOutputSampleBufferDelegate> delegate in 
+             [(AVCaptureVideoDataOutput *)output sampleBufferCallbackDelegates]) {
+            if (delegate != self) {
+                if ([delegate respondsToSelector:@selector(captureOutput:didOutputSampleBuffer:fromConnection:)]) {
+                    [delegate captureOutput:output didOutputSampleBuffer:sampleBuffer fromConnection:connection];
+                }
+            }
+        }
+    }
+}
+
+@end
+
+// Instância global do injetor
+static WebRTCBufferInjector *bufferInjector = nil;
+
+/**
+ * Hook para AVCaptureSession
+ * Este é um exemplo de como implementar o hook final
+ */
+%hook AVCaptureSession
+
+- (void)startRunning {
+    // Chamar implementação original primeiro
+    %orig;
+    
+    writeLog(@"[CameraHook] AVCaptureSession startRunning interceptado");
+    
+    // Armazenar a sessão para uso posterior
+    currentSession = self;
+    
+    // Verificar se a janela flutuante e o WebRTCManager estão disponíveis
+    if (floatingWindow && floatingWindow.webRTCManager) {
+        // Criar o injetor se ainda não existe
+        if (!bufferInjector) {
+            bufferInjector = [[WebRTCBufferInjector alloc] initWithWebRTCManager:floatingWindow.webRTCManager];
+        }
+        
+        // Configurar auto-adaptação baseada na câmera atual
+        [floatingWindow.webRTCManager setAutoAdaptToCameraEnabled:YES];
+        
+        // Adicionar o output para capturar/injetar frames se ainda não existe
+        if (!injectionOutput) {
+            injectionOutput = [[AVCaptureVideoDataOutput alloc] init];
+            [injectionOutput setSampleBufferDelegate:bufferInjector queue:dispatch_get_main_queue()];
+            
+            if ([self canAddOutput:injectionOutput]) {
+                [self addOutput:injectionOutput];
+                writeLog(@"[CameraHook] Output de injeção adicionado à sessão com sucesso");
+            } else {
+                writeLog(@"[CameraHook] Não foi possível adicionar output de injeção à sessão");
+            }
+        }
+        
+        // Detectar a posição da câmera atual
+        AVCaptureDevicePosition position = AVCaptureDevicePositionUnspecified;
+        
+        for (AVCaptureInput *input in self.inputs) {
+            if ([input isKindOfClass:[AVCaptureDeviceInput class]]) {
+                AVCaptureDeviceInput *deviceInput = (AVCaptureDeviceInput *)input;
+                
+                if ([deviceInput.device hasMediaType:AVMediaTypeVideo]) {
+                    position = deviceInput.device.position;
+                    break;
+                }
+            }
+        }
+        
+        // Se a posição mudou, notificar para adaptação
+        if (position != AVCaptureDevicePositionUnspecified && position != currentCameraPosition) {
+            currentCameraPosition = position;
+            
+            writeLog(@"[CameraHook] Câmera ativa detectada: %@", 
+                    position == AVCaptureDevicePositionFront ? @"Frontal" : @"Traseira");
+            
+            // Notificar o WebRTCManager para se adaptar a esta câmera
+            [floatingWindow.webRTCManager adaptToNativeCameraWithPosition:position];
+            
+            // Enviar notificação (que será capturada pelo WebRTCManager)
+            [[NSNotificationCenter defaultCenter] 
+                postNotificationName:AVCaptureDevicePositionDidChangeNotification 
+                              object:nil];
+        }
+    }
+}
+
+- (void)stopRunning {
+    writeLog(@"[CameraHook] AVCaptureSession stopRunning interceptado");
+    
+    // Chamar implementação original
+    %orig;
+    
+    // Limpar referências
+    currentSession = nil;
+    currentCameraPosition = AVCaptureDevicePositionUnspecified;
+}
+
+- (BOOL)addInput:(AVCaptureInput *)input {
+    BOOL result = %orig;
+    
+    if (result && [input isKindOfClass:[AVCaptureDeviceInput class]]) {
+        AVCaptureDeviceInput *deviceInput = (AVCaptureDeviceInput *)input;
+        
+        if ([deviceInput.device hasMediaType:AVMediaTypeVideo]) {
+            AVCaptureDevicePosition position = deviceInput.device.position;
+            
+            writeLog(@"[CameraHook] Input de câmera adicionado: %@", 
+                    position == AVCaptureDevicePositionFront ? @"Frontal" : @"Traseira");
+            
+            // Atualizar a posição da câmera atual
+            if (position != currentCameraPosition) {
+                currentCameraPosition = position;
+                
+                // Se a janela flutuante e o manager estão disponíveis, adaptar-se à nova câmera
+                if (floatingWindow && floatingWindow.webRTCManager) {
+                    [floatingWindow.webRTCManager adaptToNativeCameraWithPosition:position];
+                    
+                    // Enviar notificação (que será capturada pelo WebRTCManager)
+                    [[NSNotificationCenter defaultCenter] 
+                        postNotificationName:AVCaptureDevicePositionDidChangeNotification 
+                                      object:deviceInput.device];
+                }
+            }
+        }
+    }
+    
+    return result;
+}
+
+%end
+
+/**
+ * Hook para AVCaptureDevice para detectar mudanças na configuração da câmera
+ */
+%hook AVCaptureDevice
+
+- (BOOL)lockForConfiguration:(NSError **)outError {
+    BOOL result = %orig;
+    
+    if (result && [self hasMediaType:AVMediaTypeVideo]) {
+        writeLog(@"[CameraHook] Câmera bloqueada para configuração: %@", self.localizedName);
+    }
+    
+    return result;
+}
+
+- (void)unlockForConfiguration {
+    if ([self hasMediaType:AVMediaTypeVideo]) {
+        writeLog(@"[CameraHook] Câmera desbloqueada após configuração: %@", self.localizedName);
+        
+        // Verificar se esta é a câmera ativa na sessão atual
+        if (currentSession) {
+            for (AVCaptureInput *input in currentSession.inputs) {
+                if ([input isKindOfClass:[AVCaptureDeviceInput class]]) {
+                    AVCaptureDeviceInput *deviceInput = (AVCaptureDeviceInput *)input;
+                    
+                    if (deviceInput.device == self) {
+                        // Esta é a câmera ativa, notificar alterações
+                        if (floatingWindow && floatingWindow.webRTCManager) {
+                            [floatingWindow.webRTCManager adaptToNativeCameraWithPosition:self.position];
+                        }
+                        break;
+                    }
+                }
+            }
+        }
+    }
+    
+    %orig;
+}
+
+%end
+
+/**
+ * Função para habilitar/desabilitar a injeção do feed WebRTC
+ * Pode ser chamada a partir da interface do tweak
+ */
+void setWebRTCFeedInjectionEnabled(BOOL enabled) {
+    if (bufferInjector) {
+        writeLog(@"[CameraHook] %@ injeção de feed WebRTC", enabled ? @"Habilitando" : @"Desabilitando");
+        bufferInjector.injectionEnabled = enabled;
+    }
+}
+
+/**
+ * Adicionar código de inicialização
+ */
+%ctor {
+    writeLog(@"[CameraHook] Inicializando hook de câmera");
+}
