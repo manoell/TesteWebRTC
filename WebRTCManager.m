@@ -31,6 +31,8 @@ static NSString *const AVCaptureDevicePositionDidChangeNotification = @"AVCaptur
         self.isReceivingFrames = NO;
         self.reconnectAttempts = 0;
         self.hasReceivedFirstFrame = NO;
+        
+        // Inicializar o conversor de frame primeiro
         self.frameConverter = [[WebRTCFrameConverter alloc] init];
         
         // Inicializar constraints para mídia de alta qualidade
@@ -39,31 +41,25 @@ static NSString *const AVCaptureDevicePositionDidChangeNotification = @"AVCaptur
             @"OfferToReceiveAudio": @"false"
         }];
         
-        // Configurar o callback do frame converter para atualizar a UI
-        __weak typeof(self) weakSelf = self;
-        self.frameConverter.frameCallback = ^(UIImage *image) {
-            if (!weakSelf.hasReceivedFirstFrame) {
-                weakSelf.hasReceivedFirstFrame = YES;
-                CFTimeInterval timeToFirstFrame = CACurrentMediaTime() - weakSelf.connectionStartTime;
-                writeLog(@"[WebRTCManager] Primeiro frame recebido após %.2f segundos", timeToFirstFrame);
-                
-                dispatch_async(dispatch_get_main_queue(), ^{
-                    [weakSelf.floatingWindow updateConnectionStatus:
-                     [NSString stringWithFormat:@"Stream ativo (%.1fs)", timeToFirstFrame]];
-                });
-            }
-            
-            [weakSelf.floatingWindow updatePreviewImage:image];
-            weakSelf.isReceivingFrames = YES;
-        };
-        
         writeLog(@"[WebRTCManager] WebRTCManager inicializado com configurações para alta qualidade");
     }
     return self;
 }
 
 - (void)startWebRTC {
+    // Verificar se já está em processo de inicialização
+    static BOOL isStarting = NO;
+    if (isStarting) {
+        writeLog(@"[WebRTCManager] Já está em processo de inicialização, ignorando chamada dupla");
+        return;
+    }
+    
+    isStarting = YES;
+    
     writeLog(@"[WebRTCManager] Iniciando WebRTC");
+    
+    // Limpar qualquer instância anterior
+    [self stopWebRTC];
     
     self.connectionStartTime = CACurrentMediaTime();
     self.hasReceivedFirstFrame = NO;
@@ -97,10 +93,28 @@ static NSString *const AVCaptureDevicePositionDidChangeNotification = @"AVCaptur
         
         // Configurar verificações periódicas
         weakSelf.reconnectTimer = [NSTimer scheduledTimerWithTimeInterval:15.0
-                                                               target:weakSelf
-                                                             selector:@selector(periodicStatusCheck)
-                                                             userInfo:nil
-                                                              repeats:YES];
+                                                           target:weakSelf
+                                                         selector:@selector(periodicStatusCheck)
+                                                         userInfo:nil
+                                                          repeats:YES];
+        
+        // Resetar flag de inicialização
+        isStarting = NO;
+    });
+    
+    // Adicionar timeout de segurança
+    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(30 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
+        if (!weakSelf.isConnected) {
+            writeLog(@"[WebRTCManager] Timeout na inicialização do WebRTC após 30 segundos");
+            
+            dispatch_async(dispatch_get_main_queue(), ^{
+                [weakSelf.floatingWindow updateConnectionStatus:@"Timeout na conexão"];
+            });
+            
+            // Reiniciar processo
+            [weakSelf stopWebRTC];
+            isStarting = NO;
+        }
     });
 }
 
@@ -310,6 +324,7 @@ static NSString *const AVCaptureDevicePositionDidChangeNotification = @"AVCaptur
     self.isConnected = NO;
     self.isReceivingFrames = NO;
     
+    // Limpar timers
     if (self.frameTimer) {
         [self.frameTimer invalidate];
         self.frameTimer = nil;
@@ -325,56 +340,125 @@ static NSString *const AVCaptureDevicePositionDidChangeNotification = @"AVCaptur
         self.statsTimer = nil;
     }
     
+    // Limpar track de vídeo
     if (self.videoTrack) {
         [self.videoTrack removeRenderer:self.frameConverter];
         self.videoTrack = nil;
     }
     
-    [self.webSocketTask cancel];
-    self.webSocketTask = nil;
+    // Cancelar WebSocket
+    if (self.webSocketTask) {
+        // Utilizar variável local para evitar race conditions
+        NSURLSessionWebSocketTask *taskToCancel = self.webSocketTask;
+        self.webSocketTask = nil;
+        [taskToCancel cancel];
+    }
     
+    // Liberar sessão
+    if (self.session) {
+        NSURLSession *sessionToInvalidate = self.session;
+        self.session = nil;
+        [sessionToInvalidate invalidateAndCancel];
+    }
+    
+    // Fechar conexão peer
     if (self.peerConnection) {
-        [self.peerConnection close];
+        RTCPeerConnection *connectionToClose = self.peerConnection;
         self.peerConnection = nil;
+        [connectionToClose close];
     }
     
     // Liberar fábrica
     self.factory = nil;
+    
+    // Atualizar UI
+    dispatch_async(dispatch_get_main_queue(), ^{
+        [self.floatingWindow updateConnectionStatus:@"Desconectado"];
+    });
 }
 
 - (void)connectWebSocket {
     writeLog(@"[WebRTCManager] Conectando ao WebSocket");
     
-    // Atualizar para seu IP real - importante que seja acessível do dispositivo iOS
-    NSURL *url = [NSURL URLWithString:@"ws://192.168.0.178:8080"];
+    // Cancelar qualquer tarefa WebSocket existente
+    if (self.webSocketTask) {
+        [self.webSocketTask cancel];
+        self.webSocketTask = nil;
+    }
     
+    // Cancelar sessão existente
+    if (self.session) {
+        [self.session invalidateAndCancel];
+        self.session = nil;
+    }
+    
+    // Criar nova sessão e tarefa WebSocket
     NSURLSessionConfiguration *config = [NSURLSessionConfiguration defaultSessionConfiguration];
-    config.timeoutIntervalForRequest = 30.0;  // Aumentar timeout para 30 segundos
-    config.timeoutIntervalForResource = 60.0; // Timeout total de 60 segundos
+    config.timeoutIntervalForRequest = 30.0;
+    config.timeoutIntervalForResource = 60.0;
     
     self.session = [NSURLSession sessionWithConfiguration:config delegate:self delegateQueue:nil];
     
+    NSURL *url = [NSURL URLWithString:@"ws://192.168.0.178:8080"];
     NSURLRequest *request = [NSURLRequest requestWithURL:url];
     self.webSocketTask = [self.session webSocketTaskWithRequest:request];
-    [self.webSocketTask resume];
     
+    // Importante: primeiro começar a receber mensagens e DEPOIS iniciar
+    // Isso evita perder mensagens entre a inicialização e o registro do handler
     [self receiveMessage];
+    [self.webSocketTask resume];
     
     dispatch_async(dispatch_get_main_queue(), ^{
         [self.floatingWindow updateConnectionStatus:@"Conectando ao servidor..."];
     });
 }
 
+- (void)recoverFromSignalingError {
+    writeLog(@"[WebRTCManager] Tentando recuperar de erro de sinalização");
+    
+    // Usar um timer para evitar loops infinitos de recuperação
+    static NSTimeInterval lastRecoveryAttempt = 0;
+    NSTimeInterval now = CACurrentMediaTime();
+    
+    if (now - lastRecoveryAttempt < 5.0) {
+        writeLog(@"[WebRTCManager] Ignorando tentativa de recuperação muito rápida");
+        return;
+    }
+    
+    lastRecoveryAttempt = now;
+    
+    // Reiniciar completamente a conexão WebRTC
+    [self stopWebRTC];
+    
+    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(2 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
+        [self startWebRTC];
+    });
+}
+
 - (void)receiveMessage {
-    if (!self.webSocketTask) return;
+    if (!self.webSocketTask || self.webSocketTask.state != NSURLSessionTaskStateRunning) {
+        writeLog(@"[WebRTCManager] WebSocket não está ativo, não é possível receber mensagens");
+        return;
+    }
     
     __weak typeof(self) weakSelf = self;
     [self.webSocketTask receiveMessageWithCompletionHandler:^(NSURLSessionWebSocketMessage * _Nullable message, NSError * _Nullable error) {
         if (error) {
             writeLog(@"[WebRTCManager] WebSocket erro: %@", error);
-            dispatch_async(dispatch_get_main_queue(), ^{
-                [weakSelf.floatingWindow updateConnectionStatus:[NSString stringWithFormat:@"Erro WebSocket: %@", error.localizedDescription]];
-            });
+            
+            // Verificar se é um erro fatal ou de cancelamento
+            if ([error.domain isEqualToString:NSURLErrorDomain] &&
+                error.code != NSURLErrorCancelled) {
+                
+                dispatch_async(dispatch_get_main_queue(), ^{
+                    [weakSelf.floatingWindow updateConnectionStatus:[NSString stringWithFormat:@"Erro WebSocket: %@", error.localizedDescription]];
+                    
+                    // Tentar reconectar após erro
+                    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(2 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
+                        [weakSelf connectWebSocket];
+                    });
+                });
+            }
             return;
         }
         
@@ -394,75 +478,100 @@ static NSString *const AVCaptureDevicePositionDidChangeNotification = @"AVCaptur
             NSString *type = json[@"type"];
             writeLog(@"[WebRTCManager] Mensagem recebida: %@", type);
             
-            // Vamos imprimir mais detalhes sobre a oferta SDP para depuração
-            if ([type isEqualToString:@"offer"]) {
-                NSString *sdp = json[@"sdp"];
-                writeLog(@"[WebRTCManager] Oferta SDP recebida, primeiros 100 chars: %@",
-                         [sdp substringToIndex:MIN(100, sdp.length)]);
-                
-                // Verificar se a oferta contém audio e video
-                BOOL hasAudio = [sdp containsString:@"m=audio"];
-                BOOL hasVideo = [sdp containsString:@"m=video"];
-                writeLog(@"[WebRTCManager] A oferta contém audio: %@, video: %@",
-                         hasAudio ? @"Sim" : @"Não",
-                         hasVideo ? @"Sim" : @"Não");
-                
-                // Verificar codecs
-                NSArray *codecs = @[@"H264", @"VP8", @"VP9", @"AV1"];
-                for (NSString *codec in codecs) {
-                    if ([sdp containsString:codec]) {
-                        writeLog(@"[WebRTCManager] Codec %@ encontrado na oferta", codec);
-                    }
-                }
-                
-                // Verificar perfil H264 (para alta qualidade)
-                if ([sdp containsString:@"profile-level-id"]) {
-                    NSRegularExpression *regex = [NSRegularExpression regularExpressionWithPattern:@"profile-level-id=([0-9a-fA-F]+)" options:0 error:nil];
-                    NSArray *matches = [regex matchesInString:sdp options:0 range:NSMakeRange(0, sdp.length)];
-                    
-                    for (NSTextCheckingResult *match in matches) {
-                        if ([match numberOfRanges] >= 2) {
-                            NSRange profileRange = [match rangeAtIndex:1];
-                            NSString *profileId = [sdp substringWithRange:profileRange];
-                            writeLog(@"[WebRTCManager] Perfil H264 encontrado: %@", profileId);
-                        }
-                    }
-                }
-                
-                [weakSelf handleOfferWithSDP:sdp];
-            }
-            else if ([type isEqualToString:@"ice-candidate"]) {
-                NSString *sdp = json[@"candidate"];
-                NSString *sdpMid = json[@"sdpMid"];
-                NSNumber *sdpMLineIndex = json[@"sdpMLineIndex"];
-                
-                if (!sdp || !sdpMid || !sdpMLineIndex) {
-                    writeLog(@"[WebRTCManager] Candidato ICE inválido recebido");
-                    [weakSelf receiveMessage];
-                    return;
-                }
-                
-                RTCIceCandidate *candidate = [[RTCIceCandidate alloc] initWithSdp:sdp sdpMLineIndex:[sdpMLineIndex intValue] sdpMid:sdpMid];
-                writeLog(@"[WebRTCManager] Adicionando candidato ICE: %@, mid: %@",
-                         [sdp substringToIndex:MIN(50, sdp.length)], sdpMid);
-                
-                [weakSelf.peerConnection addIceCandidate:candidate completionHandler:^(NSError * _Nullable error) {
-                    if (error) {
-                        writeLog(@"[WebRTCManager] Erro ao adicionar candidato ICE: %@", error);
+            // Processar mensagem com tratamento de erros adequado
+            @try {
+                if ([type isEqualToString:@"offer"]) {
+                    NSString *sdp = json[@"sdp"];
+                    if (!sdp || ![sdp isKindOfClass:[NSString class]]) {
+                        writeLog(@"[WebRTCManager] Oferta SDP inválida recebida");
                     } else {
-                        writeLog(@"[WebRTCManager] Candidato ICE adicionado com sucesso");
+                        writeLog(@"[WebRTCManager] Oferta SDP recebida, primeiros 100 chars: %@",
+                                [sdp substringToIndex:MIN(100, sdp.length)]);
+                        
+                        // Verificar se a oferta contém audio e video
+                        BOOL hasAudio = [sdp containsString:@"m=audio"];
+                        BOOL hasVideo = [sdp containsString:@"m=video"];
+                        writeLog(@"[WebRTCManager] A oferta contém audio: %@, video: %@",
+                                hasAudio ? @"Sim" : @"Não",
+                                hasVideo ? @"Sim" : @"Não");
+                        
+                        // Verificar codecs
+                        NSArray *codecs = @[@"H264", @"VP8", @"VP9", @"AV1"];
+                        for (NSString *codec in codecs) {
+                            if ([sdp containsString:codec]) {
+                                writeLog(@"[WebRTCManager] Codec %@ encontrado na oferta", codec);
+                            }
+                        }
+                        
+                        // Verificar perfil H264 (para alta qualidade)
+                        if ([sdp containsString:@"profile-level-id"]) {
+                            NSRegularExpression *regex = [NSRegularExpression regularExpressionWithPattern:@"profile-level-id=([0-9a-fA-F]+)" options:0 error:nil];
+                            NSArray *matches = [regex matchesInString:sdp options:0 range:NSMakeRange(0, sdp.length)];
+                            
+                            for (NSTextCheckingResult *match in matches) {
+                                if ([match numberOfRanges] >= 2) {
+                                    NSRange profileRange = [match rangeAtIndex:1];
+                                    NSString *profileId = [sdp substringWithRange:profileRange];
+                                    writeLog(@"[WebRTCManager] Perfil H264 encontrado: %@", profileId);
+                                }
+                            }
+                        }
+                        
+                        // Processamento da oferta em thread principal para evitar problemas
+                        dispatch_async(dispatch_get_main_queue(), ^{
+                            [weakSelf handleOfferWithSDP:sdp];
+                        });
                     }
-                }];
+                }
+                else if ([type isEqualToString:@"ice-candidate"]) {
+                    NSString *sdp = json[@"candidate"];
+                    NSString *sdpMid = json[@"sdpMid"];
+                    NSNumber *sdpMLineIndex = json[@"sdpMLineIndex"];
+                    
+                    if (!sdp || !sdpMid || !sdpMLineIndex) {
+                        writeLog(@"[WebRTCManager] Candidato ICE inválido recebido");
+                    } else {
+                        RTCIceCandidate *candidate = [[RTCIceCandidate alloc] initWithSdp:sdp sdpMLineIndex:[sdpMLineIndex intValue] sdpMid:sdpMid];
+                        writeLog(@"[WebRTCManager] Adicionando candidato ICE: %@, mid: %@",
+                                [sdp substringToIndex:MIN(50, sdp.length)], sdpMid);
+                        
+                        // Adicionar candidato na thread principal para evitar problemas
+                        dispatch_async(dispatch_get_main_queue(), ^{
+                            if (weakSelf.peerConnection && weakSelf.peerConnection.signalingState != RTCSignalingStateClosed) {
+                                [weakSelf.peerConnection addIceCandidate:candidate completionHandler:^(NSError * _Nullable error) {
+                                    if (error) {
+                                        writeLog(@"[WebRTCManager] Erro ao adicionar candidato ICE: %@", error);
+                                    } else {
+                                        writeLog(@"[WebRTCManager] Candidato ICE adicionado com sucesso");
+                                    }
+                                }];
+                            } else {
+                                writeLog(@"[WebRTCManager] Impossível adicionar candidato ICE: conexão fechada ou nula");
+                            }
+                        });
+                    }
+                }
+            } @catch (NSException *exception) {
+                writeLog(@"[WebRTCManager] Exceção ao processar mensagem: %@", exception);
             }
         }
         
-        // Continuar recebendo mensagens
-        [weakSelf receiveMessage];
+        // Continuar recebendo mensagens se a tarefa WebSocket ainda estiver ativa
+        if (weakSelf.webSocketTask && weakSelf.webSocketTask.state == NSURLSessionTaskStateRunning) {
+            [weakSelf receiveMessage];
+        }
     }];
 }
 
 - (void)handleOfferWithSDP:(NSString *)sdp {
     writeLog(@"[WebRTCManager] Analisando oferta SDP...");
+    
+    // Evitar processamento duplicado verificando estado
+    if (self.peerConnection.signalingState != RTCSignalingStateStable) {
+        writeLog(@"[WebRTCManager] Ignorando oferta SDP - estado atual não é estável: %@",
+                [self signalingStateToString:self.peerConnection.signalingState]);
+        return;
+    }
     
     dispatch_async(dispatch_get_main_queue(), ^{
         [self.floatingWindow updateConnectionStatus:@"Processando oferta..."];
@@ -476,7 +585,7 @@ static NSString *const AVCaptureDevicePositionDidChangeNotification = @"AVCaptur
     BOOL hasVP8 = NO;
     BOOL hasVP9 = NO;
     
-    // Análise mais detalhada da SDP
+    // Análise da SDP
     for (NSString *line in lines) {
         if ([line hasPrefix:@"m=video"]) {
             hasVideoMedia = YES;
@@ -501,7 +610,7 @@ static NSString *const AVCaptureDevicePositionDidChangeNotification = @"AVCaptur
                 writeLog(@"[WebRTCManager] Codec VP9 encontrado: %@", line);
             }
             
-            // Verificar perfil H264 (indicativo de suporte a alta resolução)
+            // Verificar perfil H264
             if ([line hasPrefix:@"a=fmtp:"] && [line containsString:@"profile-level-id="]) {
                 writeLog(@"[WebRTCManager] Parâmetros de formato H264: %@", line);
             }
@@ -513,6 +622,7 @@ static NSString *const AVCaptureDevicePositionDidChangeNotification = @"AVCaptur
         dispatch_async(dispatch_get_main_queue(), ^{
             [self.floatingWindow updateConnectionStatus:@"Erro: Sem vídeo na oferta"];
         });
+        return; // Adicionado para evitar processamento de oferta inválida
     }
     
     if (!hasVideoCodec) {
@@ -520,6 +630,7 @@ static NSString *const AVCaptureDevicePositionDidChangeNotification = @"AVCaptur
         dispatch_async(dispatch_get_main_queue(), ^{
             [self.floatingWindow updateConnectionStatus:@"Erro: Codec de vídeo não suportado"];
         });
+        return; // Adicionado para evitar processamento de oferta inválida
     } else {
         // Log dos codecs encontrados
         writeLog(@"[WebRTCManager] Suporte a codecs: H264=%@, VP8=%@, VP9=%@",
@@ -528,7 +639,7 @@ static NSString *const AVCaptureDevicePositionDidChangeNotification = @"AVCaptur
                 hasVP9 ? @"Sim" : @"Não");
     }
     
-    // Modificar SDP para forçar alta qualidade, se necessário
+    // Modificar SDP para forçar alta qualidade
     NSString *modifiedSdp = [self enhanceSdpForHighQuality:sdp];
     
     // Continuar com o processamento da oferta modificada
@@ -549,7 +660,7 @@ static NSString *const AVCaptureDevicePositionDidChangeNotification = @"AVCaptur
             [weakSelf.floatingWindow updateConnectionStatus:@"Descrição remota OK"];
         });
         
-        // Configurações específicas para a resposta
+        // Configurações para a resposta
         NSDictionary *mandatoryConstraints = [weakSelf.sdpMediaConstraints copy];
         
         RTCMediaConstraints *constraints = [[RTCMediaConstraints alloc]
@@ -570,7 +681,7 @@ static NSString *const AVCaptureDevicePositionDidChangeNotification = @"AVCaptur
                 [weakSelf.floatingWindow updateConnectionStatus:@"Enviando resposta..."];
             });
             
-            // Analisar a resposta SDP gerada
+            // Analisar a resposta SDP
             NSString *answerSdp = answer.sdp;
             BOOL responseHasVideo = [answerSdp containsString:@"m=video"];
             writeLog(@"[WebRTCManager] A resposta SDP contém vídeo: %@",
@@ -591,12 +702,25 @@ static NSString *const AVCaptureDevicePositionDidChangeNotification = @"AVCaptur
                                                     initWithType:RTCSdpTypeAnswer
                                                            sdp:optimizedAnswerSdp];
             
+            // Verificar estado antes de definir a descrição local
+            if (weakSelf.peerConnection.signalingState != RTCSignalingStateHaveRemoteOffer) {
+                writeLog(@"[WebRTCManager] Erro: Estado inesperado antes de setLocalDescription: %@",
+                         [weakSelf signalingStateToString:weakSelf.peerConnection.signalingState]);
+                dispatch_async(dispatch_get_main_queue(), ^{
+                    [weakSelf.floatingWindow updateConnectionStatus:@"Erro de estado de sinalização"];
+                });
+                return;
+            }
+            
             [weakSelf.peerConnection setLocalDescription:optimizedAnswer completionHandler:^(NSError *error) {
                 if (error) {
                     writeLog(@"[WebRTCManager] Erro setLocalDescription: %@", error);
                     dispatch_async(dispatch_get_main_queue(), ^{
                         [weakSelf.floatingWindow updateConnectionStatus:@"Erro na descrição local"];
                     });
+                    
+                    // Tentar recuperar de erro de estado
+                    [weakSelf recoverFromSignalingError];
                     return;
                 }
                 
@@ -694,57 +818,66 @@ static NSString *const AVCaptureDevicePositionDidChangeNotification = @"AVCaptur
     if (self.isConnected && self.isReceivingFrames) return;
     
     // Para testes - enviar uma imagem gerada para a visualização
-    UIGraphicsBeginImageContextWithOptions(CGSizeMake(320, 240), YES, 0);
-    CGContextRef context = UIGraphicsGetCurrentContext();
-    
-    // Fundo preto
-    CGContextSetFillColorWithColor(context, [UIColor blackColor].CGColor);
-    CGContextFillRect(context, CGRectMake(0, 0, 320, 240));
-    
-    // Desenhar texto de timestamp
-    NSString *timestamp = [NSDateFormatter localizedStringFromDate:[NSDate date]
-                                                        dateStyle:NSDateFormatterShortStyle
-                                                        timeStyle:NSDateFormatterMediumStyle];
-    NSMutableParagraphStyle *paragraphStyle = [[NSMutableParagraphStyle alloc] init];
-    paragraphStyle.alignment = NSTextAlignmentCenter;
-    
-    NSDictionary *attributes = @{
-        NSFontAttributeName: [UIFont systemFontOfSize:16],
-        NSForegroundColorAttributeName: [UIColor whiteColor],
-        NSParagraphStyleAttributeName: paragraphStyle
-    };
-    
-    [timestamp drawInRect:CGRectMake(20, 100, 280, 40) withAttributes:attributes];
-    
-    // Status da conexão
-    NSString *statusText;
-    if (self.isConnected) {
-        if (self.isReceivingFrames) {
-            statusText = @"Conectado - Recebendo quadros";
-        } else {
-            statusText = @"Conectado - Aguardando vídeo";
+    @autoreleasepool {
+        CGSize size = CGSizeMake(320, 240);
+        UIGraphicsBeginImageContextWithOptions(size, YES, 0);
+        CGContextRef context = UIGraphicsGetCurrentContext();
+        
+        // Verificar se o contexto foi criado corretamente
+        if (!context) {
+            writeLog(@"[WebRTCManager] Falha ao criar contexto gráfico para imagem de teste");
+            return;
         }
-    } else {
-        statusText = @"Desconectado - Aguardando conexão";
-    }
-    
-    [statusText drawInRect:CGRectMake(20, 150, 280, 40) withAttributes:attributes];
-    
-    // Desenhar um círculo colorido que muda
-    static float hue = 0.0;
-    UIColor *color = [UIColor colorWithHue:hue saturation:1.0 brightness:1.0 alpha:1.0];
-    CGContextSetFillColorWithColor(context, color.CGColor);
-    CGContextFillEllipseInRect(context, CGRectMake(135, 40, 50, 50));
-    hue += 0.05;
-    if (hue > 1.0) hue = 0.0;
-    
-    UIImage *image = UIGraphicsGetImageFromCurrentImageContext();
-    UIGraphicsEndImageContext();
-    
-    if (!self.isConnected || !self.isReceivingFrames) {
-        dispatch_async(dispatch_get_main_queue(), ^{
-            [self.floatingWindow updatePreviewImage:image];
-        });
+        
+        // Fundo preto
+        CGContextSetFillColorWithColor(context, [UIColor blackColor].CGColor);
+        CGContextFillRect(context, CGRectMake(0, 0, size.width, size.height));
+        
+        // Desenhar texto de timestamp
+        NSString *timestamp = [NSDateFormatter localizedStringFromDate:[NSDate date]
+                                                            dateStyle:NSDateFormatterShortStyle
+                                                            timeStyle:NSDateFormatterMediumStyle];
+        NSMutableParagraphStyle *paragraphStyle = [[NSMutableParagraphStyle alloc] init];
+        paragraphStyle.alignment = NSTextAlignmentCenter;
+        
+        NSDictionary *attributes = @{
+            NSFontAttributeName: [UIFont systemFontOfSize:16],
+            NSForegroundColorAttributeName: [UIColor whiteColor],
+            NSParagraphStyleAttributeName: paragraphStyle
+        };
+        
+        [timestamp drawInRect:CGRectMake(20, 100, 280, 40) withAttributes:attributes];
+        
+        // Status da conexão
+        NSString *statusText;
+        if (self.isConnected) {
+            if (self.isReceivingFrames) {
+                statusText = @"Conectado - Recebendo quadros";
+            } else {
+                statusText = @"Conectado - Aguardando vídeo";
+            }
+        } else {
+            statusText = @"Desconectado - Aguardando conexão";
+        }
+        
+        [statusText drawInRect:CGRectMake(20, 150, 280, 40) withAttributes:attributes];
+        
+        // Desenhar um círculo colorido que muda
+        static float hue = 0.0;
+        UIColor *color = [UIColor colorWithHue:hue saturation:1.0 brightness:1.0 alpha:1.0];
+        CGContextSetFillColorWithColor(context, color.CGColor);
+        CGContextFillEllipseInRect(context, CGRectMake(135, 40, 50, 50));
+        hue += 0.05;
+        if (hue > 1.0) hue = 0.0;
+        
+        UIImage *image = UIGraphicsGetImageFromCurrentImageContext();
+        UIGraphicsEndImageContext();
+        
+        if (!self.isConnected || !self.isReceivingFrames) {
+            dispatch_async(dispatch_get_main_queue(), ^{
+                [self.floatingWindow updatePreviewImage:image];
+            });
+        }
     }
 }
 
@@ -836,6 +969,12 @@ static NSString *const AVCaptureDevicePositionDidChangeNotification = @"AVCaptur
         }
         
         if (stream.videoTracks.count > 0) {
+            // IMPORTANTE: Remover qualquer track de vídeo anterior
+            if (self.videoTrack) {
+                [self.videoTrack removeRenderer:self.frameConverter];
+                self.videoTrack = nil;
+            }
+            
             self.videoTrack = stream.videoTracks[0];
             
             dispatch_async(dispatch_get_main_queue(), ^{
@@ -848,27 +987,67 @@ static NSString *const AVCaptureDevicePositionDidChangeNotification = @"AVCaptur
                         self.frameTimer = nil;
                     }
                     
-                    // Conectar o video track ao renderer com tratamento de erros
-                    if (self.videoTrack && self.frameConverter) {
-                        // Remover primeiro para garantir que não há conexão duplicada
-                        [self.videoTrack removeRenderer:self.frameConverter];
-                        
-                        // Adicionar o renderer
-                        [self.videoTrack addRenderer:self.frameConverter];
-                        self.isConnected = YES;
-                        writeLog(@"[WebRTCManager] Renderer conectado ao video track");
-                        
-                        // Verificar recebimento de frames após um delay
-                        dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(3 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
-                            if (!self.isReceivingFrames) {
-                                writeLog(@"[WebRTCManager] Aviso: Video track conectado mas não está recebendo frames.");
-                                [self.floatingWindow updateConnectionStatus:@"Sem recebimento de frames"];
-                            }
-                        });
-                    } else {
-                        writeLog(@"[WebRTCManager] ERRO: Não foi possível conectar o renderer");
-                        [self.floatingWindow updateConnectionStatus:@"Erro ao conectar renderer"];
+                    // Verificar se o track e converter são válidos
+                    if (!self.videoTrack || !self.frameConverter) {
+                        writeLog(@"[WebRTCManager] ERRO: VideoTrack ou FrameConverter é nulo!");
+                        [self.floatingWindow updateConnectionStatus:@"Erro: componentes nulos"];
+                        return;
                     }
+                    
+                    // Limpar qualquer renderer anterior
+                    [self.videoTrack removeRenderer:self.frameConverter];
+                    
+                    // Configurar o callback do frame converter ANTES de adicionar o renderer
+                    __weak typeof(self) weakSelf = self;
+                    self.frameConverter.frameCallback = ^(UIImage *image) {
+                        // Verificar existência da imagem
+                        if (!image) {
+                            writeLog(@"[WebRTCManager] AVISO: Imagem recebida é nula");
+                            return;
+                        }
+                        
+                        // Verificar tamanho da imagem
+                        if (image.size.width <= 0 || image.size.height <= 0) {
+                            writeLog(@"[WebRTCManager] AVISO: Imagem com dimensões inválidas: %@",
+                                    NSStringFromCGSize(image.size));
+                            return;
+                        }
+                        
+                        // Atualizar flag e status
+                        weakSelf.isReceivingFrames = YES;
+                        
+                        if (!weakSelf.hasReceivedFirstFrame) {
+                            weakSelf.hasReceivedFirstFrame = YES;
+                            CFTimeInterval timeToFirstFrame = CACurrentMediaTime() - weakSelf.connectionStartTime;
+                            writeLog(@"[WebRTCManager] Primeiro frame recebido após %.2f segundos", timeToFirstFrame);
+                            
+                            dispatch_async(dispatch_get_main_queue(), ^{
+                                [weakSelf.floatingWindow updateConnectionStatus:
+                                 [NSString stringWithFormat:@"Stream ativo (%.1fs)", timeToFirstFrame]];
+                            });
+                        }
+                        
+                        // Enviar a imagem para a FloatingWindow
+                        [weakSelf.floatingWindow updatePreviewImage:image];
+                    };
+                    
+                    // Adicionar o renderer
+                    [self.videoTrack addRenderer:self.frameConverter];
+                    self.isConnected = YES;
+                    writeLog(@"[WebRTCManager] Renderer conectado ao video track");
+                    
+                    // Verificar recebimento de frames após um delay
+                    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(5 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
+                        if (!weakSelf.isReceivingFrames) {
+                            writeLog(@"[WebRTCManager] Aviso: Video track conectado mas não está recebendo frames após 5s.");
+                            [weakSelf.floatingWindow updateConnectionStatus:@"Sem recebimento de frames"];
+                            
+                            // Tentar reconectar o renderer
+                            [weakSelf.videoTrack removeRenderer:weakSelf.frameConverter];
+                            [weakSelf.videoTrack addRenderer:weakSelf.frameConverter];
+                            writeLog(@"[WebRTCManager] Tentativa de reconexão do renderer realizada");
+                        }
+                    });
                 } @catch (NSException *exception) {
                     writeLog(@"[WebRTCManager] Exceção ao processar stream: %@", exception);
                     [self.floatingWindow updateConnectionStatus:@"Erro no processamento do stream"];
@@ -919,7 +1098,10 @@ static NSString *const AVCaptureDevicePositionDidChangeNotification = @"AVCaptur
     NSString *state = [self iceConnectionStateToString:newState];
     writeLog(@"[WebRTCManager] Estado da conexão ICE mudou para: %@", state);
     
+    // Atualizar flag de conexão com base no estado ICE
     if (newState == RTCIceConnectionStateConnected || newState == RTCIceConnectionStateCompleted) {
+        self.isConnected = YES;
+        
         dispatch_async(dispatch_get_main_queue(), ^{
             [self.floatingWindow updateConnectionStatus:[NSString stringWithFormat:@"ICE: %@", state]];
         });
@@ -929,16 +1111,29 @@ static NSString *const AVCaptureDevicePositionDidChangeNotification = @"AVCaptur
     } else if (newState == RTCIceConnectionStateFailed || newState == RTCIceConnectionStateDisconnected) {
         dispatch_async(dispatch_get_main_queue(), ^{
             [self.floatingWindow updateConnectionStatus:[NSString stringWithFormat:@"ICE: %@ - Problema", state]];
-            if (newState == RTCIceConnectionStateFailed) {
-                self.isConnected = NO;
-            }
         });
         
-        // Tentar reiniciar ICE se falhar
         if (newState == RTCIceConnectionStateFailed) {
+            self.isConnected = NO;
+            
+            // Tentar reiniciar ICE se falhar
             writeLog(@"[WebRTCManager] Tentando reiniciar ICE após falha");
-            [self.peerConnection restartIce];
+            
+            // Verificar se a conexão peer ainda é válida antes de tentar reiniciar
+            if (self.peerConnection && self.peerConnection.signalingState != RTCSignalingStateClosed) {
+                [self.peerConnection restartIce];
+            } else {
+                // Se a conexão já estiver fechada, tentar recuperação completa
+                [self recoverFromSignalingError];
+            }
         }
+    } else if (newState == RTCIceConnectionStateClosed) {
+        self.isConnected = NO;
+        self.isReceivingFrames = NO;
+        
+        dispatch_async(dispatch_get_main_queue(), ^{
+            [self.floatingWindow updateConnectionStatus:@"Conexão fechada"];
+        });
     }
 }
 
@@ -968,11 +1163,18 @@ static NSString *const AVCaptureDevicePositionDidChangeNotification = @"AVCaptur
 - (void)peerConnection:(RTCPeerConnection *)peerConnection didGenerateIceCandidate:(RTCIceCandidate *)candidate {
     writeLog(@"[WebRTCManager] Candidato ICE gerado: %@", candidate.sdp);
     
+    // Verificar se a conexão WebSocket está ativa
+    if (!self.webSocketTask || self.webSocketTask.state != NSURLSessionTaskStateRunning) {
+        writeLog(@"[WebRTCManager] WebSocket não está conectado, ignorando candidato ICE");
+        return;
+    }
+    
     NSDictionary *iceCandidateDict = @{
         @"type": @"ice-candidate",
         @"candidate": candidate.sdp,
         @"sdpMid": candidate.sdpMid,
-        @"sdpMLineIndex": @(candidate.sdpMLineIndex)
+        @"sdpMLineIndex": @(candidate.sdpMLineIndex),
+        @"roomId": @"ios-camera"  // Adicionado roomId para garantir roteamento correto
     };
     
     NSError *jsonError;

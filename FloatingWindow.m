@@ -141,6 +141,9 @@
     // Limpar preview anterior
     self.previewImageView.image = nil;
     
+    // Definir isPreviewActive para true ANTES de iniciar WebRTC
+    self.isPreviewActive = YES;
+    
     // Iniciar monitoramento de recebimento de frames
     [self startFrameMonitoring];
     
@@ -204,34 +207,77 @@
 }
 
 - (void)updatePreviewImage:(UIImage *)image {
-    dispatch_async(dispatch_get_main_queue(), ^{
-        if (self.isPreviewActive) {
-            self.previewImageView.image = image;
-            self.lastImageUpdate = CACurrentMediaTime();
-            
-            // Parar indicador de carregamento quando imagem é recebida
+    if (!image) {
+        writeLog(@"[FloatingWindow] Tentativa de atualizar com imagem nula");
+        return;
+    }
+    
+    // Verificar dimensões
+    if (image.size.width <= 0 || image.size.height <= 0) {
+        writeLog(@"[FloatingWindow] Tentativa de atualizar com imagem de dimensões inválidas: %@",
+                NSStringFromCGSize(image.size));
+        return;
+    }
+    
+    // Garantir execução na thread principal
+    if (![NSThread isMainThread]) {
+        dispatch_async(dispatch_get_main_queue(), ^{
+            [self updatePreviewImage:image];
+        });
+        return;
+    }
+    
+    // Verificar se o preview está ativo
+    if (!self.isPreviewActive) {
+        writeLog(@"[FloatingWindow] Preview não está ativo, ignorando atualização de imagem");
+        return;
+    }
+    
+    // Verificar se a image view existe
+    if (!self.previewImageView) {
+        writeLog(@"[FloatingWindow] PreviewImageView é nula");
+        return;
+    }
+    
+    @try {
+        // Atualizar a imagem
+        self.previewImageView.image = image;
+        self.lastImageUpdate = CACurrentMediaTime();
+        
+        // Parar indicador de carregamento quando imagem é recebida
+        if (self.loadingIndicator && [self.loadingIndicator isAnimating]) {
             [self.loadingIndicator stopAnimating];
-            
-            static int updateCount = 0;
-            updateCount++;
-            
-            if (updateCount == 1) {
-                writeLog(@"[FloatingWindow] Primeira imagem recebida: %dx%d",
-                         (int)image.size.width,
-                         (int)image.size.height);
-                
-                // Atualizar status
-                [self updateConnectionStatus:@"Stream ativo"];
-            }
-            
-            // Verificar tamanho da imagem - se muito pequena, pode ser um problema
-            if (image.size.width < 100 || image.size.height < 100) {
-                writeLog(@"[FloatingWindow] AVISO: Imagem muito pequena recebida: %dx%d",
-                        (int)image.size.width,
-                        (int)image.size.height);
-            }
         }
-    });
+        
+        static int updateCount = 0;
+        updateCount++;
+        
+        if (updateCount == 1) {
+            writeLog(@"[FloatingWindow] Primeira imagem recebida: %dx%d",
+                     (int)image.size.width,
+                     (int)image.size.height);
+            
+            // Atualizar status
+            [self updateConnectionStatus:@"Stream ativo"];
+        }
+        
+        // Log a cada 100 frames para verificar continuidade
+        if (updateCount % 100 == 0) {
+            writeLog(@"[FloatingWindow] Recebido frame #%d: %dx%d",
+                    updateCount,
+                    (int)image.size.width,
+                    (int)image.size.height);
+        }
+        
+        // Verificar tamanho da imagem - se muito pequena, pode ser um problema
+        if (image.size.width < 100 || image.size.height < 100) {
+            writeLog(@"[FloatingWindow] AVISO: Imagem muito pequena recebida: %dx%d",
+                    (int)image.size.width,
+                    (int)image.size.height);
+        }
+    } @catch (NSException *exception) {
+        writeLog(@"[FloatingWindow] Exceção ao atualizar imagem: %@", exception);
+    }
 }
 
 - (void)handlePan:(UIPanGestureRecognizer *)gesture {
