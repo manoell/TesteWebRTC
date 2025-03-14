@@ -119,14 +119,14 @@ wss.on('connection', (ws) => {
             const msgRoomId = data.roomId || 'default';
             
             if (data.type === 'join') {
-                roomId = msgRoomId;
-                
-                // Inicializar sala se não existir
-                if (!rooms[roomId]) {
-                    rooms[roomId] = [];
-                    roomData[roomId] = { offers: [], answers: [], iceCandidates: [] };
-                    log(`Nova sala criada: ${roomId}`);
-                }
+				roomId = data.roomId || 'default';
+				
+				// Garantir que a sala exista
+				if (!rooms[roomId]) {
+					rooms[roomId] = [];
+					roomData[roomId] = { offers: [], answers: [], iceCandidates: [] };
+					console.log(`Nova sala criada: ${roomId}`);
+				}
                 
                 // Limitar número de conexões por sala
                 if (rooms[roomId].length >= MAX_CONNECTIONS_PER_ROOM) {
