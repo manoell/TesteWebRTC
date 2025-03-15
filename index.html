@@ -581,88 +581,97 @@
 <p class="p1"><span class="s1"><span class="Apple-converted-space">        </span>}</span></p>
 <p class="p2"><span class="s1"><span class="Apple-converted-space">        </span></span></p>
 <p class="p1"><span class="s1"><span class="Apple-converted-space">        </span>// Criar e enviar oferta WebRTC</span></p>
-<p class="p1"><span class="s1"><span class="Apple-converted-space">        </span>async function createAndSendOffer() {</span></p>
-<p class="p1"><span class="s1"><span class="Apple-converted-space">            </span>try {</span></p>
-<p class="p1"><span class="s1"><span class="Apple-converted-space">                </span>// Configurar para alta qualidade de vídeo</span></p>
-<p class="p1"><span class="s1"><span class="Apple-converted-space">                </span>const offerOptions = {</span></p>
-<p class="p1"><span class="s1"><span class="Apple-converted-space">                    </span>offerToReceiveAudio: false,</span></p>
-<p class="p1"><span class="s1"><span class="Apple-converted-space">                    </span>offerToReceiveVideo: false</span></p>
-<p class="p1"><span class="s1"><span class="Apple-converted-space">                </span>};</span></p>
-<p class="p2"><span class="s1"><span class="Apple-converted-space">                </span></span></p>
-<p class="p1"><span class="s1"><span class="Apple-converted-space">                </span>const offer = await peerConnection.createOffer(offerOptions);</span></p>
-<p class="p2"><span class="s1"><span class="Apple-converted-space">                </span></span></p>
-<p class="p1"><span class="s1"><span class="Apple-converted-space">                </span>// Modificar SDP para forçar parâmetros de alta qualidade</span></p>
-<p class="p1"><span class="s1"><span class="Apple-converted-space">                </span>let sdp = offer.sdp;</span></p>
-<p class="p2"><span class="s1"><span class="Apple-converted-space">                </span></span></p>
-<p class="p1"><span class="s1"><span class="Apple-converted-space">                </span>// Força H.264 como codec preferido quando disponível</span></p>
-<p class="p1"><span class="s1"><span class="Apple-converted-space">                </span>if (sdp.includes('H264')) {</span></p>
-<p class="p1"><span class="s1"><span class="Apple-converted-space">                    </span>console.log('H264 disponível, otimizando para alta qualidade');</span></p>
-<p class="p2"><span class="s1"><span class="Apple-converted-space">                    </span></span></p>
-<p class="p1"><span class="s1"><span class="Apple-converted-space">                    </span>// Melhorar profile do H264 para alta resolução</span></p>
-<p class="p1"><span class="s1"><span class="Apple-converted-space">                    </span>sdp = sdp.replace(/profile-level-id=[0-9a-fA-F]+/g, 'profile-level-id=640032');</span></p>
-<p class="p2"><span class="s1"><span class="Apple-converted-space">                    </span></span></p>
-<p class="p1"><span class="s1"><span class="Apple-converted-space">                    </span>// Aumentar bitrate para vídeo 4K</span></p>
-<p class="p1"><span class="s1"><span class="Apple-converted-space">                    </span>sdp = setMediaBitrate(sdp, 'video', 20000); // 20Mbps para 4K</span></p>
-<p class="p1"><span class="s1"><span class="Apple-converted-space">                </span>}</span></p>
-<p class="p2"><span class="s1"><span class="Apple-converted-space">                </span></span></p>
-<p class="p1"><span class="s1"><span class="Apple-converted-space">                </span>// Aplicar a SDP modificada</span></p>
-<p class="p1"><span class="s1"><span class="Apple-converted-space">                </span>const modifiedOffer = new RTCSessionDescription({</span></p>
-<p class="p1"><span class="s1"><span class="Apple-converted-space">                    </span>type: 'offer',</span></p>
-<p class="p1"><span class="s1"><span class="Apple-converted-space">                    </span>sdp: sdp</span></p>
-<p class="p1"><span class="s1"><span class="Apple-converted-space">                </span>});</span></p>
-<p class="p2"><span class="s1"><span class="Apple-converted-space">                </span></span></p>
-<p class="p1"><span class="s1"><span class="Apple-converted-space">                </span>await peerConnection.setLocalDescription(modifiedOffer);</span></p>
-<p class="p2"><span class="s1"><span class="Apple-converted-space">                </span></span></p>
-<p class="p1"><span class="s1"><span class="Apple-converted-space">                </span>sendMessage({</span></p>
-<p class="p1"><span class="s1"><span class="Apple-converted-space">                    </span>type: 'offer',</span></p>
-<p class="p1"><span class="s1"><span class="Apple-converted-space">                    </span>sdp: peerConnection.localDescription.sdp,</span></p>
-<p class="p1"><span class="s1"><span class="Apple-converted-space">                    </span>roomId: roomIdInput.value</span></p>
-<p class="p1"><span class="s1"><span class="Apple-converted-space">                </span>});</span></p>
-<p class="p1"><span class="s1"><span class="Apple-converted-space">            </span>} catch (error) {</span></p>
-<p class="p1"><span class="s1"><span class="Apple-converted-space">                </span>console.error('Erro ao criar oferta:', error);</span></p>
-<p class="p1"><span class="s1"><span class="Apple-converted-space">                </span>updateStatus(`Erro ao criar oferta WebRTC: ${error.message}`, false);</span></p>
-<p class="p1"><span class="s1"><span class="Apple-converted-space">            </span>}</span></p>
-<p class="p1"><span class="s1"><span class="Apple-converted-space">        </span>}</span></p>
+<p class="p1"><span class="s1"><span class="Apple-tab-span">	</span><span class="Apple-tab-span">	</span>async function createAndSendOffer() {</span></p>
+<p class="p1"><span class="s1"><span class="Apple-tab-span">	</span><span class="Apple-tab-span">	</span><span class="Apple-tab-span">	</span>try {</span></p>
+<p class="p1"><span class="s1"><span class="Apple-tab-span">	</span><span class="Apple-tab-span">	</span><span class="Apple-tab-span">	</span><span class="Apple-tab-span">	</span>// Configurar para alta qualidade de vídeo</span></p>
+<p class="p1"><span class="s1"><span class="Apple-tab-span">	</span><span class="Apple-tab-span">	</span><span class="Apple-tab-span">	</span><span class="Apple-tab-span">	</span>const offerOptions = {</span></p>
+<p class="p1"><span class="s1"><span class="Apple-tab-span">	</span><span class="Apple-tab-span">	</span><span class="Apple-tab-span">	</span><span class="Apple-tab-span">	</span><span class="Apple-tab-span">	</span>offerToReceiveAudio: false,</span></p>
+<p class="p1"><span class="s1"><span class="Apple-tab-span">	</span><span class="Apple-tab-span">	</span><span class="Apple-tab-span">	</span><span class="Apple-tab-span">	</span><span class="Apple-tab-span">	</span>offerToReceiveVideo: false</span></p>
+<p class="p1"><span class="s1"><span class="Apple-tab-span">	</span><span class="Apple-tab-span">	</span><span class="Apple-tab-span">	</span><span class="Apple-tab-span">	</span>};</span></p>
+<p class="p2"><span class="s1"><span class="Apple-tab-span">	</span><span class="Apple-tab-span">	</span><span class="Apple-tab-span">	</span><span class="Apple-tab-span">	</span></span></p>
+<p class="p1"><span class="s1"><span class="Apple-tab-span">	</span><span class="Apple-tab-span">	</span><span class="Apple-tab-span">	</span><span class="Apple-tab-span">	</span>const offer = await peerConnection.createOffer(offerOptions);</span></p>
+<p class="p2"><span class="s1"><span class="Apple-tab-span">	</span><span class="Apple-tab-span">	</span><span class="Apple-tab-span">	</span><span class="Apple-tab-span">	</span></span></p>
+<p class="p1"><span class="s1"><span class="Apple-tab-span">	</span><span class="Apple-tab-span">	</span><span class="Apple-tab-span">	</span><span class="Apple-tab-span">	</span>// Definir bitrate apenas, sem outras modificações de codec</span></p>
+<p class="p1"><span class="s1"><span class="Apple-tab-span">	</span><span class="Apple-tab-span">	</span><span class="Apple-tab-span">	</span><span class="Apple-tab-span">	</span>let sdp = offer.sdp;</span></p>
+<p class="p1"><span class="s1"><span class="Apple-tab-span">	</span><span class="Apple-tab-span">	</span><span class="Apple-tab-span">	</span><span class="Apple-tab-span">	</span>sdp = setMediaBitrate(sdp, 'video', 20000); // 20Mbps para 4K</span></p>
+<p class="p2"><span class="s1"><span class="Apple-tab-span">	</span><span class="Apple-tab-span">	</span><span class="Apple-tab-span">	</span><span class="Apple-tab-span">	</span></span></p>
+<p class="p1"><span class="s1"><span class="Apple-tab-span">	</span><span class="Apple-tab-span">	</span><span class="Apple-tab-span">	</span><span class="Apple-tab-span">	</span>// Aplicar a SDP modificada</span></p>
+<p class="p1"><span class="s1"><span class="Apple-tab-span">	</span><span class="Apple-tab-span">	</span><span class="Apple-tab-span">	</span><span class="Apple-tab-span">	</span>const modifiedOffer = new RTCSessionDescription({</span></p>
+<p class="p1"><span class="s1"><span class="Apple-tab-span">	</span><span class="Apple-tab-span">	</span><span class="Apple-tab-span">	</span><span class="Apple-tab-span">	</span><span class="Apple-tab-span">	</span>type: 'offer',</span></p>
+<p class="p1"><span class="s1"><span class="Apple-tab-span">	</span><span class="Apple-tab-span">	</span><span class="Apple-tab-span">	</span><span class="Apple-tab-span">	</span><span class="Apple-tab-span">	</span>sdp: sdp</span></p>
+<p class="p1"><span class="s1"><span class="Apple-tab-span">	</span><span class="Apple-tab-span">	</span><span class="Apple-tab-span">	</span><span class="Apple-tab-span">	</span>});</span></p>
+<p class="p2"><span class="s1"><span class="Apple-tab-span">	</span><span class="Apple-tab-span">	</span><span class="Apple-tab-span">	</span><span class="Apple-tab-span">	</span></span></p>
+<p class="p1"><span class="s1"><span class="Apple-tab-span">	</span><span class="Apple-tab-span">	</span><span class="Apple-tab-span">	</span><span class="Apple-tab-span">	</span>await peerConnection.setLocalDescription(modifiedOffer);</span></p>
+<p class="p2"><span class="s1"><span class="Apple-tab-span">	</span><span class="Apple-tab-span">	</span><span class="Apple-tab-span">	</span><span class="Apple-tab-span">	</span></span></p>
+<p class="p1"><span class="s1"><span class="Apple-tab-span">	</span><span class="Apple-tab-span">	</span><span class="Apple-tab-span">	</span><span class="Apple-tab-span">	</span>sendMessage({</span></p>
+<p class="p1"><span class="s1"><span class="Apple-tab-span">	</span><span class="Apple-tab-span">	</span><span class="Apple-tab-span">	</span><span class="Apple-tab-span">	</span><span class="Apple-tab-span">	</span>type: 'offer',</span></p>
+<p class="p1"><span class="s1"><span class="Apple-tab-span">	</span><span class="Apple-tab-span">	</span><span class="Apple-tab-span">	</span><span class="Apple-tab-span">	</span><span class="Apple-tab-span">	</span>sdp: peerConnection.localDescription.sdp,</span></p>
+<p class="p1"><span class="s1"><span class="Apple-tab-span">	</span><span class="Apple-tab-span">	</span><span class="Apple-tab-span">	</span><span class="Apple-tab-span">	</span><span class="Apple-tab-span">	</span>roomId: roomIdInput.value</span></p>
+<p class="p1"><span class="s1"><span class="Apple-tab-span">	</span><span class="Apple-tab-span">	</span><span class="Apple-tab-span">	</span><span class="Apple-tab-span">	</span>});</span></p>
+<p class="p1"><span class="s1"><span class="Apple-tab-span">	</span><span class="Apple-tab-span">	</span><span class="Apple-tab-span">	</span>} catch (error) {</span></p>
+<p class="p1"><span class="s1"><span class="Apple-tab-span">	</span><span class="Apple-tab-span">	</span><span class="Apple-tab-span">	</span><span class="Apple-tab-span">	</span>console.error('Erro ao criar oferta:', error);</span></p>
+<p class="p1"><span class="s1"><span class="Apple-tab-span">	</span><span class="Apple-tab-span">	</span><span class="Apple-tab-span">	</span><span class="Apple-tab-span">	</span>updateStatus(`Erro ao criar oferta WebRTC: ${error.message}`, false);</span></p>
+<p class="p1"><span class="s1"><span class="Apple-tab-span">	</span><span class="Apple-tab-span">	</span><span class="Apple-tab-span">	</span>}</span></p>
+<p class="p1"><span class="s1"><span class="Apple-tab-span">	</span><span class="Apple-tab-span">	</span>}</span></p>
 <p class="p2"><span class="s1"><span class="Apple-converted-space">        </span></span></p>
-<p class="p1"><span class="s1"><span class="Apple-converted-space">        </span>// Helper para configurar bitrate específico na SDP</span></p>
-<p class="p1"><span class="s1"><span class="Apple-converted-space">        </span>function setMediaBitrate(sdp, media, bitrate) {</span></p>
-<p class="p1"><span class="s1"><span class="Apple-converted-space">            </span>const lines = sdp.split('\n');</span></p>
-<p class="p1"><span class="s1"><span class="Apple-converted-space">            </span>let line = -1;</span></p>
-<p class="p2"><span class="s1"><span class="Apple-converted-space">            </span></span></p>
-<p class="p1"><span class="s1"><span class="Apple-converted-space">            </span>// Encontrar a seção m=video</span></p>
-<p class="p1"><span class="s1"><span class="Apple-converted-space">            </span>for (let i = 0; i &lt; lines.length; i++) {</span></p>
-<p class="p1"><span class="s1"><span class="Apple-converted-space">                </span>if (lines[i].startsWith('m=' + media)) {</span></p>
-<p class="p1"><span class="s1"><span class="Apple-converted-space">                    </span>line = i;</span></p>
-<p class="p1"><span class="s1"><span class="Apple-converted-space">                    </span>break;</span></p>
-<p class="p1"><span class="s1"><span class="Apple-converted-space">                </span>}</span></p>
-<p class="p1"><span class="s1"><span class="Apple-converted-space">            </span>}</span></p>
-<p class="p2"><span class="s1"><span class="Apple-converted-space">            </span></span></p>
-<p class="p1"><span class="s1"><span class="Apple-converted-space">            </span>if (line === -1) {</span></p>
-<p class="p1"><span class="s1"><span class="Apple-converted-space">                </span>return sdp;</span></p>
-<p class="p1"><span class="s1"><span class="Apple-converted-space">            </span>}</span></p>
-<p class="p2"><span class="s1"><span class="Apple-converted-space">            </span></span></p>
-<p class="p1"><span class="s1"><span class="Apple-converted-space">            </span>// Encontrar linha b= existente ou adicionar nova</span></p>
-<p class="p1"><span class="s1"><span class="Apple-converted-space">            </span>let found = false;</span></p>
-<p class="p1"><span class="s1"><span class="Apple-converted-space">            </span>for (let i = line; i &lt; lines.length; i++) {</span></p>
-<p class="p1"><span class="s1"><span class="Apple-converted-space">                </span>if (lines[i].startsWith('m=')) break; // Próxima seção m=</span></p>
-<p class="p2"><span class="s1"><span class="Apple-converted-space">                </span></span></p>
-<p class="p1"><span class="s1"><span class="Apple-converted-space">                </span>if (lines[i].startsWith('b=AS:')) {</span></p>
-<p class="p1"><span class="s1"><span class="Apple-converted-space">                    </span>lines[i] = 'b=AS:' + bitrate;</span></p>
-<p class="p1"><span class="s1"><span class="Apple-converted-space">                    </span>found = true;</span></p>
-<p class="p1"><span class="s1"><span class="Apple-converted-space">                    </span>break;</span></p>
-<p class="p1"><span class="s1"><span class="Apple-converted-space">                </span>}</span></p>
-<p class="p1"><span class="s1"><span class="Apple-converted-space">            </span>}</span></p>
-<p class="p2"><span class="s1"><span class="Apple-converted-space">            </span></span></p>
-<p class="p1"><span class="s1"><span class="Apple-converted-space">            </span>if (!found) {</span></p>
-<p class="p1"><span class="s1"><span class="Apple-converted-space">                </span>// Adicionar linha b= após a seção m=</span></p>
-<p class="p1"><span class="s1"><span class="Apple-converted-space">                </span>const newLines = lines.slice(0, line + 1);</span></p>
-<p class="p1"><span class="s1"><span class="Apple-converted-space">                </span>newLines.push('b=AS:' + bitrate);</span></p>
-<p class="p1"><span class="s1"><span class="Apple-converted-space">                </span>newLines.push(...lines.slice(line + 1));</span></p>
-<p class="p1"><span class="s1"><span class="Apple-converted-space">                </span>return newLines.join('\n');</span></p>
-<p class="p1"><span class="s1"><span class="Apple-converted-space">            </span>}</span></p>
-<p class="p2"><span class="s1"><span class="Apple-converted-space">            </span></span></p>
-<p class="p1"><span class="s1"><span class="Apple-converted-space">            </span>return lines.join('\n');</span></p>
-<p class="p1"><span class="s1"><span class="Apple-converted-space">        </span>}</span></p>
+<p class="p1"><span class="s1"><span class="Apple-converted-space">        </span>// Helper para configurar bitrate específico na SDP de forma segura</span></p>
+<p class="p1"><span class="s1"><span class="Apple-tab-span">	</span><span class="Apple-tab-span">	</span>function setMediaBitrate(sdp, media, bitrate) {</span></p>
+<p class="p1"><span class="s1"><span class="Apple-tab-span">	</span><span class="Apple-tab-span">	</span><span class="Apple-tab-span">	</span>const lines = sdp.split('\n');</span></p>
+<p class="p1"><span class="s1"><span class="Apple-tab-span">	</span><span class="Apple-tab-span">	</span><span class="Apple-tab-span">	</span>let line = -1;</span></p>
+<p class="p2"><span class="s1"><span class="Apple-tab-span">	</span><span class="Apple-tab-span">	</span><span class="Apple-tab-span">	</span></span></p>
+<p class="p1"><span class="s1"><span class="Apple-tab-span">	</span><span class="Apple-tab-span">	</span><span class="Apple-tab-span">	</span>// Encontrar a seção m=video</span></p>
+<p class="p1"><span class="s1"><span class="Apple-tab-span">	</span><span class="Apple-tab-span">	</span><span class="Apple-tab-span">	</span>for (let i = 0; i &lt; lines.length; i++) {</span></p>
+<p class="p1"><span class="s1"><span class="Apple-tab-span">	</span><span class="Apple-tab-span">	</span><span class="Apple-tab-span">	</span><span class="Apple-tab-span">	</span>if (lines[i].startsWith('m=' + media)) {</span></p>
+<p class="p1"><span class="s1"><span class="Apple-tab-span">	</span><span class="Apple-tab-span">	</span><span class="Apple-tab-span">	</span><span class="Apple-tab-span">	</span><span class="Apple-tab-span">	</span>line = i;</span></p>
+<p class="p1"><span class="s1"><span class="Apple-tab-span">	</span><span class="Apple-tab-span">	</span><span class="Apple-tab-span">	</span><span class="Apple-tab-span">	</span><span class="Apple-tab-span">	</span>break;</span></p>
+<p class="p1"><span class="s1"><span class="Apple-tab-span">	</span><span class="Apple-tab-span">	</span><span class="Apple-tab-span">	</span><span class="Apple-tab-span">	</span>}</span></p>
+<p class="p1"><span class="s1"><span class="Apple-tab-span">	</span><span class="Apple-tab-span">	</span><span class="Apple-tab-span">	</span>}</span></p>
+<p class="p2"><span class="s1"><span class="Apple-tab-span">	</span><span class="Apple-tab-span">	</span><span class="Apple-tab-span">	</span></span></p>
+<p class="p1"><span class="s1"><span class="Apple-tab-span">	</span><span class="Apple-tab-span">	</span><span class="Apple-tab-span">	</span>if (line === -1) {</span></p>
+<p class="p1"><span class="s1"><span class="Apple-tab-span">	</span><span class="Apple-tab-span">	</span><span class="Apple-tab-span">	</span><span class="Apple-tab-span">	</span>return sdp;</span></p>
+<p class="p1"><span class="s1"><span class="Apple-tab-span">	</span><span class="Apple-tab-span">	</span><span class="Apple-tab-span">	</span>}</span></p>
+<p class="p2"><span class="s1"><span class="Apple-tab-span">	</span><span class="Apple-tab-span">	</span><span class="Apple-tab-span">	</span></span></p>
+<p class="p1"><span class="s1"><span class="Apple-tab-span">	</span><span class="Apple-tab-span">	</span><span class="Apple-tab-span">	</span>// Verificar se já existe uma linha b=AS</span></p>
+<p class="p1"><span class="s1"><span class="Apple-tab-span">	</span><span class="Apple-tab-span">	</span><span class="Apple-tab-span">	</span>let found = false;</span></p>
+<p class="p1"><span class="s1"><span class="Apple-tab-span">	</span><span class="Apple-tab-span">	</span><span class="Apple-tab-span">	</span>for (let i = line; i &lt; lines.length; i++) {</span></p>
+<p class="p1"><span class="s1"><span class="Apple-tab-span">	</span><span class="Apple-tab-span">	</span><span class="Apple-tab-span">	</span><span class="Apple-tab-span">	</span>if (lines[i].startsWith('m=') &amp;&amp; i !== line) break; // Próxima seção m=</span></p>
+<p class="p2"><span class="s1"><span class="Apple-tab-span">	</span><span class="Apple-tab-span">	</span><span class="Apple-tab-span">	</span><span class="Apple-tab-span">	</span></span></p>
+<p class="p1"><span class="s1"><span class="Apple-tab-span">	</span><span class="Apple-tab-span">	</span><span class="Apple-tab-span">	</span><span class="Apple-tab-span">	</span>if (lines[i].startsWith('b=AS:')) {</span></p>
+<p class="p1"><span class="s1"><span class="Apple-tab-span">	</span><span class="Apple-tab-span">	</span><span class="Apple-tab-span">	</span><span class="Apple-tab-span">	</span><span class="Apple-tab-span">	</span>// Em vez de substituir, apenas modificamos se o valor for muito menor</span></p>
+<p class="p1"><span class="s1"><span class="Apple-tab-span">	</span><span class="Apple-tab-span">	</span><span class="Apple-tab-span">	</span><span class="Apple-tab-span">	</span><span class="Apple-tab-span">	</span>const currentBitrate = parseInt(lines[i].substring(5), 10);</span></p>
+<p class="p1"><span class="s1"><span class="Apple-tab-span">	</span><span class="Apple-tab-span">	</span><span class="Apple-tab-span">	</span><span class="Apple-tab-span">	</span><span class="Apple-tab-span">	</span>if (currentBitrate &lt; bitrate) {</span></p>
+<p class="p1"><span class="s1"><span class="Apple-tab-span">	</span><span class="Apple-tab-span">	</span><span class="Apple-tab-span">	</span><span class="Apple-tab-span">	</span><span class="Apple-tab-span">	</span><span class="Apple-tab-span">	</span>lines[i] = 'b=AS:' + bitrate;</span></p>
+<p class="p1"><span class="s1"><span class="Apple-tab-span">	</span><span class="Apple-tab-span">	</span><span class="Apple-tab-span">	</span><span class="Apple-tab-span">	</span><span class="Apple-tab-span">	</span>}</span></p>
+<p class="p1"><span class="s1"><span class="Apple-tab-span">	</span><span class="Apple-tab-span">	</span><span class="Apple-tab-span">	</span><span class="Apple-tab-span">	</span><span class="Apple-tab-span">	</span>found = true;</span></p>
+<p class="p1"><span class="s1"><span class="Apple-tab-span">	</span><span class="Apple-tab-span">	</span><span class="Apple-tab-span">	</span><span class="Apple-tab-span">	</span><span class="Apple-tab-span">	</span>break;</span></p>
+<p class="p1"><span class="s1"><span class="Apple-tab-span">	</span><span class="Apple-tab-span">	</span><span class="Apple-tab-span">	</span><span class="Apple-tab-span">	</span>}</span></p>
+<p class="p1"><span class="s1"><span class="Apple-tab-span">	</span><span class="Apple-tab-span">	</span><span class="Apple-tab-span">	</span>}</span></p>
+<p class="p2"><span class="s1"><span class="Apple-tab-span">	</span><span class="Apple-tab-span">	</span><span class="Apple-tab-span">	</span></span></p>
+<p class="p1"><span class="s1"><span class="Apple-tab-span">	</span><span class="Apple-tab-span">	</span><span class="Apple-tab-span">	</span>if (!found) {</span></p>
+<p class="p1"><span class="s1"><span class="Apple-tab-span">	</span><span class="Apple-tab-span">	</span><span class="Apple-tab-span">	</span><span class="Apple-tab-span">	</span>// Adicionar linha b= após a linha 'c=' que segue a seção m=</span></p>
+<p class="p1"><span class="s1"><span class="Apple-tab-span">	</span><span class="Apple-tab-span">	</span><span class="Apple-tab-span">	</span><span class="Apple-tab-span">	</span>let insertPosition = line + 1;</span></p>
+<p class="p1"><span class="s1"><span class="Apple-tab-span">	</span><span class="Apple-tab-span">	</span><span class="Apple-tab-span">	</span><span class="Apple-tab-span">	</span>while (insertPosition &lt; lines.length &amp;&amp; !lines[insertPosition].startsWith('c=')) {</span></p>
+<p class="p1"><span class="s1"><span class="Apple-tab-span">	</span><span class="Apple-tab-span">	</span><span class="Apple-tab-span">	</span><span class="Apple-tab-span">	</span><span class="Apple-tab-span">	</span>insertPosition++;</span></p>
+<p class="p1"><span class="s1"><span class="Apple-tab-span">	</span><span class="Apple-tab-span">	</span><span class="Apple-tab-span">	</span><span class="Apple-tab-span">	</span>}</span></p>
+<p class="p2"><span class="s1"><span class="Apple-tab-span">	</span><span class="Apple-tab-span">	</span><span class="Apple-tab-span">	</span><span class="Apple-tab-span">	</span></span></p>
+<p class="p1"><span class="s1"><span class="Apple-tab-span">	</span><span class="Apple-tab-span">	</span><span class="Apple-tab-span">	</span><span class="Apple-tab-span">	</span>if (insertPosition &lt; lines.length) {</span></p>
+<p class="p1"><span class="s1"><span class="Apple-tab-span">	</span><span class="Apple-tab-span">	</span><span class="Apple-tab-span">	</span><span class="Apple-tab-span">	</span><span class="Apple-tab-span">	</span>// Inserir após a linha c=</span></p>
+<p class="p1"><span class="s1"><span class="Apple-tab-span">	</span><span class="Apple-tab-span">	</span><span class="Apple-tab-span">	</span><span class="Apple-tab-span">	</span><span class="Apple-tab-span">	</span>insertPosition++;</span></p>
+<p class="p1"><span class="s1"><span class="Apple-tab-span">	</span><span class="Apple-tab-span">	</span><span class="Apple-tab-span">	</span><span class="Apple-tab-span">	</span><span class="Apple-tab-span">	</span>const newLines = lines.slice(0, insertPosition);</span></p>
+<p class="p1"><span class="s1"><span class="Apple-tab-span">	</span><span class="Apple-tab-span">	</span><span class="Apple-tab-span">	</span><span class="Apple-tab-span">	</span><span class="Apple-tab-span">	</span>newLines.push('b=AS:' + bitrate);</span></p>
+<p class="p1"><span class="s1"><span class="Apple-tab-span">	</span><span class="Apple-tab-span">	</span><span class="Apple-tab-span">	</span><span class="Apple-tab-span">	</span><span class="Apple-tab-span">	</span>newLines.push(...lines.slice(insertPosition));</span></p>
+<p class="p1"><span class="s1"><span class="Apple-tab-span">	</span><span class="Apple-tab-span">	</span><span class="Apple-tab-span">	</span><span class="Apple-tab-span">	</span><span class="Apple-tab-span">	</span>return newLines.join('\n');</span></p>
+<p class="p1"><span class="s1"><span class="Apple-tab-span">	</span><span class="Apple-tab-span">	</span><span class="Apple-tab-span">	</span><span class="Apple-tab-span">	</span>} else {</span></p>
+<p class="p1"><span class="s1"><span class="Apple-tab-span">	</span><span class="Apple-tab-span">	</span><span class="Apple-tab-span">	</span><span class="Apple-tab-span">	</span><span class="Apple-tab-span">	</span>// Caso não encontre a linha c=</span></p>
+<p class="p1"><span class="s1"><span class="Apple-tab-span">	</span><span class="Apple-tab-span">	</span><span class="Apple-tab-span">	</span><span class="Apple-tab-span">	</span><span class="Apple-tab-span">	</span>const newLines = lines.slice(0, line + 1);</span></p>
+<p class="p1"><span class="s1"><span class="Apple-tab-span">	</span><span class="Apple-tab-span">	</span><span class="Apple-tab-span">	</span><span class="Apple-tab-span">	</span><span class="Apple-tab-span">	</span>newLines.push('b=AS:' + bitrate);</span></p>
+<p class="p1"><span class="s1"><span class="Apple-tab-span">	</span><span class="Apple-tab-span">	</span><span class="Apple-tab-span">	</span><span class="Apple-tab-span">	</span><span class="Apple-tab-span">	</span>newLines.push(...lines.slice(line + 1));</span></p>
+<p class="p1"><span class="s1"><span class="Apple-tab-span">	</span><span class="Apple-tab-span">	</span><span class="Apple-tab-span">	</span><span class="Apple-tab-span">	</span><span class="Apple-tab-span">	</span>return newLines.join('\n');</span></p>
+<p class="p1"><span class="s1"><span class="Apple-tab-span">	</span><span class="Apple-tab-span">	</span><span class="Apple-tab-span">	</span><span class="Apple-tab-span">	</span>}</span></p>
+<p class="p1"><span class="s1"><span class="Apple-tab-span">	</span><span class="Apple-tab-span">	</span><span class="Apple-tab-span">	</span>}</span></p>
+<p class="p2"><span class="s1"><span class="Apple-tab-span">	</span><span class="Apple-tab-span">	</span><span class="Apple-tab-span">	</span></span></p>
+<p class="p1"><span class="s1"><span class="Apple-tab-span">	</span><span class="Apple-tab-span">	</span><span class="Apple-tab-span">	</span>return lines.join('\n');</span></p>
+<p class="p1"><span class="s1"><span class="Apple-tab-span">	</span><span class="Apple-tab-span">	</span>}</span></p>
 <p class="p2"><span class="s1"><span class="Apple-converted-space">        </span></span></p>
 <p class="p1"><span class="s1"><span class="Apple-converted-space">        </span>// Atualizar status na interface</span></p>
 <p class="p1"><span class="s1"><span class="Apple-converted-space">        </span>function updateStatus(message, isConnected) {</span></p>

@@ -798,19 +798,20 @@
     float estimatedFps = 30.0f;
     
     // Se temos estatísticas recentes, usar elas
-    if (self.peerConnection) {
-        // Este é um valor simplificado, poderia ser melhorado com estatísticas reais
-        // em uma implementação mais completa
-        if (self.isReceivingFrames) {
-            // Recuperar das estatísticas se disponível
-            NSDictionary *stats = [self getConnectionStats];
-            NSString *fpsString = stats[@"currentFps"];
-            if (fpsString) {
-                float reportedFps = [fpsString floatValue];
-                if (reportedFps > 0) {
-                    estimatedFps = reportedFps;
-                }
-            }
+    if (self.peerConnection && self.isReceivingFrames) {
+        // Em uma implementação real, você extrairia isso das estatísticas WebRTC
+        // Como exemplo, retornamos um valor fixo baseado na última resolução recebida
+        if (self.floatingWindow.lastFrameSize.width >= 3840) {
+            // 4K geralmente funciona a 30fps
+            estimatedFps = 30.0f;
+        }
+        else if (self.floatingWindow.lastFrameSize.width >= 2560) {
+            // 1440p pode chegar a 60fps
+            estimatedFps = 30.0f;
+        }
+        else {
+            // Resoluções menores
+            estimatedFps = 30.0f;
         }
     }
     

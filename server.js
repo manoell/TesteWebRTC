@@ -204,19 +204,33 @@ const analyzeSdpQuality = (sdp) => {
 const enhanceSdpForHighQuality = (sdp) => {
     if (!sdp.includes('m=video')) return sdp;
     
-    // Este é um método mais direto e seguro para evitar conflitos de payload
-    // Em vez de tentar modificar codecs individuais, vamos apenas definir o bitrate
     const lines = sdp.split('\n');
     const newLines = [];
     let inVideoSection = false;
     let videoSectionModified = false;
+    let videoLineIndex = -1;
     
+    // Primeiro, vamos encontrar a linha 'm=video' e analisar
+    for (let i = 0; i < lines.length; i++) {
+        if (lines[i].startsWith('m=video')) {
+            videoLineIndex = i;
+            break;
+        }
+    }
+    
+    // Se não encontramos seção de vídeo, retornamos o SDP sem alterações
+    if (videoLineIndex === -1) return sdp;
+    
+    // Agora processamos linha por linha
     for (let i = 0; i < lines.length; i++) {
         const line = lines[i];
         
         // Detectar seção de vídeo
         if (line.startsWith('m=video')) {
             inVideoSection = true;
+            // Não modificamos a linha m=video diretamente para evitar conflitos de payload
+            newLines.push(line);
+            continue;
         } else if (line.startsWith('m=')) {
             inVideoSection = false;
         }
@@ -224,13 +238,25 @@ const enhanceSdpForHighQuality = (sdp) => {
         // Para seção de vídeo, adicionar bitrate se não existir
         if (inVideoSection && line.startsWith('c=') && !videoSectionModified) {
             newLines.push(line);
-            // Adicionar linha de bitrate alto para 4K após a linha de conexão
-            newLines.push(`b=AS:${HIGH_QUALITY_BITRATE}`);
-            videoSectionModified = true;
+            
+            // Verificar se já existe uma linha b=AS
+            let hasAS = false;
+            for (let j = i + 1; j < lines.length && !lines[j].startsWith('m='); j++) {
+                if (lines[j].startsWith('b=AS:')) {
+                    hasAS = true;
+                    break;
+                }
+            }
+            
+            // Adicionar linha de bitrate alto para 4K apenas se não existir
+            if (!hasAS) {
+                newLines.push(`b=AS:${HIGH_QUALITY_BITRATE}`);
+                videoSectionModified = true;
+            }
             continue;
         }
         
-        // Não tentamos mais modificar o profile-level-id para evitar conflitos de payload
+        // Não modificamos mais o profile-level-id para evitar conflitos
         newLines.push(line);
     }
     

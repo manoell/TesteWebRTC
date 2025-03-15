@@ -3,30 +3,28 @@
 #import "logger.h"
 
 @interface FloatingWindow ()
-@property (nonatomic, assign) CGPoint lastPosition;
-@property (nonatomic, assign) BOOL isPreviewActive;
+
+// UI Components
+@property (nonatomic, strong) UIView *contentView;
 @property (nonatomic, strong) UIActivityIndicatorView *loadingIndicator;
-@property (nonatomic, assign) NSTimeInterval lastFrameTime;
-@property (nonatomic, strong) UIPanGestureRecognizer *contentPanGesture;
 @property (nonatomic, strong) UIButton *minimizeButton;
-@property (nonatomic, strong) UIButton *infoButton;
-@property (nonatomic, strong) UISlider *opacitySlider;
 @property (nonatomic, strong) NSLayoutConstraint *heightConstraint;
 @property (nonatomic, strong) NSLayoutConstraint *widthConstraint;
-@property (nonatomic, assign) CGRect originalFrame;
-@property (nonatomic, strong) UIView *statsView;
-@property (nonatomic, strong) UILabel *connectionInfoLabel;
-@property (nonatomic, strong) UILabel *videoStatsLabel;
-@property (nonatomic, strong) UILabel *networkStatsLabel;
 @property (nonatomic, strong) UIStackView *controlsStackView;
 @property (nonatomic, strong) CAGradientLayer *gradientLayer;
-@property (nonatomic, strong) NSTimer *autoHideTimer;
-@property (nonatomic, assign) BOOL controlsVisible;
+
+// State tracking
+@property (nonatomic, assign) CGPoint lastPosition;
+@property (nonatomic, assign) BOOL isPreviewActive;
+@property (nonatomic, assign) CGRect originalFrame;
 @property (nonatomic, assign) CGSize lastFrameSize;
 @property (nonatomic, assign) BOOL dragInProgress;
+@property (nonatomic, strong) NSTimer *autoHideTimer;
+@property (nonatomic, assign) BOOL controlsVisible;
 
-// RTCMTLVideoView para renderização direta
+// RTCMTLVideoView para renderização
 @property (nonatomic, strong, readwrite) RTCMTLVideoView *videoView;
+
 @end
 
 @implementation FloatingWindow
@@ -56,25 +54,24 @@
         self.layer.borderWidth = 1.5;
         self.layer.borderColor = [UIColor colorWithWhite:0.3 alpha:0.7].CGColor;
         
-        // Melhorar a sombra para aparência mais moderna
+        // Configuração da sombra
         self.layer.shadowColor = [UIColor blackColor].CGColor;
         self.layer.shadowOffset = CGSizeMake(0, 4);
         self.layer.shadowOpacity = 0.5;
         self.layer.shadowRadius = 8;
-        
-        self.isReceivingFrames = NO;
-        self.currentFps = 0;
         
         [self setupUI];
         
         // Inicializar WebRTC manager
         self.webRTCManager = [[WebRTCManager alloc] initWithFloatingWindow:self];
         
+        // Estado inicial
         self.isPreviewActive = NO;
-        self.lastFrameTime = 0;
         self.controlsVisible = YES;
         self.lastFrameSize = CGSizeZero;
         self.isTranslucent = YES;
+        self.isReceivingFrames = NO;
+        self.currentFps = 0;
         
         // Iniciar temporizador para auto-ocultar controles
         [self resetAutoHideTimer];
@@ -85,7 +82,7 @@
 }
 
 - (void)setupUI {
-    // Container principal com layout constraints
+    // Container principal
     self.contentView = [[UIView alloc] init];
     self.contentView.translatesAutoresizingMaskIntoConstraints = NO;
     self.contentView.backgroundColor = [UIColor clearColor];
@@ -99,36 +96,18 @@
         [self.contentView.bottomAnchor constraintEqualToAnchor:self.bottomAnchor],
     ]];
     
-    // Configurar RTCMTLVideoView para renderização direta
+    // Configurar componentes da UI
     [self setupVideoView];
-    
-    // Configurar barra superior com status
     [self setupStatusBar];
-    
-    // Configurar botões de controle
     [self setupControlButtons];
-    
-    // Configurar indicador de carregamento
     [self setupLoadingIndicator];
-    
-    // Configurar área de estatísticas
-    [self setupStatsView];
-    
-    // Configurar gestos
     [self setupGestureRecognizers];
-    
-    // Configurar fundo gradiente para barras de controle
     [self setupGradients];
 }
 
 - (void)setupVideoView {
     // Usar RTCMTLVideoView para renderização eficiente de vídeo
     self.videoView = [[RTCMTLVideoView alloc] init];
-    if (!self.videoView) {
-        writeErrorLog(@"[FloatingWindow] Falha ao criar RTCMTLVideoView");
-        return;
-    }
-    
     self.videoView.translatesAutoresizingMaskIntoConstraints = NO;
     self.videoView.delegate = self;
     self.videoView.backgroundColor = [UIColor blackColor];
@@ -144,7 +123,6 @@
     writeLog(@"[FloatingWindow] RTCMTLVideoView configurada com sucesso");
 }
 
-// Em setupStatusBar, remover o infoButton
 - (void)setupStatusBar {
     // Barra de status superior com gradiente
     UIView *statusBarView = [[UIView alloc] init];
@@ -178,7 +156,7 @@
         [self.statusLabel.heightAnchor constraintEqualToConstant:30],
     ]];
     
-    // Apenas o botão de minimizar (remover o infoButton)
+    // Botão de minimizar
     self.minimizeButton = [UIButton buttonWithType:UIButtonTypeSystem];
     self.minimizeButton.translatesAutoresizingMaskIntoConstraints = NO;
     if (@available(iOS 13.0, *)) {
@@ -269,94 +247,15 @@
     ]];
 }
 
-- (void)setupStatsView {
-    // View para estatísticas
-    self.statsView = [[UIView alloc] init];
-    self.statsView.translatesAutoresizingMaskIntoConstraints = NO;
-    self.statsView.backgroundColor = [UIColor colorWithWhite:0.1 alpha:0.8];
-    self.statsView.layer.cornerRadius = 8;
-    self.statsView.alpha = 0;
-    self.statsView.clipsToBounds = YES;
-    [self.contentView addSubview:self.statsView];
-    
-    // Labels para estatísticas
-    self.connectionInfoLabel = [[UILabel alloc] init];
-    self.connectionInfoLabel.translatesAutoresizingMaskIntoConstraints = NO;
-    self.connectionInfoLabel.font = [UIFont systemFontOfSize:12];
-    self.connectionInfoLabel.textColor = [UIColor whiteColor];
-    self.connectionInfoLabel.numberOfLines = 0;
-    [self.statsView addSubview:self.connectionInfoLabel];
-    
-    self.videoStatsLabel = [[UILabel alloc] init];
-    self.videoStatsLabel.translatesAutoresizingMaskIntoConstraints = NO;
-    self.videoStatsLabel.font = [UIFont systemFontOfSize:12];
-    self.videoStatsLabel.textColor = [UIColor whiteColor];
-    self.videoStatsLabel.numberOfLines = 0;
-    [self.statsView addSubview:self.videoStatsLabel];
-    
-    self.networkStatsLabel = [[UILabel alloc] init];
-    self.networkStatsLabel.translatesAutoresizingMaskIntoConstraints = NO;
-    self.networkStatsLabel.font = [UIFont systemFontOfSize:12];
-    self.networkStatsLabel.textColor = [UIColor whiteColor];
-    self.networkStatsLabel.numberOfLines = 0;
-    [self.statsView addSubview:self.networkStatsLabel];
-    
-    // Posicionamento da view de estatísticas
-    [NSLayoutConstraint activateConstraints:@[
-        [self.statsView.leadingAnchor constraintEqualToAnchor:self.contentView.leadingAnchor constant:10],
-        [self.statsView.trailingAnchor constraintEqualToAnchor:self.contentView.trailingAnchor constant:-10],
-        [self.statsView.bottomAnchor constraintEqualToAnchor:self.contentView.bottomAnchor constant:-70],
-        [self.statsView.heightAnchor constraintEqualToConstant:120],
-        
-        [self.connectionInfoLabel.topAnchor constraintEqualToAnchor:self.statsView.topAnchor constant:8],
-        [self.connectionInfoLabel.leadingAnchor constraintEqualToAnchor:self.statsView.leadingAnchor constant:8],
-        [self.connectionInfoLabel.trailingAnchor constraintEqualToAnchor:self.statsView.trailingAnchor constant:-8],
-        
-        [self.videoStatsLabel.topAnchor constraintEqualToAnchor:self.connectionInfoLabel.bottomAnchor constant:8],
-        [self.videoStatsLabel.leadingAnchor constraintEqualToAnchor:self.statsView.leadingAnchor constant:8],
-        [self.videoStatsLabel.trailingAnchor constraintEqualToAnchor:self.statsView.trailingAnchor constant:-8],
-        
-        [self.networkStatsLabel.topAnchor constraintEqualToAnchor:self.videoStatsLabel.bottomAnchor constant:8],
-        [self.networkStatsLabel.leadingAnchor constraintEqualToAnchor:self.statsView.leadingAnchor constant:8],
-        [self.networkStatsLabel.trailingAnchor constraintEqualToAnchor:self.statsView.trailingAnchor constant:-8],
-        [self.networkStatsLabel.bottomAnchor constraintLessThanOrEqualToAnchor:self.statsView.bottomAnchor constant:-8],
-    ]];
-    
-    // Inicializar com valores padrão
-    self.connectionInfoLabel.text = @"Status: Desconectado";
-    self.videoStatsLabel.text = @"Vídeo: --";
-    self.networkStatsLabel.text = @"Rede: --";
-}
-
 - (void)setupGestureRecognizers {
     // Gesture para mover a janela
-    self.panGesture = [[UIPanGestureRecognizer alloc] initWithTarget:self action:@selector(handlePan:)];
-    [self addGestureRecognizer:self.panGesture];
-    
-    // Gesture para mover o conteúdo (para reposicionamento com controles visíveis)
-    self.contentPanGesture = [[UIPanGestureRecognizer alloc] initWithTarget:self action:@selector(handleContentPan:)];
-    [self.videoView addGestureRecognizer:self.contentPanGesture];
-    self.videoView.userInteractionEnabled = YES;
+    UIPanGestureRecognizer *panGesture = [[UIPanGestureRecognizer alloc] initWithTarget:self action:@selector(handlePan:)];
+    [self addGestureRecognizer:panGesture];
     
     // Adicionar double tap para minimizar/maximizar
-    [self addDoubleTapGesture];
-    
-    // Adicionar gestures de pinça e rotação
-    self.pinchGesture = [[UIPinchGestureRecognizer alloc] initWithTarget:self action:@selector(handlePinch:)];
-    [self addGestureRecognizer:self.pinchGesture];
-    
-    self.longPressGesture = [[UILongPressGestureRecognizer alloc] initWithTarget:self action:@selector(handleLongPress:)];
-    self.longPressGesture.minimumPressDuration = 0.5;
-    [self addGestureRecognizer:self.longPressGesture];
-    
-    // Adicionar gestures de swipe para mostrar/ocultar métricas
-    self.swipeUpGesture = [[UISwipeGestureRecognizer alloc] initWithTarget:self action:@selector(handleSwipeUp:)];
-    self.swipeUpGesture.direction = UISwipeGestureRecognizerDirectionUp;
-    [self addGestureRecognizer:self.swipeUpGesture];
-    
-    self.swipeDownGesture = [[UISwipeGestureRecognizer alloc] initWithTarget:self action:@selector(handleSwipeDown:)];
-    self.swipeDownGesture.direction = UISwipeGestureRecognizerDirectionDown;
-    [self addGestureRecognizer:self.swipeDownGesture];
+    UITapGestureRecognizer *doubleTapGesture = [[UITapGestureRecognizer alloc] initWithTarget:self action:@selector(handleDoubleTap:)];
+    doubleTapGesture.numberOfTapsRequired = 2;
+    [self addGestureRecognizer:doubleTapGesture];
     
     // Tap para mostrar/ocultar controles
     UITapGestureRecognizer *tapGesture = [[UITapGestureRecognizer alloc] initWithTarget:self action:@selector(handleSingleTap:)];
@@ -364,8 +263,8 @@
     [self addGestureRecognizer:tapGesture];
     
     // Evitar conflitos entre gestures
-    [self.panGesture requireGestureRecognizerToFail:tapGesture];
-    [tapGesture requireGestureRecognizerToFail:self.doubleTapGesture];
+    [panGesture requireGestureRecognizerToFail:tapGesture];
+    [tapGesture requireGestureRecognizerToFail:doubleTapGesture];
 }
 
 - (void)setupGradients {
@@ -461,9 +360,6 @@
     // Mostrar indicador de carregamento
     [self.loadingIndicator startAnimating];
     
-    // Definir isPreviewActive para true ANTES de iniciar WebRTC
-    self.isPreviewActive = YES;
-    
     // Iniciar WebRTC com tratamento de erro
     @try {
         if (!self.webRTCManager) {
@@ -536,31 +432,6 @@
     });
 }
 
-@synthesize currentFps = _currentFps;
-
-- (void)updateFps:(float)fps {
-    if (_currentFps != fps) {
-        _currentFps = fps;
-        
-        // Atualizar status se estiver recebendo frames
-        if (self.isReceivingFrames && self.statusLabel.text &&
-            [self.statusLabel.text hasPrefix:@"Recebendo"]) {
-            NSString *currentStatus = self.statusLabel.text;
-            NSString *resolution = @"";
-            
-            // Extrair resolução do status atual
-            NSArray *components = [currentStatus componentsSeparatedByString:@" "];
-            if (components.count > 1) {
-                resolution = components[1];
-            }
-            
-            if (resolution.length > 0) {
-                [self updateConnectionStatus:[NSString stringWithFormat:@"Recebendo %@", resolution]];
-            }
-        }
-    }
-}
-
 #pragma mark - RTCVideoViewDelegate
 
 - (void)videoView:(RTCMTLVideoView *)videoView didChangeVideoSize:(CGSize)size {
@@ -586,6 +457,15 @@
 }
 
 #pragma mark - Window State Management
+
+- (void)minimizeButtonTapped {
+    // Alternar entre minimizado e normal
+    if (self.windowState == FloatingWindowStateMinimized) {
+        [self changeWindowState:FloatingWindowStateNormal animated:YES];
+    } else {
+        [self changeWindowState:FloatingWindowStateMinimized animated:YES];
+    }
+}
 
 - (void)changeWindowState:(FloatingWindowState)newState animated:(BOOL)animated {
     // Salvar estado anterior para transição
@@ -715,81 +595,7 @@
         case FloatingWindowStateFullscreen:
             // Mostrar controles extras no modo fullscreen
             [self showControlsAnimated:NO];
-            [self showPerformanceStats:YES animated:NO];
             break;
-    }
-}
-
-- (void)minimizeWindow:(BOOL)animated {
-    [self changeWindowState:FloatingWindowStateMinimized animated:animated];
-}
-
-- (void)expandWindow:(BOOL)animated {
-    [self changeWindowState:FloatingWindowStateNormal animated:animated];
-}
-
-- (void)maximizeWindow:(BOOL)animated {
-    [self changeWindowState:FloatingWindowStateFullscreen animated:animated];
-}
-
-- (void)snapToNearestCorner:(BOOL)animated {
-    CGRect screenBounds = [UIScreen mainScreen].bounds;
-    CGFloat threshold = 100; // Distância para considerar "perto" da borda
-    
-    // Determinar qual borda está mais próxima
-    CGFloat distanceToLeft = self.center.x;
-    CGFloat distanceToRight = screenBounds.size.width - self.center.x;
-    CGFloat distanceToTop = self.center.y;
-    CGFloat distanceToBottom = screenBounds.size.height - self.center.y;
-    
-    CGFloat padding = 10.0;
-    CGPoint targetPoint = self.center;
-    
-    // Primeiro determina horizontal
-    if (distanceToLeft < threshold) {
-        targetPoint.x = self.frame.size.width/2 + padding;
-    } else if (distanceToRight < threshold) {
-        targetPoint.x = screenBounds.size.width - self.frame.size.width/2 - padding;
-    }
-    
-    // Depois determina vertical
-    if (distanceToTop < threshold) {
-        targetPoint.y = self.frame.size.height/2 + padding;
-    } else if (distanceToBottom < threshold) {
-        targetPoint.y = screenBounds.size.height - self.frame.size.height/2 - padding;
-    }
-    
-    // Se o ponto não mudou, não precisa animar
-    if (CGPointEqualToPoint(targetPoint, self.center)) {
-        return;
-    }
-    
-    if (animated) {
-        [UIView animateWithDuration:0.3
-                              delay:0
-             usingSpringWithDamping:0.7
-              initialSpringVelocity:0.5
-                            options:UIViewAnimationOptionCurveEaseInOut
-                         animations:^{
-            self.center = targetPoint;
-        } completion:nil];
-    } else {
-        self.center = targetPoint;
-    }
-}
-
-- (void)setWindowTranslucency:(BOOL)translucent {
-    // Ajustar transparência da janela
-    self.isTranslucent = translucent;
-    
-    if (translucent) {
-        [UIView animateWithDuration:0.3 animations:^{
-            self.backgroundColor = [UIColor colorWithRed:0.1 green:0.1 blue:0.1 alpha:0.85];
-        }];
-    } else {
-        [UIView animateWithDuration:0.3 animations:^{
-            self.backgroundColor = [UIColor colorWithRed:0.1 green:0.1 blue:0.1 alpha:1.0];
-        }];
     }
 }
 
@@ -805,7 +611,6 @@
     
     void (^showAnimations)(void) = ^{
         self.minimizeButton.alpha = 1.0;
-        self.infoButton.alpha = 1.0;
         self.controlsStackView.alpha = 1.0;
         self.statusLabel.alpha = 1.0;
     };
@@ -824,7 +629,6 @@
     
     void (^hideAnimations)(void) = ^{
         self.minimizeButton.alpha = 0.0;
-        self.infoButton.alpha = 0.0;
         self.controlsStackView.alpha = 0.0;
         
         // Manter status parcialmente visível
@@ -835,144 +639,6 @@
         [UIView animateWithDuration:0.3 animations:hideAnimations];
     } else {
         hideAnimations();
-    }
-}
-
-- (void)showDiagnosticInfo:(BOOL)show animated:(BOOL)animated {
-    if (!self.diagnosticView) {
-        // Criar view de diagnóstico sob demanda
-        self.diagnosticView = [[UIView alloc] init];
-        self.diagnosticView.translatesAutoresizingMaskIntoConstraints = NO;
-        self.diagnosticView.backgroundColor = [UIColor colorWithWhite:0.1 alpha:0.85];
-        self.diagnosticView.layer.cornerRadius = 8;
-        self.diagnosticView.alpha = 0;
-        [self.contentView addSubview:self.diagnosticView];
-        
-        // Posicionar no topo direito
-        [NSLayoutConstraint activateConstraints:@[
-            [self.diagnosticView.topAnchor constraintEqualToAnchor:self.contentView.topAnchor constant:50],
-            [self.diagnosticView.trailingAnchor constraintEqualToAnchor:self.contentView.trailingAnchor constant:-10],
-            [self.diagnosticView.widthAnchor constraintEqualToConstant:150],
-            [self.diagnosticView.heightAnchor constraintEqualToConstant:100],
-        ]];
-        
-        // Adicionar label para informações
-        UILabel *diagLabel = [[UILabel alloc] init];
-        diagLabel.translatesAutoresizingMaskIntoConstraints = NO;
-        diagLabel.font = [UIFont monospacedSystemFontOfSize:10 weight:UIFontWeightRegular];
-        diagLabel.textColor = [UIColor whiteColor];
-        diagLabel.numberOfLines = 0;
-        diagLabel.text = @"Sistema: iOS\nWebRTC: Ativo\nConexão: OK\nQualidade: Alta";
-        [self.diagnosticView addSubview:diagLabel];
-        
-        [NSLayoutConstraint activateConstraints:@[
-            [diagLabel.topAnchor constraintEqualToAnchor:self.diagnosticView.topAnchor constant:8],
-            [diagLabel.leadingAnchor constraintEqualToAnchor:self.diagnosticView.leadingAnchor constant:8],
-            [diagLabel.trailingAnchor constraintEqualToAnchor:self.diagnosticView.trailingAnchor constant:-8],
-            [diagLabel.bottomAnchor constraintEqualToAnchor:self.diagnosticView.bottomAnchor constant:-8],
-        ]];
-    }
-    
-    if (animated) {
-        [UIView animateWithDuration:0.3 animations:^{
-            self.diagnosticView.alpha = show ? 1.0 : 0.0;
-        }];
-    } else {
-        self.diagnosticView.alpha = show ? 1.0 : 0.0;
-    }
-}
-
-- (void)showPerformanceStats:(BOOL)show animated:(BOOL)animated {
-    if (animated) {
-        [UIView animateWithDuration:0.3 animations:^{
-            self.statsView.alpha = show ? 1.0 : 0.0;
-        }];
-    } else {
-        self.statsView.alpha = show ? 1.0 : 0.0;
-    }
-    
-    self.showPerformanceMetrics = show;
-}
-
-- (void)showAdvancedControlPanel:(BOOL)show animated:(BOOL)animated {
-    // Implementar quando necessário - painel de controles avançados
-    self.showAdvancedControls = show;
-}
-
-- (void)showSettingsMenu:(UIView *)sender {
-    // Criar um menu de ações
-    if (@available(iOS 13.0, *)) {
-        UIAlertController *actionSheet = [UIAlertController
-                                          alertControllerWithTitle:@"Configurações"
-                                          message:nil
-                                          preferredStyle:UIAlertControllerStyleActionSheet];
-        
-        // Ação para ajustar opacidade
-        [actionSheet addAction:[UIAlertAction
-                               actionWithTitle:self.isTranslucent ? @"Modo Sólido" : @"Modo Transparente"
-                               style:UIAlertActionStyleDefault
-                               handler:^(UIAlertAction * _Nonnull action) {
-            [self setWindowTranslucency:!self.isTranslucent];
-        }]];
-        
-        // Ação para mostrar estatísticas
-        [actionSheet addAction:[UIAlertAction
-                               actionWithTitle:self.showPerformanceMetrics ? @"Ocultar Estatísticas" : @"Mostrar Estatísticas"
-                               style:UIAlertActionStyleDefault
-                               handler:^(UIAlertAction * _Nonnull action) {
-            [self showPerformanceStats:!self.showPerformanceMetrics animated:YES];
-        }]];
-        
-        // Ação para tela cheia
-        [actionSheet addAction:[UIAlertAction
-                               actionWithTitle:@"Tela Cheia"
-                               style:UIAlertActionStyleDefault
-                               handler:^(UIAlertAction * _Nonnull action) {
-            [self maximizeWindow:YES];
-        }]];
-        
-        // Ação para tamanho normal
-        [actionSheet addAction:[UIAlertAction
-                               actionWithTitle:@"Tamanho Normal"
-                               style:UIAlertActionStyleDefault
-                               handler:^(UIAlertAction * _Nonnull action) {
-            [self changeWindowState:FloatingWindowStateNormal animated:YES];
-        }]];
-        
-        // Botão Cancelar
-        [actionSheet addAction:[UIAlertAction
-                               actionWithTitle:@"Cancelar"
-                               style:UIAlertActionStyleCancel
-                               handler:nil]];
-        
-        // Apresentar a partir desta janela
-        UIViewController *rootVC = [[UIViewController alloc] init];
-        self.rootViewController = rootVC;
-        [rootVC presentViewController:actionSheet animated:YES completion:nil];
-        
-        // Correção para iPad
-        UIPopoverPresentationController *popover = actionSheet.popoverPresentationController;
-        if (popover) {
-            popover.sourceView = sender;
-            popover.sourceRect = sender.bounds;
-            popover.permittedArrowDirections = UIPopoverArrowDirectionAny;
-        }
-    }
-}
-
-- (void)updateStatistics {
-    if (self.webRTCManager) {
-        // Obter estatísticas e atualizar labels
-        NSDictionary *stats = [self.webRTCManager getConnectionStats];
-        if (stats) {
-            // Estatísticas de rede
-            NSString *networkStatsText = [NSString stringWithFormat:@"Rede: %@\nLatência: %@\nPacotes: %@",
-                                       stats[@"connectionType"] ?: @"--",
-                                       stats[@"rtt"] ?: @"--",
-                                       stats[@"packetsReceived"] ?: @"--"];
-            
-            self.networkStatsLabel.text = networkStatsText;
-        }
     }
 }
 
@@ -1077,99 +743,21 @@
     }
 }
 
-- (void)handleContentPan:(UIPanGestureRecognizer *)gesture {
-    // Semelhante ao handlePan, mas para quando o arrasto ocorre no conteúdo
-    // Útil para quando os controles estão visíveis
-    [self handlePan:gesture];
-}
-
 - (void)handleDoubleTap:(UITapGestureRecognizer *)gesture {
     // Alternar entre estados quando houver duplo toque
     switch (self.windowState) {
         case FloatingWindowStateMinimized:
-            [self expandWindow:YES];
+            [self changeWindowState:FloatingWindowStateNormal animated:YES];
             break;
             
         case FloatingWindowStateNormal:
-            [self maximizeWindow:YES];
+            [self changeWindowState:FloatingWindowStateFullscreen animated:YES];
             break;
             
         case FloatingWindowStateExpanded:
         case FloatingWindowStateFullscreen:
-            [self minimizeWindow:YES];
+            [self changeWindowState:FloatingWindowStateMinimized animated:YES];
             break;
-    }
-}
-
-- (void)handlePinch:(UIPinchGestureRecognizer *)gesture {
-    // Implementar redimensionamento com gesto de pinça
-    static CGRect initialFrame;
-    
-    switch (gesture.state) {
-        case UIGestureRecognizerStateBegan:
-            initialFrame = self.frame;
-            break;
-            
-        case UIGestureRecognizerStateChanged: {
-            CGFloat scale = gesture.scale;
-            CGRect newFrame = CGRectMake(
-                initialFrame.origin.x - (initialFrame.size.width * (scale - 1)) / 2,
-                initialFrame.origin.y - (initialFrame.size.height * (scale - 1)) / 2,
-                initialFrame.size.width * scale,
-                initialFrame.size.height * scale
-            );
-            
-            // Limitar tamanho mínimo e máximo
-            CGFloat minSize = 60;
-            CGFloat maxWidth = [UIScreen mainScreen].bounds.size.width * 0.95;
-            CGFloat maxHeight = [UIScreen mainScreen].bounds.size.height * 0.95;
-            
-            if (newFrame.size.width >= minSize && newFrame.size.height >= minSize &&
-                newFrame.size.width <= maxWidth && newFrame.size.height <= maxHeight) {
-                self.frame = newFrame;
-            }
-            break;
-        }
-            
-        case UIGestureRecognizerStateEnded:
-        case UIGestureRecognizerStateCancelled: {
-            // Determinar estado baseado no tamanho final
-            CGFloat screenWidth = [UIScreen mainScreen].bounds.size.width;
-            CGFloat relativeWidth = self.frame.size.width / screenWidth;
-            
-            if (relativeWidth < 0.3) {
-                [self minimizeWindow:YES];
-            } else if (relativeWidth > 0.7) {
-                [self maximizeWindow:YES];
-            } else {
-                [self expandWindow:YES];
-            }
-            break;
-        }
-            
-        default:
-            break;
-    }
-}
-
-- (void)handleLongPress:(UILongPressGestureRecognizer *)gesture {
-    if (gesture.state == UIGestureRecognizerStateBegan) {
-        // Mostrar menu de configurações
-        [self showSettingsMenu:gesture.view];
-    }
-}
-
-- (void)handleSwipeUp:(UISwipeGestureRecognizer *)gesture {
-    // Esconder métricas com swipe para cima
-    if (self.showPerformanceMetrics) {
-        [self showPerformanceStats:NO animated:YES];
-    }
-}
-
-- (void)handleSwipeDown:(UISwipeGestureRecognizer *)gesture {
-    // Mostrar métricas com swipe para baixo
-    if (!self.showPerformanceMetrics) {
-        [self showPerformanceStats:YES animated:YES];
     }
 }
 
@@ -1182,32 +770,64 @@
     }
 }
 
-#pragma mark - Controls Actions
-
-- (void)minimizeButtonTapped {
-    // Alternar entre minimizado e normal
-    if (self.windowState == FloatingWindowStateMinimized) {
-        [self expandWindow:YES];
+- (void)snapToNearestCorner:(BOOL)animated {
+    CGRect screenBounds = [UIScreen mainScreen].bounds;
+    CGFloat threshold = 100; // Distância para considerar "perto" da borda
+    
+    // Determinar qual borda está mais próxima
+    CGFloat distanceToLeft = self.center.x;
+    CGFloat distanceToRight = screenBounds.size.width - self.center.x;
+    CGFloat distanceToTop = self.center.y;
+    CGFloat distanceToBottom = screenBounds.size.height - self.center.y;
+    
+    CGFloat padding = 10.0;
+    CGPoint targetPoint = self.center;
+    
+    // Primeiro determina horizontal
+    if (distanceToLeft < threshold) {
+        targetPoint.x = self.frame.size.width/2 + padding;
+    } else if (distanceToRight < threshold) {
+        targetPoint.x = screenBounds.size.width - self.frame.size.width/2 - padding;
+    }
+    
+    // Depois determina vertical
+    if (distanceToTop < threshold) {
+        targetPoint.y = self.frame.size.height/2 + padding;
+    } else if (distanceToBottom < threshold) {
+        targetPoint.y = screenBounds.size.height - self.frame.size.height/2 - padding;
+    }
+    
+    // Se o ponto não mudou, não precisa animar
+    if (CGPointEqualToPoint(targetPoint, self.center)) {
+        return;
+    }
+    
+    if (animated) {
+        [UIView animateWithDuration:0.3
+                              delay:0
+             usingSpringWithDamping:0.7
+              initialSpringVelocity:0.5
+                            options:UIViewAnimationOptionCurveEaseInOut
+                         animations:^{
+            self.center = targetPoint;
+        } completion:nil];
     } else {
-        [self minimizeWindow:YES];
+        self.center = targetPoint;
     }
 }
 
-- (void)infoButtonTapped {
-    // Mostrar estatísticas
-    [self showPerformanceStats:!self.showPerformanceMetrics animated:YES];
-}
-
-- (void)toggleStatsView:(UIButton *)sender {
-    // Alternar visibilidade do painel de estatísticas
-    [self showPerformanceStats:!self.showPerformanceMetrics animated:YES];
-}
-
-- (void)addDoubleTapGesture {
-    // Gesture de duplo toque para minimizar/maximizar
-    self.doubleTapGesture = [[UITapGestureRecognizer alloc] initWithTarget:self action:@selector(handleDoubleTap:)];
-    self.doubleTapGesture.numberOfTapsRequired = 2;
-    [self addGestureRecognizer:self.doubleTapGesture];
+- (void)setWindowTranslucency:(BOOL)translucent {
+    self.isTranslucent = translucent;
+    
+    if (translucent) {
+        [UIView animateWithDuration:0.3 animations:^{
+            self.backgroundColor = [UIColor colorWithRed:0.1 green:0.1 blue:0.1 alpha:0.85];
+        }];
+    } else {
+        [UIView animateWithDuration:0.3 animations:^{
+            self.backgroundColor = [UIColor colorWithRed:0.1 green:0.1 blue:0.1 alpha:1.0];
+        }];
+    }
 }
 
 @end
