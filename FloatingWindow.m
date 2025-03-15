@@ -524,7 +524,15 @@
         return;
     }
     
-    dispatch_async(dispatch_get_main_queue(), ^{
+    // Garantir execução na thread principal
+    if (![NSThread isMainThread]) {
+        dispatch_async(dispatch_get_main_queue(), ^{
+            [self updatePreviewImage:image];
+        });
+        return;
+    }
+    
+    @try {
         self.previewImageView.image = image;
         self.lastImageUpdate = CACurrentMediaTime();
         
@@ -532,7 +540,9 @@
         if (self.loadingIndicator.isAnimating) {
             [self.loadingIndicator stopAnimating];
         }
-    });
+    } @catch (NSException *exception) {
+        writeLog(@"[FloatingWindow] Exceção ao atualizar imagem: %@", exception);
+    }
 }
 
 - (void)updateConnectionStatus:(NSString *)status {

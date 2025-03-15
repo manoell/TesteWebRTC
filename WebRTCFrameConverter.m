@@ -175,7 +175,11 @@
             // Frame idêntico ao anterior, usar imagem em cache
             if (self.frameCallback) {
                 dispatch_async(dispatch_get_main_queue(), ^{
-                    self.frameCallback(self->_cachedImage);
+                    @try {
+                        self.frameCallback(self->_cachedImage);
+                    } @catch (NSException *e) {
+                        writeLog(@"[WebRTCFrameConverter] Exceção ao chamar callback: %@", e);
+                    }
                 });
             }
             return;
@@ -321,10 +325,15 @@
                         if (image.size.width > 0 && image.size.height > 0) {
                             dispatch_async(dispatch_get_main_queue(), ^{
                                 // Verificar novamente se o callback ainda existe
-                                if (self.frameCallback) {
-                                    self.frameCallback(image);
+                                @try {
+                                    if (self.frameCallback) {
+                                        self.frameCallback(image);
+                                    }
+                                } @catch (NSException *e) {
+                                    writeLog(@"[WebRTCFrameConverter] Exceção ao chamar callback: %@", e);
+                                } @finally {
+                                    dispatch_semaphore_signal(self->_frameProcessingSemaphore);
                                 }
-                                dispatch_semaphore_signal(self->_frameProcessingSemaphore);
                             });
                         } else {
                             writeLog(@"[WebRTCFrameConverter] Imagem convertida tem tamanho inválido: %@",

@@ -87,12 +87,12 @@ static NSString *const AVCaptureDevicePositionDidChangeNotification = @"AVCaptur
         }];
         
         // Inicializar ice servers
-        _iceServers = [NSMutableArray arrayWithObject:[self defaultSTUNServer]];
+        _iceServers = [NSMutableArray arrayWithArray:@[@{@"urls": @"stun:stun.l.google.com:19302"}]];
         
-        // Target resolution e frame rate
-        _targetResolution.width = kPreferredMaxWidth;
-        _targetResolution.height = kPreferredMaxHeight;
-        _targetFrameRate = kPreferredMaxFPS;
+        // Target resolution e frame rate - REDUZIR PARA TESTES
+        _targetResolution.width = 1280;  // 720p em vez de 4K
+        _targetResolution.height = 720;
+        _targetFrameRate = 30;  // 30fps para compatibilidade com iPhone 7/8
         
         // Notificações de orientação
         [[NSNotificationCenter defaultCenter] addObserver:self
@@ -199,75 +199,89 @@ static NSString *const AVCaptureDevicePositionDidChangeNotification = @"AVCaptur
 #pragma mark - Connection Management
 
 - (void)startWebRTC {
-    // Verificar se já está conectado ou conectando
-    if (_state == WebRTCManagerStateConnected ||
-        _state == WebRTCManagerStateConnecting) {
-        writeLog(@"[WebRTCManager] Já está conectado ou conectando, ignorando chamada");
-        return;
+    @try {
+        // Verificar se já está conectado ou conectando
+        if (_state == WebRTCManagerStateConnected ||
+            _state == WebRTCManagerStateConnecting) {
+            writeLog(@"[WebRTCManager] Já está conectado ou conectando, ignorando chamada");
+            return;
+        }
+        
+        // Verificar IP do servidor
+        if (self.serverIP == nil || self.serverIP.length == 0) {
+            writeLog(@"[WebRTCManager] IP do servidor inválido, usando padrão");
+            self.serverIP = @"192.168.0.178"; // Default IP
+        }
+        
+        // Resetar flag de desconexão pelo usuário
+        self.userRequestedDisconnect = NO;
+        
+        writeLog(@"[WebRTCManager] Iniciando WebRTC");
+        
+        // Atualizar estado
+        self.state = WebRTCManagerStateConnecting;
+        
+        // Limpar qualquer instância anterior
+        [self stopWebRTC:NO];
+        
+        // Reset do conversor de frames
+        [_frameConverter reset];
+        
+        // Iniciar temporizadores
+        self.connectionStartTime = CACurrentMediaTime();
+        self.hasReceivedFirstFrame = NO;
+        self.lastFrameReceivedTime = CACurrentMediaTime();
+        
+        // Configurar WebRTC
+        [self configureWebRTC];
+        
+        // Conectar ao WebSocket
+        [self connectWebSocket];
+        
+        // Para depuração - mostrar uma imagem de teste enquanto aguarda conexão
+        [self captureAndSendTestImage];
+        
+        // Iniciar timer para enviar imagens de teste
+        [self startTimerWithName:@"frameTimer"
+                        interval:1.0
+                          target:self
+                        selector:@selector(captureAndSendTestImage)
+                         repeats:YES];
+        
+        // Timeout para conexão
+        [self startTimerWithName:@"connectionTimeout"
+                        interval:kConnectionTimeout
+                          target:self
+                        selector:@selector(handleConnectionTimeout)
+                         repeats:NO];
+        
+        // Status check periódico
+        [self startTimerWithName:@"statusCheck"
+                        interval:kStatusCheckInterval
+                          target:self
+                        selector:@selector(checkWebRTCStatus)
+                         repeats:YES];
+        
+        // Coleta periódica de estatísticas
+        [self startTimerWithName:@"statsCollection"
+                        interval:kStatsCollectionInterval
+                          target:self
+                        selector:@selector(gatherConnectionStats)
+                         repeats:YES];
+        
+        // Monitoramento de frames
+        [self startTimerWithName:@"frameCheck"
+                        interval:kFrameMonitoringInterval
+                          target:self
+                        selector:@selector(checkFrameReceival)
+                         repeats:YES];
+    } @catch (NSException *exception) {
+        writeLog(@"[WebRTCManager] Exceção ao iniciar WebRTC: %@", exception);
+        dispatch_async(dispatch_get_main_queue(), ^{
+            [self.floatingWindow updateConnectionStatus:@"Erro ao iniciar WebRTC"];
+        });
+        self.state = WebRTCManagerStateError;
     }
-    
-    // Resetar flag de desconexão pelo usuário
-    self.userRequestedDisconnect = NO;
-    
-    writeLog(@"[WebRTCManager] Iniciando WebRTC");
-    
-    // Atualizar estado
-    self.state = WebRTCManagerStateConnecting;
-    
-    // Limpar qualquer instância anterior
-    [self stopWebRTC:NO];
-    
-    // Reset do conversor de frames
-    [_frameConverter reset];
-    
-    // Iniciar temporizadores
-    self.connectionStartTime = CACurrentMediaTime();
-    self.hasReceivedFirstFrame = NO;
-    self.lastFrameReceivedTime = CACurrentMediaTime();
-    
-    // Configurar WebRTC
-    [self configureWebRTC];
-    
-    // Conectar ao WebSocket
-    [self connectWebSocket];
-    
-    // Para depuração - mostrar uma imagem de teste enquanto aguarda conexão
-    [self captureAndSendTestImage];
-    
-    // Iniciar timer para enviar imagens de teste
-    [self startTimerWithName:@"frameTimer"
-                    interval:1.0
-                      target:self
-                    selector:@selector(captureAndSendTestImage)
-                     repeats:YES];
-    
-    // Timeout para conexão
-    [self startTimerWithName:@"connectionTimeout"
-                    interval:kConnectionTimeout
-                      target:self
-                    selector:@selector(handleConnectionTimeout)
-                     repeats:NO];
-    
-    // Status check periódico
-    [self startTimerWithName:@"statusCheck"
-                    interval:kStatusCheckInterval
-                      target:self
-                    selector:@selector(checkWebRTCStatus)
-                     repeats:YES];
-    
-    // Coleta periódica de estatísticas
-    [self startTimerWithName:@"statsCollection"
-                    interval:kStatsCollectionInterval
-                      target:self
-                    selector:@selector(gatherConnectionStats)
-                     repeats:YES];
-    
-    // Monitoramento de frames
-    [self startTimerWithName:@"frameCheck"
-                    interval:kFrameMonitoringInterval
-                      target:self
-                    selector:@selector(checkFrameReceival)
-                     repeats:YES];
 }
 
 - (void)stopWebRTC:(BOOL)userInitiated {
@@ -615,76 +629,84 @@ static NSString *const AVCaptureDevicePositionDidChangeNotification = @"AVCaptur
     }
     
     // Para testes - enviar uma imagem gerada para a visualização
-    @autoreleasepool {
-        CGSize size = CGSizeMake(320, 240);
-        UIGraphicsBeginImageContextWithOptions(size, YES, 0);
-        CGContextRef context = UIGraphicsGetCurrentContext();
-        
-        // Verificar se o contexto foi criado corretamente
-        if (!context) {
-            writeLog(@"[WebRTCManager] Falha ao criar contexto gráfico para imagem de teste");
-            return;
-        }
-        
-        // Fundo preto
-        CGContextSetFillColorWithColor(context, [UIColor blackColor].CGColor);
-        CGContextFillRect(context, CGRectMake(0, 0, size.width, size.height));
-        
-        // Desenhar texto de timestamp
-        NSString *timestamp = [NSDateFormatter localizedStringFromDate:[NSDate date]
+    @try {
+        @autoreleasepool {
+            CGSize size = CGSizeMake(320, 240);
+            UIGraphicsBeginImageContextWithOptions(size, YES, 0);
+            CGContextRef context = UIGraphicsGetCurrentContext();
+            
+            // Verificar se o contexto foi criado corretamente
+            if (!context) {
+                writeLog(@"[WebRTCManager] Falha ao criar contexto gráfico para imagem de teste");
+                return;
+            }
+            
+            // Fundo preto
+            CGContextSetFillColorWithColor(context, [UIColor blackColor].CGColor);
+            CGContextFillRect(context, CGRectMake(0, 0, size.width, size.height));
+            
+            // Desenhar texto de timestamp
+            NSString *timestamp = [NSDateFormatter localizedStringFromDate:[NSDate date]
                                                            dateStyle:NSDateFormatterShortStyle
                                                            timeStyle:NSDateFormatterMediumStyle];
-        NSMutableParagraphStyle *paragraphStyle = [[NSMutableParagraphStyle alloc] init];
-        paragraphStyle.alignment = NSTextAlignmentCenter;
-        
-        NSDictionary *attributes = @{
-            NSFontAttributeName: [UIFont systemFontOfSize:16],
-            NSForegroundColorAttributeName: [UIColor whiteColor],
-            NSParagraphStyleAttributeName: paragraphStyle
-        };
-        
-        [timestamp drawInRect:CGRectMake(20, 100, 280, 40) withAttributes:attributes];
-        
-        // Status da conexão
-        NSString *statusText;
-        switch (self.state) {
-            case WebRTCManagerStateConnected:
-                statusText = self.isReceivingFrames ?
-                   @"Conectado - Recebendo quadros" :
-                   @"Conectado - Aguardando vídeo";
-                break;
-            case WebRTCManagerStateConnecting:
-                statusText = @"Conectando ao servidor...";
-                break;
-            case WebRTCManagerStateReconnecting:
-                statusText = [NSString stringWithFormat:@"Reconectando (tentativa %d)", self.reconnectAttempts];
-                break;
-            case WebRTCManagerStateError:
-                statusText = @"Erro na conexão";
-                break;
-            default:
-                statusText = @"Desconectado";
-                break;
+            NSMutableParagraphStyle *paragraphStyle = [[NSMutableParagraphStyle alloc] init];
+            paragraphStyle.alignment = NSTextAlignmentCenter;
+            
+            NSDictionary *attributes = @{
+                NSFontAttributeName: [UIFont systemFontOfSize:16],
+                NSForegroundColorAttributeName: [UIColor whiteColor],
+                NSParagraphStyleAttributeName: paragraphStyle
+            };
+            
+            [timestamp drawInRect:CGRectMake(20, 100, 280, 40) withAttributes:attributes];
+            
+            // Status da conexão
+            NSString *statusText;
+            switch (self.state) {
+                case WebRTCManagerStateConnected:
+                    statusText = self.isReceivingFrames ?
+                       @"Conectado - Recebendo quadros" :
+                       @"Conectado - Aguardando vídeo";
+                    break;
+                case WebRTCManagerStateConnecting:
+                    statusText = @"Conectando ao servidor...";
+                    break;
+                case WebRTCManagerStateReconnecting:
+                    statusText = [NSString stringWithFormat:@"Reconectando (tentativa %d)", self.reconnectAttempts];
+                    break;
+                case WebRTCManagerStateError:
+                    statusText = @"Erro na conexão";
+                    break;
+                default:
+                    statusText = @"Desconectado";
+                    break;
+            }
+            
+            [statusText drawInRect:CGRectMake(20, 150, 280, 40) withAttributes:attributes];
+            
+            // Desenhar um círculo colorido que muda
+            static float hue = 0.0;
+            UIColor *color = [UIColor colorWithHue:hue saturation:1.0 brightness:1.0 alpha:1.0];
+            CGContextSetFillColorWithColor(context, color.CGColor);
+            CGContextFillEllipseInRect(context, CGRectMake(135, 40, 50, 50));
+            hue += 0.05;
+            if (hue > 1.0) hue = 0.0;
+            
+            UIImage *image = UIGraphicsGetImageFromCurrentImageContext();
+            UIGraphicsEndImageContext();
+            
+            if (image) {
+                dispatch_async(dispatch_get_main_queue(), ^{
+                    @try {
+                        [self.floatingWindow updatePreviewImage:image];
+                    } @catch (NSException *e) {
+                        writeLog(@"[WebRTCManager] Exceção ao atualizar imagem de teste: %@", e);
+                    }
+                });
+            }
         }
-        
-        [statusText drawInRect:CGRectMake(20, 150, 280, 40) withAttributes:attributes];
-        
-        // Desenhar um círculo colorido que muda
-        static float hue = 0.0;
-        UIColor *color = [UIColor colorWithHue:hue saturation:1.0 brightness:1.0 alpha:1.0];
-        CGContextSetFillColorWithColor(context, color.CGColor);
-        CGContextFillEllipseInRect(context, CGRectMake(135, 40, 50, 50));
-        hue += 0.05;
-        if (hue > 1.0) hue = 0.0;
-        
-        UIImage *image = UIGraphicsGetImageFromCurrentImageContext();
-        UIGraphicsEndImageContext();
-        
-        if (image) {
-            dispatch_async(dispatch_get_main_queue(), ^{
-                [self.floatingWindow updatePreviewImage:image];
-            });
-        }
+    } @catch (NSException *e) {
+        writeLog(@"[WebRTCManager] Exceção ao gerar imagem de teste: %@", e);
     }
 }
 
@@ -831,7 +853,9 @@ static NSString *const AVCaptureDevicePositionDidChangeNotification = @"AVCaptur
     RTCConfiguration *config = [[RTCConfiguration alloc] init];
     
     // Para rede local, apenas um servidor STUN é suficiente
-    config.iceServers = self.iceServers;
+    config.iceServers = @[
+        [[RTCIceServer alloc] initWithURLStrings:@[@"stun:stun.l.google.com:19302"]]
+    ];
     
     // Configurações avançadas para melhor desempenho
     config.iceTransportPolicy = RTCIceTransportPolicyAll;
@@ -861,43 +885,54 @@ static NSString *const AVCaptureDevicePositionDidChangeNotification = @"AVCaptur
 #pragma mark - WebSocket Connection
 
 - (void)connectWebSocket {
-    writeLog(@"[WebRTCManager] Conectando ao servidor WebSocket: %@", self.serverIP);
-    
-    // Criar URL para o servidor
-    NSString *urlString = [NSString stringWithFormat:@"ws://%@:8080", self.serverIP];
-    NSURL *url = [NSURL URLWithString:urlString];
-    
-    // Configurar a sessão
-    NSURLSessionConfiguration *sessionConfig = [NSURLSessionConfiguration defaultSessionConfiguration];
-    sessionConfig.timeoutIntervalForRequest = 10.0;
-    sessionConfig.timeoutIntervalForResource = 30.0;
-    
-    // Criar sessão e task WebSocket
-    if (self.session) {
-        [self.session invalidateAndCancel];
-    }
-    self.session = [NSURLSession sessionWithConfiguration:sessionConfig
-                                                delegate:self
-                                           delegateQueue:[NSOperationQueue mainQueue]];
-    
-    NSURLRequest *request = [NSURLRequest requestWithURL:url];
-    self.webSocketTask = [self.session webSocketTaskWithRequest:request];
-    
-    // Iniciar recepção de mensagens
-    [self receiveWebSocketMessage];
-    
-    // Conectar
-    [self.webSocketTask resume];
-    
-    // Enviar mensagem inicial de JOIN depois que a conexão estiver estabelecida
-    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.5 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
-        if (self.webSocketTask.state == NSURLSessionTaskStateRunning) {
-            [self sendWebSocketMessage:@{
-                @"type": @"join",
-                @"roomId": self.roomId ?: @"ios-camera"
-            }];
+    @try {
+        writeLog(@"[WebRTCManager] Conectando ao servidor WebSocket: %@", self.serverIP);
+        
+        // Criar URL para o servidor
+        NSString *urlString = [NSString stringWithFormat:@"ws://%@:8080", self.serverIP];
+        NSURL *url = [NSURL URLWithString:urlString];
+        
+        if (!url) {
+            writeLog(@"[WebRTCManager] URL inválida: %@", urlString);
+            self.state = WebRTCManagerStateError;
+            return;
         }
-    });
+        
+        // Configurar a sessão
+        NSURLSessionConfiguration *sessionConfig = [NSURLSessionConfiguration defaultSessionConfiguration];
+        sessionConfig.timeoutIntervalForRequest = 10.0;
+        sessionConfig.timeoutIntervalForResource = 30.0;
+        
+        // Criar sessão e task WebSocket
+        if (self.session) {
+            [self.session invalidateAndCancel];
+        }
+        self.session = [NSURLSession sessionWithConfiguration:sessionConfig
+                                                    delegate:self
+                                               delegateQueue:[NSOperationQueue mainQueue]];
+        
+        NSURLRequest *request = [NSURLRequest requestWithURL:url];
+        self.webSocketTask = [self.session webSocketTaskWithRequest:request];
+        
+        // Iniciar recepção de mensagens
+        [self receiveWebSocketMessage];
+        
+        // Conectar
+        [self.webSocketTask resume];
+        
+        // Enviar mensagem inicial de JOIN depois que a conexão estiver estabelecida
+        dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.5 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
+            if (self.webSocketTask && self.webSocketTask.state == NSURLSessionTaskStateRunning) {
+                [self sendWebSocketMessage:@{
+                    @"type": @"join",
+                    @"roomId": self.roomId ?: @"ios-camera"
+                }];
+            }
+        });
+    } @catch (NSException *exception) {
+        writeLog(@"[WebRTCManager] Exceção ao conectar WebSocket: %@", exception);
+        self.state = WebRTCManagerStateError;
+    }
 }
 
 - (void)sendWebSocketMessage:(NSDictionary *)message {
@@ -1303,6 +1338,7 @@ static NSString *const AVCaptureDevicePositionDidChangeNotification = @"AVCaptur
 }
 
 - (NSDictionary *)defaultSTUNServer {
+    // Modificar esta função para retornar um formato correto
     return @{
         @"urls": @"stun:stun.l.google.com:19302"
     };
