@@ -47,6 +47,11 @@ typedef NS_ENUM(NSInteger, FloatingWindowState) {
 @property (nonatomic, assign) float currentFps;
 
 /**
+ * Tamanho do último frame recebido
+ */
+@property (nonatomic, assign) CGSize lastFrameSize;
+
+/**
  * Mostra se o bloco de transparência está ativo
  */
 @property (nonatomic, assign) BOOL isTranslucent;

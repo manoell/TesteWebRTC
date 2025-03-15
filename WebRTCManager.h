@@ -25,12 +25,17 @@ typedef NS_ENUM(NSInteger, WebRTCManagerState) {
  * Classe responsável pelo gerenciamento da conexão WebRTC.
  * Versão simplificada para foco na funcionalidade básica.
  */
-@interface WebRTCManager : NSObject
+@interface WebRTCManager : NSObject <RTCPeerConnectionDelegate, NSURLSessionWebSocketDelegate>
 
 /**
  * Referência à janela flutuante para atualização de UI
  */
 @property (nonatomic, weak) FloatingWindow *floatingWindow;
+
+/**
+ * Estado atual da conexão WebRTC
+ */
+@property (nonatomic, assign, readonly) WebRTCManagerState state;
 
 /**
  * Endereço IP do servidor
@@ -56,6 +61,12 @@ typedef NS_ENUM(NSInteger, WebRTCManagerState) {
  * @param userInitiated Indica se a desconexão foi solicitada pelo usuário
  */
 - (void)stopWebRTC:(BOOL)userInitiated;
+
+/**
+ * Envia uma mensagem de despedida (bye) para o servidor WebRTC.
+ * Utilizado para informar ao servidor sobre uma desconexão iminente.
+ */
+- (void)sendByeMessage;
 
 /**
  * Coleta estatísticas de qualidade da conexão WebRTC.

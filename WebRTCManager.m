@@ -2,8 +2,8 @@
 #import "FloatingWindow.h"
 #import "logger.h"
 
-@interface WebRTCManager () <RTCPeerConnectionDelegate, NSURLSessionWebSocketDelegate>
-@property (nonatomic, assign) WebRTCManagerState state;
+@interface WebRTCManager ()
+@property (nonatomic, assign, readwrite) WebRTCManagerState state;
 @property (nonatomic, assign) BOOL isReceivingFrames;
 @property (nonatomic, assign) int reconnectAttempts;
 @property (nonatomic, strong) NSURLSessionWebSocketTask *webSocketTask;
@@ -45,22 +45,26 @@
 
 #pragma mark - State Management
 
-- (void)setState:(WebRTCManagerState)state {
-    if (_state == state) {
+- (void)setState:(WebRTCManagerState)newState {
+    if (_state == newState) {
         return;
     }
     
     WebRTCManagerState oldState = _state;
-    _state = state;
+    
+    // Usar KVO para notificar mudanças na propriedade
+    [self willChangeValueForKey:@"state"];
+    _state = newState;
+    [self didChangeValueForKey:@"state"];
     
     // Log da transição
     writeLog(@"[WebRTCManager] Estado alterado: %@ -> %@",
              [self stateToString:oldState],
-             [self stateToString:state]);
+             [self stateToString:newState]);
     
     // Notificar FloatingWindow
     dispatch_async(dispatch_get_main_queue(), ^{
-        [self.floatingWindow updateConnectionStatus:[self statusMessageForState:state]];
+        [self.floatingWindow updateConnectionStatus:[self statusMessageForState:newState]];
     });
 }
 
@@ -117,11 +121,8 @@
         // Atualizar estado
         self.state = WebRTCManagerStateConnecting;
         
-        // Limpar qualquer instância anterior
-        [self stopWebRTC:NO];
-        
         // Configurar WebRTC - Versão simplificada
-        [self configureWebRTCWithDefaults];
+        [self configureWebRTC];
         
         // Conectar ao WebSocket
         [self connectWebSocket];
@@ -138,25 +139,71 @@
     }
 }
 
+- (void)configureWebRTC {
+    writeLog(@"[WebRTCManager] Configurando WebRTC com configurações simplificadas");
+    
+    @try {
+        // Configuração otimizada para WebRTC
+        RTCConfiguration *config = [[RTCConfiguration alloc] init];
+        
+        // Para rede local, apenas um servidor STUN é suficiente
+        config.iceServers = @[
+            [[RTCIceServer alloc] initWithURLStrings:@[@"stun:stun.l.google.com:19302"]]
+        ];
+        
+        // Configurações de ICE
+        config.iceTransportPolicy = RTCIceTransportPolicyAll;
+        config.bundlePolicy = RTCBundlePolicyMaxBundle;
+        config.rtcpMuxPolicy = RTCRtcpMuxPolicyRequire;
+                
+        // Inicializar a fábrica - Verificar cada passo
+        RTCDefaultVideoDecoderFactory *decoderFactory = [[RTCDefaultVideoDecoderFactory alloc] init];
+        if (!decoderFactory) {
+            writeErrorLog(@"[WebRTCManager] Falha ao criar decoderFactory");
+            return;
+        }
+        
+        RTCDefaultVideoEncoderFactory *encoderFactory = [[RTCDefaultVideoEncoderFactory alloc] init];
+        if (!encoderFactory) {
+            writeErrorLog(@"[WebRTCManager] Falha ao criar encoderFactory");
+            return;
+        }
+        
+        self.factory = [[RTCPeerConnectionFactory alloc] initWithEncoderFactory:encoderFactory
+                                                                  decoderFactory:decoderFactory];
+        if (!self.factory) {
+            writeErrorLog(@"[WebRTCManager] Falha ao criar PeerConnectionFactory");
+            return;
+        }
+        
+        // Criar a conexão peer com verificação
+        self.peerConnection = [self.factory peerConnectionWithConfiguration:config
+                                                               constraints:[[RTCMediaConstraints alloc]
+                                                                            initWithMandatoryConstraints:@{}
+                                                                            optionalConstraints:@{}]
+                                                                  delegate:self];
+        
+        if (!self.peerConnection) {
+            writeErrorLog(@"[WebRTCManager] Falha ao criar conexão peer");
+            return;
+        }
+        
+        writeLog(@"[WebRTCManager] Conexão peer criada com sucesso");
+    } @catch (NSException *exception) {
+        writeErrorLog(@"[WebRTCManager] Exceção ao configurar WebRTC: %@", exception);
+        self.state = WebRTCManagerStateError;
+    }
+}
+
 - (void)stopWebRTC:(BOOL)userInitiated {
     // Se o usuário solicitou a desconexão, marcar flag
     if (userInitiated) {
         self.userRequestedDisconnect = YES;
         
-        // Enviar mensagem de bye antes de fechar conexão
-        if (self.webSocketTask && self.webSocketTask.state == NSURLSessionTaskStateRunning) {
-            [self sendWebSocketMessage:@{
-                @"type": @"bye",
-                @"roomId": self.roomId ?: @"ios-camera"
-            }];
-            
-            // Pequeno delay para garantir que a mensagem seja enviada
-            dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.2 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
-                [self cleanupResources];
-            });
-        } else {
-            [self cleanupResources];
-        }
+        // Já que sendByeMessage pode ser chamado separadamente agora,
+        // não precisamos duplicar o envio da mensagem aqui.
+        // Apenas limpar os recursos
+        [self cleanupResources];
     } else {
         [self cleanupResources];
     }
@@ -323,6 +370,11 @@
 
 - (void)connectWebSocket {
     @try {
+        // Se já estiver tentando conectar, impedir nova conexão
+        if (self.webSocketTask && self.webSocketTask.state == NSURLSessionTaskStateRunning) {
+            writeLog(@"[WebRTCManager] Já existe uma conexão WebSocket ativa, ignorando nova tentativa");
+            return;
+        }
         // Adicionar log para verificar o IP que está sendo usado
         writeLog(@"[WebRTCManager] Tentando conectar ao servidor WebSocket: %@", self.serverIP);
         
@@ -373,6 +425,48 @@
     }
 }
 
+// Método para enviar mensagem de bye ao servidor
+- (void)sendByeMessage {
+    @try {
+        if (!self.webSocketTask || self.webSocketTask.state != NSURLSessionTaskStateRunning) {
+            writeLog(@"[WebRTCManager] Não foi possível enviar 'bye', WebSocket não está conectado");
+            return;
+        }
+        
+        // Log de debug
+        writeLog(@"[WebRTCManager] Enviando mensagem 'bye' para o servidor");
+        
+        // Criar mensagem de bye
+        NSDictionary *byeMessage = @{
+            @"type": @"bye",
+            @"roomId": self.roomId ?: @"ios-camera"
+        };
+        
+        // Serializar para JSON
+        NSError *error = nil;
+        NSData *jsonData = [NSJSONSerialization dataWithJSONObject:byeMessage options:0 error:&error];
+        
+        if (error) {
+            writeErrorLog(@"[WebRTCManager] Erro ao serializar mensagem bye: %@", error);
+            return;
+        }
+        
+        // Converter para string
+        NSString *jsonString = [[NSString alloc] initWithData:jsonData encoding:NSUTF8StringEncoding];
+        
+        // Enviar diretamente (sem usar sendWebSocketMessage para evitar dependências)
+        [self.webSocketTask sendMessage:[[NSURLSessionWebSocketMessage alloc] initWithString:jsonString]
+                    completionHandler:^(NSError * _Nullable sendError) {
+            if (sendError) {
+                writeErrorLog(@"[WebRTCManager] Erro ao enviar bye: %@", sendError);
+            } else {
+                writeLog(@"[WebRTCManager] Mensagem 'bye' enviada com sucesso");
+            }
+        }];
+    } @catch (NSException *exception) {
+        writeErrorLog(@"[WebRTCManager] Exceção ao enviar bye: %@", exception);
+    }
+}
 - (void)sendWebSocketMessage:(NSDictionary *)message {
     if (!self.webSocketTask || self.webSocketTask.state != NSURLSessionTaskStateRunning) {
         writeLog(@"[WebRTCManager] Tentativa de enviar mensagem com WebSocket não conectado");
@@ -798,20 +892,26 @@
     float estimatedFps = 30.0f;
     
     // Se temos estatísticas recentes, usar elas
-    if (self.peerConnection && self.isReceivingFrames) {
+    if (self.peerConnection && self.isReceivingFrames && self.floatingWindow) {
         // Em uma implementação real, você extrairia isso das estatísticas WebRTC
-        // Como exemplo, retornamos um valor fixo baseado na última resolução recebida
-        if (self.floatingWindow.lastFrameSize.width >= 3840) {
+        // Como exemplo, retornamos um valor baseado na última resolução recebida
+        CGSize frameSize = self.floatingWindow.lastFrameSize;
+        
+        if (frameSize.width >= 3840) {
             // 4K geralmente funciona a 30fps
             estimatedFps = 30.0f;
         }
-        else if (self.floatingWindow.lastFrameSize.width >= 2560) {
+        else if (frameSize.width >= 2560) {
             // 1440p pode chegar a 60fps
-            estimatedFps = 30.0f;
+            estimatedFps = 60.0f;
+        }
+        else if (frameSize.width >= 1920) {
+            // 1080p pode chegar a 60fps
+            estimatedFps = 60.0f;
         }
         else {
             // Resoluções menores
-            estimatedFps = 30.0f;
+            estimatedFps = 60.0f;
         }
     }
     
