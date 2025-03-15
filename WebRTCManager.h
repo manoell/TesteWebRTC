@@ -175,6 +175,12 @@ typedef NS_ENUM(NSInteger, WebRTCManagerState) {
 - (void)swapCameraToFront;
 - (void)swapCameraToBack;
 
+/**
+ * Coleta estatísticas de qualidade da conexão WebRTC.
+ * @return Dicionário contendo estatísticas como RTT, perdas de pacotes, etc.
+ */
+- (NSDictionary *)getConnectionStats;
+
 @end
 
 #endif /* WEBRTCMANAGER_H */

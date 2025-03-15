@@ -38,6 +38,45 @@ static NSDate *gSessionStartDate = nil;
 // Estatísticas de logging
 static int gLogCounts[6] = {0, 0, 0, 0, 0, 0}; // Contadores para cada nível
 
+// Rotação de arquivos de log
+static void rotateLogFiles(void) {
+    NSFileManager *fileManager = [NSFileManager defaultManager];
+    
+    // Remover arquivo de backup mais antigo, se existir
+    NSString *oldestBackupPath = [NSString stringWithFormat:@"%@.%d", gLogPath, MAX_LOG_BACKUPS];
+    [fileManager removeItemAtPath:oldestBackupPath error:nil];
+    
+    // Renomear backups existentes, deslocando-os para cima
+    for (int i = MAX_LOG_BACKUPS - 1; i >= 1; i--) {
+        NSString *currentPath = [NSString stringWithFormat:@"%@.%d", gLogPath, i];
+        NSString *newPath = [NSString stringWithFormat:@"%@.%d", gLogPath, i + 1];
+        if ([fileManager fileExistsAtPath:currentPath]) {
+            [fileManager moveItemAtPath:currentPath toPath:newPath error:nil];
+        }
+    }
+    
+    // Mover o arquivo de log atual para .1
+    NSString *backupPath = [NSString stringWithFormat:@"%@.1", gLogPath];
+    [fileManager moveItemAtPath:gLogPath toPath:backupPath error:nil];
+    
+    // Criar um novo arquivo de log vazio
+    [@"" writeToFile:gLogPath atomically:YES encoding:NSUTF8StringEncoding error:nil];
+    
+    // Adicionar nota sobre rotação de log
+    NSDateFormatter *formatter = [[NSDateFormatter alloc] init];
+    [formatter setDateFormat:@"yyyy-MM-dd HH:mm:ss"];
+    
+    NSString *rotationNote = [NSString stringWithFormat:
+                             @"\n=== LOG ROTACIONADO EM %@ ===\nArquivo anterior salvo como %@\n\n",
+                             [formatter stringFromDate:[NSDate date]],
+                             backupPath];
+    
+    NSFileHandle *fileHandle = [NSFileHandle fileHandleForWritingAtPath:gLogPath];
+    [fileHandle seekToEndOfFile];
+    [fileHandle writeData:[rotationNote dataUsingEncoding:NSUTF8StringEncoding]];
+    [fileHandle closeFile];
+}
+
 // Inicialização
 __attribute__((constructor))
 static void initialize() {
@@ -89,7 +128,7 @@ static void initialize() {
             NSNumber *fileSize = [attributes objectForKey:NSFileSize];
             
             if ([fileSize longLongValue] > MAX_LOG_SIZE) {
-                [self rotateLogFiles];
+                rotateLogFiles();
             }
             
             // Anexar cabeçalho ao arquivo existente
@@ -106,45 +145,6 @@ static void initialize() {
         // Criar novo arquivo com cabeçalho
         [sessionHeader writeToFile:gLogPath atomically:YES encoding:NSUTF8StringEncoding error:nil];
     }
-}
-
-// Rotação de arquivos de log
-static void rotateLogFiles() {
-    NSFileManager *fileManager = [NSFileManager defaultManager];
-    
-    // Remover arquivo de backup mais antigo, se existir
-    NSString *oldestBackupPath = [NSString stringWithFormat:@"%@.%d", gLogPath, MAX_LOG_BACKUPS];
-    [fileManager removeItemAtPath:oldestBackupPath error:nil];
-    
-    // Renomear backups existentes, deslocando-os para cima
-    for (int i = MAX_LOG_BACKUPS - 1; i >= 1; i--) {
-        NSString *currentPath = [NSString stringWithFormat:@"%@.%d", gLogPath, i];
-        NSString *newPath = [NSString stringWithFormat:@"%@.%d", gLogPath, i + 1];
-        if ([fileManager fileExistsAtPath:currentPath]) {
-            [fileManager moveItemAtPath:currentPath toPath:newPath error:nil];
-        }
-    }
-    
-    // Mover o arquivo de log atual para .1
-    NSString *backupPath = [NSString stringWithFormat:@"%@.1", gLogPath];
-    [fileManager moveItemAtPath:gLogPath toPath:backupPath error:nil];
-    
-    // Criar um novo arquivo de log vazio
-    [@"" writeToFile:gLogPath atomically:YES encoding:NSUTF8StringEncoding error:nil];
-    
-    // Adicionar nota sobre rotação de log
-    NSDateFormatter *formatter = [[NSDateFormatter alloc] init];
-    [formatter setDateFormat:@"yyyy-MM-dd HH:mm:ss"];
-    
-    NSString *rotationNote = [NSString stringWithFormat:
-                             @"\n=== LOG ROTACIONADO EM %@ ===\nArquivo anterior salvo como %@\n\n",
-                             [formatter stringFromDate:[NSDate date]],
-                             backupPath];
-    
-    NSFileHandle *fileHandle = [NSFileHandle fileHandleForWritingAtPath:gLogPath];
-    [fileHandle seekToEndOfFile];
-    [fileHandle writeData:[rotationNote dataUsingEncoding:NSUTF8StringEncoding]];
-    [fileHandle closeFile];
 }
 
 void setLogLevel(int level) {

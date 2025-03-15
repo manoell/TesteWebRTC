@@ -686,7 +686,7 @@ static const float kJitterWarningThreshold = 30.0f;   // Jitter > 30ms é aviso
     
     return recommendations;
 }
-
+
 - (NSDictionary *)getPerformanceStats {
     [self.dataLock lock];
     
