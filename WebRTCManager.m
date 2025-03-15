@@ -243,47 +243,72 @@
 - (void)configureWebRTCWithDefaults {
     writeLog(@"[WebRTCManager] Configurando WebRTC com configurações simplificadas");
     
-    // Configuração otimizada para WebRTC
-    RTCConfiguration *config = [[RTCConfiguration alloc] init];
-    
-    // Para rede local, apenas um servidor STUN é suficiente
-    config.iceServers = @[
-        [[RTCIceServer alloc] initWithURLStrings:@[@"stun:stun.l.google.com:19302"]]
-    ];
-    
-    // Configurações de ICE
-    config.iceTransportPolicy = RTCIceTransportPolicyAll;
-    config.bundlePolicy = RTCBundlePolicyMaxBundle;
-    config.rtcpMuxPolicy = RTCRtcpMuxPolicyRequire;
-            
-    // Inicializar a fábrica
-    RTCDefaultVideoDecoderFactory *decoderFactory = [[RTCDefaultVideoDecoderFactory alloc] init];
-    RTCDefaultVideoEncoderFactory *encoderFactory = [[RTCDefaultVideoEncoderFactory alloc] init];
-    self.factory = [[RTCPeerConnectionFactory alloc] initWithEncoderFactory:encoderFactory
-                                                              decoderFactory:decoderFactory];
-    
-    // Criar a conexão peer
-    self.peerConnection = [self.factory peerConnectionWithConfiguration:config
-                                                           constraints:[[RTCMediaConstraints alloc]
-                                                                        initWithMandatoryConstraints:@{}
-                                                                        optionalConstraints:@{}]
-                                                              delegate:self];
-    
-    writeLog(@"[WebRTCManager] Conexão peer criada com sucesso");
+    @try {
+        // Configuração otimizada para WebRTC
+        RTCConfiguration *config = [[RTCConfiguration alloc] init];
+        
+        // Para rede local, apenas um servidor STUN é suficiente
+        config.iceServers = @[
+            [[RTCIceServer alloc] initWithURLStrings:@[@"stun:stun.l.google.com:19302"]]
+        ];
+        
+        // Configurações de ICE
+        config.iceTransportPolicy = RTCIceTransportPolicyAll;
+        config.bundlePolicy = RTCBundlePolicyMaxBundle;
+        config.rtcpMuxPolicy = RTCRtcpMuxPolicyRequire;
+                
+        // Inicializar a fábrica - Verificar cada passo
+        RTCDefaultVideoDecoderFactory *decoderFactory = [[RTCDefaultVideoDecoderFactory alloc] init];
+        if (!decoderFactory) {
+            writeErrorLog(@"[WebRTCManager] Falha ao criar decoderFactory");
+            return;
+        }
+        
+        RTCDefaultVideoEncoderFactory *encoderFactory = [[RTCDefaultVideoEncoderFactory alloc] init];
+        if (!encoderFactory) {
+            writeErrorLog(@"[WebRTCManager] Falha ao criar encoderFactory");
+            return;
+        }
+        
+        self.factory = [[RTCPeerConnectionFactory alloc] initWithEncoderFactory:encoderFactory
+                                                                  decoderFactory:decoderFactory];
+        if (!self.factory) {
+            writeErrorLog(@"[WebRTCManager] Falha ao criar PeerConnectionFactory");
+            return;
+        }
+        
+        // Criar a conexão peer com verificação
+        self.peerConnection = [self.factory peerConnectionWithConfiguration:config
+                                                               constraints:[[RTCMediaConstraints alloc]
+                                                                            initWithMandatoryConstraints:@{}
+                                                                            optionalConstraints:@{}]
+                                                                  delegate:self];
+        
+        if (!self.peerConnection) {
+            writeErrorLog(@"[WebRTCManager] Falha ao criar conexão peer");
+            return;
+        }
+        
+        writeLog(@"[WebRTCManager] Conexão peer criada com sucesso");
+    } @catch (NSException *exception) {
+        writeErrorLog(@"[WebRTCManager] Exceção ao configurar WebRTC: %@", exception);
+        self.state = WebRTCManagerStateError;
+    }
 }
 
 #pragma mark - WebSocket Connection
 
 - (void)connectWebSocket {
     @try {
-        writeLog(@"[WebRTCManager] Conectando ao servidor WebSocket: %@", self.serverIP);
+        // Adicionar log para verificar o IP que está sendo usado
+        writeLog(@"[WebRTCManager] Tentando conectar ao servidor WebSocket: %@", self.serverIP);
         
         // Criar URL para o servidor
         NSString *urlString = [NSString stringWithFormat:@"ws://%@:8080", self.serverIP];
         NSURL *url = [NSURL URLWithString:urlString];
         
         if (!url) {
-            writeLog(@"[WebRTCManager] URL inválida: %@", urlString);
+            writeErrorLog(@"[WebRTCManager] URL inválida: %@", urlString);
             self.state = WebRTCManagerStateError;
             return;
         }
@@ -320,7 +345,7 @@
             }
         });
     } @catch (NSException *exception) {
-        writeLog(@"[WebRTCManager] Exceção ao conectar WebSocket: %@", exception);
+        writeErrorLog(@"[WebRTCManager] Exceção ao conectar WebSocket: %@", exception);
         self.state = WebRTCManagerStateError;
     }
 }

@@ -116,6 +116,11 @@
 - (void)setupVideoView {
     // Usar RTCMTLVideoView para renderização eficiente de vídeo
     self.videoView = [[RTCMTLVideoView alloc] init];
+    if (!self.videoView) {
+        writeErrorLog(@"[FloatingWindow] Falha ao criar RTCMTLVideoView");
+        return;
+    }
+    
     self.videoView.translatesAutoresizingMaskIntoConstraints = NO;
     self.videoView.delegate = self;
     self.videoView.backgroundColor = [UIColor blackColor];
@@ -127,6 +132,8 @@
         [self.videoView.trailingAnchor constraintEqualToAnchor:self.contentView.trailingAnchor],
         [self.videoView.bottomAnchor constraintEqualToAnchor:self.contentView.bottomAnchor],
     ]];
+    
+    writeLog(@"[FloatingWindow] VideoView configurada com sucesso");
 }
 
 - (void)setupStatusBar {
@@ -379,11 +386,27 @@
     // Mostrar indicador de carregamento
     [self.loadingIndicator startAnimating];
     
+    // Verificar se WebRTCManager está pronto
+    if (!self.webRTCManager) {
+        writeLog(@"[FloatingWindow] ERRO: WebRTCManager não inicializado");
+        [self updateConnectionStatus:@"Erro: Gerenciador não inicializado"];
+        [self.loadingIndicator stopAnimating];
+        return;
+    }
+    
     // Definir isPreviewActive para true ANTES de iniciar WebRTC
     self.isPreviewActive = YES;
     
-    // Iniciar WebRTC
-    [self.webRTCManager startWebRTC];
+    // Iniciar WebRTC com tratamento de erro
+    @try {
+        [self.webRTCManager startWebRTC];
+    } @catch (NSException *exception) {
+        writeLog(@"[FloatingWindow] Exceção ao iniciar WebRTC: %@", exception);
+        self.isPreviewActive = NO;
+        [self.loadingIndicator stopAnimating];
+        [self updateConnectionStatus:@"Erro ao iniciar conexão"];
+        return;
+    }
     
     // Atualizar UI para modo conectado
     [UIView animateWithDuration:0.3 animations:^{
