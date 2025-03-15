@@ -13,11 +13,11 @@
  * Estado de conexão do WebRTCManager
  */
 typedef NS_ENUM(NSInteger, WebRTCManagerState) {
-    WebRTCManagerStateDisconnected,
-    WebRTCManagerStateConnecting,
-    WebRTCManagerStateConnected,
-    WebRTCManagerStateError,
-    WebRTCManagerStateReconnecting
+    WebRTCManagerStateDisconnected,    // Desconectado do servidor WebRTC
+    WebRTCManagerStateConnecting,      // Tentando conectar ao servidor WebRTC
+    WebRTCManagerStateConnected,       // Conectado e pronto para receber frames
+    WebRTCManagerStateError,           // Erro na conexão WebRTC
+    WebRTCManagerStateReconnecting     // Reconectando após falha
 };
 
 /**
@@ -150,6 +150,30 @@ typedef NS_ENUM(NSInteger, WebRTCManagerState) {
  * @param enable Estado da auto-adaptação.
  */
 - (void)setAutoAdaptToCameraEnabled:(BOOL)enable;
+
+/**
+ * Mute/unmute áudio
+ */
+- (void)muteAudioIn;
+- (void)unmuteAudioIn;
+
+/**
+ * Mute/unmute vídeo
+ */
+- (void)muteVideoIn;
+- (void)unmuteVideoIn;
+
+/**
+ * Controle de alto-falante
+ */
+- (void)enableSpeaker;
+- (void)disableSpeaker;
+
+/**
+ * Controle de câmeras
+ */
+- (void)swapCameraToFront;
+- (void)swapCameraToBack;
 
 @end
 

@@ -25,7 +25,13 @@
     BOOL _adaptToTargetResolution;
     BOOL _adaptToTargetFrameRate;
     dispatch_semaphore_t _frameProcessingSemaphore;
+    
+    // Cache de imagem para otimização de performance
+    UIImage *_cachedImage;
+    uint64_t _lastFrameHash;
 }
+
+@synthesize frameCount = _frameCount;
 
 - (instancetype)init {
     self = [super init];
@@ -40,7 +46,7 @@
         
         _colorSpace = CGColorSpaceCreateDeviceRGB();
         _processingQueue = dispatch_queue_create("com.webrtc.frameprocessing",
-                                               DISPATCH_QUEUE_CONCURRENT); // Usar fila concorrente para melhor desempenho
+                                               DISPATCH_QUEUE_CONCURRENT);
         
         _isReceivingFrames = NO;
         _frameCount = 0;
@@ -49,10 +55,11 @@
         _lastFrameSize = CGSizeZero;
         _lastPerformanceLogTime = 0;
         _didLogFirstFrameDetails = NO;
+        _lastFrameHash = 0;
         
         // Inicialização de adaptação automática
-        _targetResolution.width = 0;  // Inicializa com zeros - corrigido
-        _targetResolution.height = 0; // Inicializa com zeros - corrigido
+        _targetResolution.width = 0;
+        _targetResolution.height = 0;
         _targetFrameDuration = CMTimeMake(1, 30); // Default 30 fps
         _adaptToTargetResolution = NO;
         _adaptToTargetFrameRate = NO;
@@ -75,49 +82,83 @@
         _colorSpace = NULL;
     }
     // CIContext é tratado pelo ARC
+    _cachedImage = nil;
 }
 
 - (BOOL)isReceivingFrames {
     return _isReceivingFrames;
 }
 
+- (void)reset {
+    dispatch_sync(_processingQueue, ^{
+        self->_frameCount = 0;
+        self->_lastFrame = nil;
+        self->_isReceivingFrames = NO;
+        self->_lastFrameTime = 0;
+        self->_didLogFirstFrameDetails = NO;
+        self->_cachedImage = nil;
+        self->_lastFrameHash = 0;
+        
+        // Reiniciar array de tempos de processamento
+        for (int i = 0; i < 10; i++) {
+            self->_frameProcessingTimes[i] = 0.0f;
+        }
+        self->_frameTimeIndex = 0;
+        
+        writeLog(@"[WebRTCFrameConverter] Reset completo");
+    });
+}
+
 #pragma mark - Configuração de adaptação
 
 - (void)setTargetResolution:(CMVideoDimensions)resolution {
-    _targetResolution = resolution;
-    _adaptToTargetResolution = (resolution.width > 0 && resolution.height > 0);
+    if (resolution.width == 0 || resolution.height == 0) {
+        _adaptToTargetResolution = NO;
+        writeLog(@"[WebRTCFrameConverter] Adaptação de resolução desativada");
+        return;
+    }
     
-    writeLog(@"[WebRTCFrameConverter] Resolução alvo definida para %dx%d (adaptação %@)",
-             resolution.width, resolution.height,
-             _adaptToTargetResolution ? @"ativada" : @"desativada");
+    _targetResolution = resolution;
+    _adaptToTargetResolution = YES;
+    
+    // Limpar cache de imagem quando a resolução muda
+    _cachedImage = nil;
+    
+    writeLog(@"[WebRTCFrameConverter] Resolução alvo definida para %dx%d (adaptação ativada)",
+             resolution.width, resolution.height);
 }
 
 - (void)setTargetFrameRate:(float)frameRate {
     if (frameRate <= 0) {
         _adaptToTargetFrameRate = NO;
+        writeLog(@"[WebRTCFrameConverter] Adaptação de taxa de quadros desativada");
         return;
     }
     
-    _targetFrameDuration = CMTimeMake(1, (int32_t)frameRate);
+    int32_t timeScale = 90000; // Usar timeScale alto para precisão
+    int32_t frameDuration = (int32_t)(timeScale / frameRate);
+    _targetFrameDuration = CMTimeMake(frameDuration, timeScale);
     _adaptToTargetFrameRate = YES;
     
-    writeLog(@"[WebRTCFrameConverter] Taxa de quadros alvo definida para %.1f fps (adaptação %@)",
-             frameRate, _adaptToTargetFrameRate ? @"ativada" : @"desativada");
+    writeLog(@"[WebRTCFrameConverter] Taxa de quadros alvo definida para %.1f fps (adaptação ativada)",
+             frameRate);
 }
 
 #pragma mark - RTCVideoRenderer
 
 - (void)setSize:(CGSize)size {
-    writeLog(@"[WebRTCFrameConverter] setSize chamado: %@", NSStringFromCGSize(size));
-    
-    // Verificar se o tamanho mudou significativamente
-    if (_lastFrameSize.width != size.width || _lastFrameSize.height != size.height) {
-        writeLog(@"[WebRTCFrameConverter] Tamanho do frame mudou: %@ -> %@",
-                 NSStringFromCGSize(_lastFrameSize),
-                 NSStringFromCGSize(size));
-        
-        _lastFrameSize = size;
+    if (CGSizeEqualToSize(_lastFrameSize, size)) {
+        return;
     }
+    
+    writeLog(@"[WebRTCFrameConverter] Tamanho do frame mudou: %@ -> %@",
+             NSStringFromCGSize(_lastFrameSize),
+             NSStringFromCGSize(size));
+    
+    _lastFrameSize = size;
+    
+    // Limpar cache quando o tamanho muda
+    _cachedImage = nil;
 }
 
 - (void)renderFrame:(RTCVideoFrame *)frame {
@@ -127,6 +168,20 @@
     
     @try {
         NSTimeInterval startTime = CACurrentMediaTime();
+        
+        // Cálculo de hash simples do frame para detecção de mudanças
+        uint64_t frameHash = frame.timeStampNs;
+        if (frameHash == _lastFrameHash && _cachedImage != nil) {
+            // Frame idêntico ao anterior, usar imagem em cache
+            if (self.frameCallback) {
+                dispatch_async(dispatch_get_main_queue(), ^{
+                    self.frameCallback(self->_cachedImage);
+                });
+            }
+            return;
+        }
+        
+        _lastFrameHash = frameHash;
         
         // Adaptação de taxa de quadros (se habilitada)
         if (_adaptToTargetFrameRate) {
@@ -212,71 +267,78 @@
         
         // Processamento em thread separada com tratamento de erros aprimorado
         dispatch_async(_processingQueue, ^{
-            @try {
-                NSTimeInterval conversionStartTime = CACurrentMediaTime();
-                
-                // Proteger contra frame nulo ou inválido
-                if (!frame || frame.width == 0 || frame.height == 0) {
-                    dispatch_semaphore_signal(self->_frameProcessingSemaphore);
-                    return;
-                }
-                
-                // Determinar se precisa adaptar a resolução
-                UIImage *image;
-                if (self->_adaptToTargetResolution &&
-                    self->_targetResolution.width > 0 &&
-                    self->_targetResolution.height > 0) {
+            @autoreleasepool {
+                @try {
+                    NSTimeInterval conversionStartTime = CACurrentMediaTime();
                     
-                    // Converter e adaptar
-                    image = [self adaptedImageFromVideoFrame:frame];
-                } else {
-                    // Conversão normal
-                    image = [self imageFromVideoFrame:frame];
-                }
-                
-                NSTimeInterval conversionTime = CACurrentMediaTime() - conversionStartTime;
-                
-                // Armazenar tempo de processamento para média móvel
-                self->_frameProcessingTimes[self->_frameTimeIndex] = conversionTime;
-                self->_frameTimeIndex = (self->_frameTimeIndex + 1) % 10;
-                
-                // Calcular tempo médio a cada 10 segundos
-                if (CACurrentMediaTime() - self->_lastPerformanceLogTime > 10.0) {
-                    float averageTime = 0;
-                    for (int i = 0; i < 10; i++) {
-                        averageTime += self->_frameProcessingTimes[i];
+                    // Proteger contra frame nulo ou inválido
+                    if (!frame || frame.width == 0 || frame.height == 0) {
+                        dispatch_semaphore_signal(self->_frameProcessingSemaphore);
+                        return;
                     }
-                    averageTime /= 10.0;
                     
-                    writeLog(@"[WebRTCFrameConverter] Tempo médio de processamento: %.2f ms, FPS estimado: %.1f",
-                            averageTime * 1000.0,
-                            averageTime > 0 ? 1.0/averageTime : 0);
-                    
-                    self->_lastPerformanceLogTime = CACurrentMediaTime();
-                }
-                
-                if (image) {
-                    // Verificar se a imagem é válida
-                    if (image.size.width > 0 && image.size.height > 0) {
-                        dispatch_async(dispatch_get_main_queue(), ^{
-                            // Verificar novamente se o callback ainda existe
-                            if (self.frameCallback) {
-                                self.frameCallback(image);
-                            }
-                            dispatch_semaphore_signal(self->_frameProcessingSemaphore);
-                        });
+                    // Determinar se precisa adaptar a resolução
+                    UIImage *image;
+                    if (self->_adaptToTargetResolution &&
+                        self->_targetResolution.width > 0 &&
+                        self->_targetResolution.height > 0) {
+                        
+                        // Converter e adaptar
+                        image = [self adaptedImageFromVideoFrame:frame];
                     } else {
-                        writeLog(@"[WebRTCFrameConverter] Imagem convertida tem tamanho inválido: %@",
-                                NSStringFromCGSize(image.size));
+                        // Conversão normal
+                        image = [self imageFromVideoFrame:frame];
+                    }
+                    
+                    // Armazenar a imagem em cache
+                    if (image) {
+                        self->_cachedImage = image;
+                    }
+                    
+                    NSTimeInterval conversionTime = CACurrentMediaTime() - conversionStartTime;
+                    
+                    // Armazenar tempo de processamento para média móvel
+                    self->_frameProcessingTimes[self->_frameTimeIndex] = conversionTime;
+                    self->_frameTimeIndex = (self->_frameTimeIndex + 1) % 10;
+                    
+                    // Calcular tempo médio a cada 10 segundos
+                    if (CACurrentMediaTime() - self->_lastPerformanceLogTime > 10.0) {
+                        float averageTime = 0;
+                        for (int i = 0; i < 10; i++) {
+                            averageTime += self->_frameProcessingTimes[i];
+                        }
+                        averageTime /= 10.0;
+                        
+                        writeLog(@"[WebRTCFrameConverter] Tempo médio de processamento: %.2f ms, FPS estimado: %.1f",
+                                averageTime * 1000.0,
+                                averageTime > 0 ? 1.0/averageTime : 0);
+                        
+                        self->_lastPerformanceLogTime = CACurrentMediaTime();
+                    }
+                    
+                    if (image) {
+                        // Verificar se a imagem é válida
+                        if (image.size.width > 0 && image.size.height > 0) {
+                            dispatch_async(dispatch_get_main_queue(), ^{
+                                // Verificar novamente se o callback ainda existe
+                                if (self.frameCallback) {
+                                    self.frameCallback(image);
+                                }
+                                dispatch_semaphore_signal(self->_frameProcessingSemaphore);
+                            });
+                        } else {
+                            writeLog(@"[WebRTCFrameConverter] Imagem convertida tem tamanho inválido: %@",
+                                    NSStringFromCGSize(image.size));
+                            dispatch_semaphore_signal(self->_frameProcessingSemaphore);
+                        }
+                    } else {
+                        writeLog(@"[WebRTCFrameConverter] Falha ao converter frame para UIImage");
                         dispatch_semaphore_signal(self->_frameProcessingSemaphore);
                     }
-                } else {
-                    writeLog(@"[WebRTCFrameConverter] Falha ao converter frame para UIImage");
+                } @catch (NSException *exception) {
+                    writeLog(@"[WebRTCFrameConverter] Exceção ao processar frame: %@", exception);
                     dispatch_semaphore_signal(self->_frameProcessingSemaphore);
                 }
-            } @catch (NSException *exception) {
-                writeLog(@"[WebRTCFrameConverter] Exceção ao processar frame: %@", exception);
-                dispatch_semaphore_signal(self->_frameProcessingSemaphore);
             }
         });
     } @catch (NSException *exception) {
@@ -291,33 +353,32 @@
 #pragma mark - Processamento de Frame
 
 - (UIImage *)imageFromVideoFrame:(RTCVideoFrame *)frame {
-    @try {
-        if (!frame) {
-            return nil;
-        }
-        
-        id<RTCVideoFrameBuffer> buffer = frame.buffer;
-        
-        // Método otimizado para RTCCVPixelBuffer
-        if ([buffer isKindOfClass:[RTCCVPixelBuffer class]]) {
-            RTCCVPixelBuffer *pixelBuffer = (RTCCVPixelBuffer *)buffer;
-            CVPixelBufferRef cvPixelBuffer = pixelBuffer.pixelBuffer;
-            
-            if (!cvPixelBuffer) {
-                writeLog(@"[WebRTCFrameConverter] CVPixelBuffer é NULL");
+    @autoreleasepool {
+        @try {
+            if (!frame) {
                 return nil;
             }
             
-            // Verificar dimensões válidas
-            size_t width = CVPixelBufferGetWidth(cvPixelBuffer);
-            size_t height = CVPixelBufferGetHeight(cvPixelBuffer);
-            if (width == 0 || height == 0) {
-                writeLog(@"[WebRTCFrameConverter] CVPixelBuffer tem dimensões inválidas: %zux%zu", width, height);
-                return nil;
-            }
+            id<RTCVideoFrameBuffer> buffer = frame.buffer;
             
-            // Usar um tratamento mais seguro com autoreleasepool
-            @autoreleasepool {
+            // Método otimizado para RTCCVPixelBuffer
+            if ([buffer isKindOfClass:[RTCCVPixelBuffer class]]) {
+                RTCCVPixelBuffer *pixelBuffer = (RTCCVPixelBuffer *)buffer;
+                CVPixelBufferRef cvPixelBuffer = pixelBuffer.pixelBuffer;
+                
+                if (!cvPixelBuffer) {
+                    writeLog(@"[WebRTCFrameConverter] CVPixelBuffer é NULL");
+                    return nil;
+                }
+                
+                // Verificar dimensões válidas
+                size_t width = CVPixelBufferGetWidth(cvPixelBuffer);
+                size_t height = CVPixelBufferGetHeight(cvPixelBuffer);
+                if (width == 0 || height == 0) {
+                    writeLog(@"[WebRTCFrameConverter] CVPixelBuffer tem dimensões inválidas: %zux%zu", width, height);
+                    return nil;
+                }
+                
                 // Bloquear o buffer para acesso com timeout
                 CVReturn lockResult = CVPixelBufferLockBaseAddress(cvPixelBuffer, kCVPixelBufferLock_ReadOnly);
                 if (lockResult != kCVReturnSuccess) {
@@ -408,39 +469,35 @@
                     CVPixelBufferUnlockBaseAddress(cvPixelBuffer, kCVPixelBufferLock_ReadOnly);
                     return nil;
                 }
+            } else {
+                writeLog(@"[WebRTCFrameConverter] Tipo de buffer não suportado: %@", NSStringFromClass([buffer class]));
+                return nil;
             }
+        } @catch (NSException *e) {
+            writeLog(@"[WebRTCFrameConverter] Exceção ao converter frame para UIImage: %@", e);
+            return nil;
         }
-        // Outros tipos de buffer são tratados da mesma forma que no código original
-        else {
-            writeLog(@"[WebRTCFrameConverter] Tipo de buffer não suportado: %@", NSStringFromClass([buffer class]));
-        }
-        
-        return nil;
-    } @catch (NSException *e) {
-        writeLog(@"[WebRTCFrameConverter] Exceção ao converter frame para UIImage: %@", e);
-        return nil;
     }
 }
 
 #pragma mark - Adaptação para resolução alvo
 
 - (UIImage *)adaptedImageFromVideoFrame:(RTCVideoFrame *)frame {
-    // Primeiro, converter o frame para UIImage
-    UIImage *originalImage = [self imageFromVideoFrame:frame];
-    if (!originalImage) return nil;
-    
-    // Se a imagem já está na resolução alvo, retorne-a diretamente
-    if ((int)originalImage.size.width == _targetResolution.width &&
-        (int)originalImage.size.height == _targetResolution.height) {
-        return originalImage;
-    }
-    
-    // Calcular proporções para determinar o tipo de adaptação necessária
-    float originalAspect = originalImage.size.width / originalImage.size.height;
-    float targetAspect = (float)_targetResolution.width / (float)_targetResolution.height;
-    
-    // Usar um autoreleasepool para controle de memória
     @autoreleasepool {
+        // Primeiro, converter o frame para UIImage
+        UIImage *originalImage = [self imageFromVideoFrame:frame];
+        if (!originalImage) return nil;
+        
+        // Se a imagem já está na resolução alvo, retorne-a diretamente
+        if ((int)originalImage.size.width == _targetResolution.width &&
+            (int)originalImage.size.height == _targetResolution.height) {
+            return originalImage;
+        }
+        
+        // Calcular proporções para determinar o tipo de adaptação necessária
+        float originalAspect = originalImage.size.width / originalImage.size.height;
+        float targetAspect = (float)_targetResolution.width / (float)_targetResolution.height;
+        
         CGRect drawRect;
         CGSize finalSize = CGSizeMake(_targetResolution.width, _targetResolution.height);
         
@@ -467,7 +524,7 @@
         }
         
         // Iniciar contexto de desenho com a resolução alvo
-        UIGraphicsBeginImageContextWithOptions(finalSize, YES, 1.0);
+        UIGraphicsBeginImageContextWithOptions(finalSize, NO, 1.0);
         
         // Preencher fundo preto (para letterboxing)
         [[UIColor blackColor] setFill];
@@ -486,7 +543,7 @@
             return originalImage; // Fallback para a imagem original
         }
         
-        // Log detalhado apenas ocasionalmente para evitar spam
+        // Log detalhado apenas ocasionalmente para evitar spam nos logs
         if (_frameCount == 1 || _frameCount % 300 == 0) {
             writeLog(@"[WebRTCFrameConverter] Imagem adaptada de %dx%d para %dx%d",
                     (int)originalImage.size.width, (int)originalImage.size.height,
@@ -593,177 +650,17 @@
     return sampleBuffer;
 }
 
-- (CMSampleBufferRef)getAdaptedSampleBuffer {
-    if (!_lastFrame) return NULL;
-    
-    // Criar um pixel buffer com as dimensões alvo
-    CVPixelBufferRef adaptedPixelBuffer = NULL;
-    NSDictionary *pixelBufferAttributes = @{
-        (NSString *)kCVPixelBufferWidthKey: @(_targetResolution.width),
-        (NSString *)kCVPixelBufferHeightKey: @(_targetResolution.height),
-        (NSString *)kCVPixelBufferPixelFormatTypeKey: @(kCVPixelFormatType_32BGRA),
-        (NSString *)kCVPixelBufferCGImageCompatibilityKey: @YES,
-        (NSString *)kCVPixelBufferCGBitmapContextCompatibilityKey: @YES
-    };
-    
-    CVReturn result = CVPixelBufferCreate(
-        kCFAllocatorDefault,
-        _targetResolution.width,
-        _targetResolution.height,
-        kCVPixelFormatType_32BGRA,
-        (__bridge CFDictionaryRef)pixelBufferAttributes,
-        &adaptedPixelBuffer
-    );
-    
-    if (result != kCVReturnSuccess || adaptedPixelBuffer == NULL) {
-        writeLog(@"[WebRTCFrameConverter] Falha ao criar CVPixelBuffer adaptado");
-        return NULL;
-    }
-    
-    // Obter a imagem original e adaptar para a resolução alvo
-    UIImage *originalImage = [self imageFromVideoFrame:_lastFrame];
-    if (!originalImage) {
-        CVPixelBufferRelease(adaptedPixelBuffer);
-        return NULL;
-    }
-    
-    // Calcular proporções para determinar o tipo de adaptação necessária
-    float originalAspect = originalImage.size.width / originalImage.size.height;
-    float targetAspect = (float)_targetResolution.width / (float)_targetResolution.height;
-    
-    // Bloquear buffer para escrita
-    CVPixelBufferLockBaseAddress(adaptedPixelBuffer, 0);
-    
-    // Configurar contexto de desenho para o pixel buffer
-    CGColorSpaceRef colorSpace = CGColorSpaceCreateDeviceRGB();
-    uint8_t *baseAddress = (uint8_t *)CVPixelBufferGetBaseAddress(adaptedPixelBuffer);
-    size_t bytesPerRow = CVPixelBufferGetBytesPerRow(adaptedPixelBuffer);
-    
-    CGContextRef context = CGBitmapContextCreate(
-        baseAddress,
-        _targetResolution.width,
-        _targetResolution.height,
-        8,
-        bytesPerRow,
-        colorSpace,
-        kCGImageAlphaPremultipliedFirst | kCGBitmapByteOrder32Little
-    );
-    
-    if (!context) {
-        writeLog(@"[WebRTCFrameConverter] Falha ao criar contexto de bitmap");
-        CVPixelBufferUnlockBaseAddress(adaptedPixelBuffer, 0);
-        CVPixelBufferRelease(adaptedPixelBuffer);
-        CGColorSpaceRelease(colorSpace);
-        return NULL;
-    }
-    
-    // Preencher com fundo preto
-    CGContextSetFillColorWithColor(context, [UIColor blackColor].CGColor);
-    CGContextFillRect(context, CGRectMake(0, 0, _targetResolution.width, _targetResolution.height));
-    
-    // Determinar o retângulo de desenho para manter a proporção correta
-    CGRect drawRect;
-    
-    if (fabs(originalAspect - targetAspect) < 0.01) {
-        // Proporções são quase idênticas, apenas redimensionar
-        drawRect = CGRectMake(0, 0, _targetResolution.width, _targetResolution.height);
-    }
-    else if (originalAspect > targetAspect) {
-        // Imagem original é mais larga, crop nos lados
-        float scaledHeight = _targetResolution.height;
-        float scaledWidth = scaledHeight * originalAspect;
-        float xOffset = (scaledWidth - _targetResolution.width) / 2.0f;
-        
-        drawRect = CGRectMake(-xOffset, 0, scaledWidth, scaledHeight);
-    }
-    else {
-        // Imagem original é mais alta, crop no topo/base
-        float scaledWidth = _targetResolution.width;
-        float scaledHeight = scaledWidth / originalAspect;
-        float yOffset = (scaledHeight - _targetResolution.height) / 2.0f;
-        
-        drawRect = CGRectMake(0, -yOffset, scaledWidth, scaledHeight);
-    }
-    
-    // Desenhar a imagem adaptada
-    CGContextDrawImage(context, drawRect, originalImage.CGImage);
-    
-    // Liberar recursos do contexto
-    CGContextRelease(context);
-    CGColorSpaceRelease(colorSpace);
-    
-    // Desbloquear o buffer
-    CVPixelBufferUnlockBaseAddress(adaptedPixelBuffer, 0);
-    
-    // Criar uma descrição de formato para o buffer adaptado
-    CMVideoFormatDescriptionRef formatDescription;
-    OSStatus status = CMVideoFormatDescriptionCreateForImageBuffer(
-        kCFAllocatorDefault,
-        adaptedPixelBuffer,
-        &formatDescription
-    );
-    
-    if (status != 0) {
-        writeLog(@"[WebRTCFrameConverter] Erro ao criar descrição de formato para buffer adaptado: %d", (int)status);
-        CVPixelBufferRelease(adaptedPixelBuffer);
-        return NULL;
-    }
-    
-    // Timestamp para o sample buffer
-    CMTimeScale timeScale = 1000000000; // Nanosegundos
-    CMTime timestamp = CMTimeMake((int64_t)(CACurrentMediaTime() * timeScale), timeScale);
-    
-    // Duração do frame (usando a taxa alvo configurada ou default)
-    CMTime duration;
-    if (_adaptToTargetFrameRate) {
-        duration = _targetFrameDuration;
-    } else {
-        duration = CMTimeMake(timeScale / 30, timeScale); // Default 30fps
-    }
-    
-    // Criar um CMSampleTimingInfo com o timestamp
-    CMSampleTimingInfo timingInfo = {
-        .duration = duration,
-        .presentationTimeStamp = timestamp,
-        .decodeTimeStamp = kCMTimeInvalid
-    };
-    
-    // Criar o CMSampleBuffer
-    CMSampleBufferRef sampleBuffer = NULL;
-    status = CMSampleBufferCreateForImageBuffer(
-        kCFAllocatorDefault,
-        adaptedPixelBuffer,
-        true, // dataReady
-        NULL, // allocator
-        NULL, // dataCallback
-        formatDescription,
-        &timingInfo,
-        &sampleBuffer
-    );
-    
-    // Liberar recursos
-    CFRelease(formatDescription);
-    CVPixelBufferRelease(adaptedPixelBuffer);
-    
-    if (status != 0) {
-        writeLog(@"[WebRTCFrameConverter] Erro ao criar CMSampleBuffer adaptado: %d", (int)status);
-        return NULL;
-    }
-    
-    if (_frameCount == 1 || _frameCount % 300 == 0) {
-        writeLog(@"[WebRTCFrameConverter] CMSampleBuffer adaptado criado com sucesso: %dx%d",
-                _targetResolution.width, _targetResolution.height);
-    }
-    
-    return sampleBuffer;
-}
-
 #pragma mark - Métodos de Interface Pública
 
 - (UIImage *)getLastFrameAsImage {
     @synchronized(self) {
         if (!_lastFrame) {
             return nil;
+        }
+        
+        // Verificar se temos imagem em cache
+        if (_cachedImage) {
+            return _cachedImage;
         }
         
         if (_adaptToTargetResolution && _targetResolution.width > 0 && _targetResolution.height > 0) {
@@ -775,6 +672,7 @@
 }
 
 - (NSDictionary *)getFrameProcessingStats {
+    // Calcular tempo médio de processamento
     float averageTime = 0;
     for (int i = 0; i < 10; i++) {
         averageTime += _frameProcessingTimes[i];
@@ -782,9 +680,45 @@
     averageTime /= 10.0;
     float fps = averageTime > 0 ? 1.0/averageTime : 0;
     
+    // Calcular taxa de frames real com base no tempo entre frames
+    float actualFps = 0;
+    if (_frameCount > 1 && _lastFrameTime > 0) {
+        NSTimeInterval now = CACurrentMediaTime();
+        NSTimeInterval timeSinceLastFrame = now - _lastFrameTime;
+        if (timeSinceLastFrame > 0) {
+            actualFps = 1.0 / timeSinceLastFrame;
+        }
+    }
+    
+    // Informações sobre o último frame
+    NSMutableDictionary *lastFrameInfo = [NSMutableDictionary dictionary];
+    if (_lastFrame) {
+        lastFrameInfo[@"width"] = @(_lastFrame.width);
+        lastFrameInfo[@"height"] = @(_lastFrame.height);
+        lastFrameInfo[@"rotation"] = @(_lastFrame.rotation);
+        
+        id<RTCVideoFrameBuffer> buffer = _lastFrame.buffer;
+        if ([buffer isKindOfClass:[RTCCVPixelBuffer class]]) {
+            RTCCVPixelBuffer *pixelBuffer = (RTCCVPixelBuffer *)buffer;
+            CVPixelBufferRef cvBuffer = pixelBuffer.pixelBuffer;
+            if (cvBuffer) {
+                OSType pixelFormatType = CVPixelBufferGetPixelFormatType(cvBuffer);
+                char formatChars[5] = {
+                    (char)((pixelFormatType >> 24) & 0xFF),
+                    (char)((pixelFormatType >> 16) & 0xFF),
+                    (char)((pixelFormatType >> 8) & 0xFF),
+                    (char)(pixelFormatType & 0xFF),
+                    0
+                };
+                lastFrameInfo[@"pixelFormat"] = [NSString stringWithUTF8String:formatChars];
+            }
+        }
+    }
+    
     return @{
         @"averageProcessingTimeMs": @(averageTime * 1000.0),
         @"estimatedFps": @(fps),
+        @"actualFps": @(actualFps),
         @"frameCount": @(_frameCount),
         @"isReceivingFrames": @(_isReceivingFrames),
         @"adaptToTargetResolution": @(_adaptToTargetResolution),
@@ -794,7 +728,8 @@
             @"height": @(_targetResolution.height)
         },
         @"targetFrameRate": @(CMTimeGetSeconds(_targetFrameDuration) > 0 ?
-                            1.0 / CMTimeGetSeconds(_targetFrameDuration) : 0)
+                            1.0 / CMTimeGetSeconds(_targetFrameDuration) : 0),
+        @"lastFrame": lastFrameInfo
     };
 }
 

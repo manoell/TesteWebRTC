@@ -17,13 +17,14 @@ const PORT = process.env.PORT || 8080;
 const LOGGING_ENABLED = true;
 const LOG_FILE = './server.log';
 const MAX_CONNECTIONS = 2; // Limitado a transmissor + receptor
-const KEEP_ALIVE_INTERVAL = 5000; // 5 segundos para detecção rápida de desconexões
+const KEEP_ALIVE_INTERVAL = 2000; // 2 segundos para detecção rápida de desconexões
+const HIGH_QUALITY_BITRATE = 20000; // 20Mbps para 4K
 
 // Inicializar aplicativo Express
 const app = express();
 app.use(cors({
     origin: '*',
-    methods: ['GET', 'POST', 'DELETE']
+    methods: ['GET', 'POST', 'DELETE', 'OPTIONS']
 }));
 app.use(express.json());
 app.use(express.static(__dirname));
@@ -33,7 +34,7 @@ const server = http.createServer(app);
 const wss = new WebSocket.Server({ 
     server,
     // Aumentar o tamanho máximo dos payloads para suportar vídeo 4K
-    maxPayload: 64 * 1024 * 1024 // 64MB
+    maxPayload: 128 * 1024 * 1024 // 128MB para maior segurança com 4K
 });
 
 // Armazenar conexões
@@ -46,19 +47,26 @@ const clients = new Map();
  * Função para logging com timestamp
  * @param {string} message - Mensagem para registro
  * @param {boolean} consoleOnly - Se true, registra apenas no console
+ * @param {boolean} isError - Se true, usa console.error em vez de console.log
  */
-const log = (message, consoleOnly = false) => {
+const log = (message, consoleOnly = false, isError = false) => {
     if (!LOGGING_ENABLED) return;
     
     const timestamp = new Date().toISOString();
     const logMessage = `[${timestamp}] ${message}`;
     
-    console.log(logMessage);
+    if (isError) {
+        console.error(logMessage);
+    } else {
+        console.log(logMessage);
+    }
     
     if (!consoleOnly && LOG_FILE) {
-        fs.appendFile(LOG_FILE, logMessage + '\n', (err) => {
-            if (err) console.error(`Erro ao escrever no log: ${err}`);
-        });
+        try {
+            fs.appendFileSync(LOG_FILE, logMessage + '\n');
+        } catch (err) {
+            console.error(`Erro ao escrever no log: ${err}`);
+        }
     }
 };
 
@@ -66,18 +74,26 @@ const log = (message, consoleOnly = false) => {
  * Limpar dados antigos de salas vazias
  */
 const cleanupEmptyRooms = () => {
+    const startTime = Date.now();
+    let cleanedCount = 0;
+    
     Object.keys(rooms).forEach(roomId => {
         if (!rooms[roomId] || rooms[roomId].length === 0) {
             log(`Limpando sala vazia: ${roomId}`);
             delete rooms[roomId];
             delete roomData[roomId];
             delete roomStats[roomId];
+            cleanedCount++;
         }
     });
+    
+    if (cleanedCount > 0) {
+        log(`Limpeza concluída em ${Date.now() - startTime}ms. ${cleanedCount} salas removidas.`);
+    }
 };
 
-// Configurar intervalo para limpeza de dados antigos (a cada minuto)
-setInterval(cleanupEmptyRooms, 60000);
+// Configurar intervalo para limpeza de dados antigos (a cada 30 segundos)
+setInterval(cleanupEmptyRooms, 30000);
 
 /**
  * Gera resumo de estatísticas para uma sala
@@ -93,7 +109,9 @@ const getRoomStats = (roomId) => {
             peakConnections: 0,
             lastActivity: new Date(),
             bandwidth: 0,
-            resolution: "unknown"
+            resolution: "unknown",
+            fps: 0,
+            codec: "unknown"
         };
     }
     
@@ -106,14 +124,16 @@ const getRoomStats = (roomId) => {
  * @param {number} messageSize - Tamanho da mensagem em bytes
  */
 const updateRoomActivity = (roomId, messageSize = 0) => {
-    const stats = getRoomStats(roomId);
+    if (!roomId || !roomStats[roomId]) return;
+    
+    const stats = roomStats[roomId];
     stats.messagesExchanged++;
     stats.lastActivity = new Date();
     
     // Estimar a largura de banda utilizada
     if (messageSize > 0) {
-        // Média móvel da largura de banda
-        stats.bandwidth = stats.bandwidth * 0.7 + messageSize * 0.3;
+        // Média móvel da largura de banda com peso maior para valores recentes
+        stats.bandwidth = stats.bandwidth * 0.8 + messageSize * 0.2;
     }
 };
 
@@ -123,6 +143,8 @@ const updateRoomActivity = (roomId, messageSize = 0) => {
  * @returns {object} - Informações sobre a qualidade
  */
 const analyzeSdpQuality = (sdp) => {
+    if (!sdp) return { hasVideo: false, hasAudio: false };
+    
     const result = {
         hasVideo: sdp.includes('m=video'),
         hasAudio: sdp.includes('m=audio'),
@@ -130,27 +152,90 @@ const analyzeSdpQuality = (sdp) => {
         hasVP8: sdp.includes('VP8'),
         hasVP9: sdp.includes('VP9'),
         resolution: "unknown",
-        fps: "unknown"
+        fps: "unknown",
+        bitrateKbps: "unknown"
     };
     
     // Tentar extrair resolução
-    const resMatch = sdp.match(/a=imageattr:[0-9]+ send \[x=([0-9]+)\,y=([0-9]+)\]/);
-    if (resMatch && resMatch.length >= 3) {
-        result.resolution = `${resMatch[1]}x${resMatch[2]}`;
+    const resMatch = sdp.match(/a=imageattr:.*send.*\[x=([0-9]+)\-?([0-9]+)?\,y=([0-9]+)\-?([0-9]+)?]/i);
+    if (resMatch && resMatch.length >= 4) {
+        const width = resMatch[2] || resMatch[1];
+        const height = resMatch[4] || resMatch[3];
+        result.resolution = `${width}x${height}`;
     }
     
     // Tentar extrair FPS
-    const fpsMatch = sdp.match(/a=framerate:([0-9]+)/);
+    const fpsMatch = sdp.match(/a=framerate:([0-9]+)/i);
     if (fpsMatch && fpsMatch.length >= 2) {
         result.fps = `${fpsMatch[1]}fps`;
+    }
+    
+    // Tentar extrair bitrate
+    const bitrateMatch = sdp.match(/b=AS:([0-9]+)/i);
+    if (bitrateMatch && bitrateMatch.length >= 2) {
+        result.bitrateKbps = `${bitrateMatch[1]}kbps`;
+    }
+    
+    // Procurar profile de H264 level
+    if (result.hasH264) {
+        const profileMatch = sdp.match(/profile-level-id=([0-9a-fA-F]+)/i);
+        if (profileMatch && profileMatch.length >= 2) {
+            result.h264Profile = profileMatch[1];
+        }
     }
     
     return result;
 };
 
+/**
+ * Melhora SDP para otimizar para alta qualidade
+ * @param {string} sdp - SDP original
+ * @returns {string} - SDP otimizado
+ */
+const enhanceSdpForHighQuality = (sdp) => {
+    if (!sdp.includes('m=video')) return sdp;
+    
+    const lines = sdp.split('\n');
+    const newLines = [];
+    let inVideoSection = false;
+    let videoSectionModified = false;
+    
+    for (let i = 0; i < lines.length; i++) {
+        const line = lines[i];
+        
+        // Detectar seção de vídeo
+        if (line.startsWith('m=video')) {
+            inVideoSection = true;
+        } else if (line.startsWith('m=')) {
+            inVideoSection = false;
+        }
+        
+        // Para seção de vídeo, adicionar bitrate se não existir
+        if (inVideoSection && line.startsWith('c=') && !videoSectionModified) {
+            newLines.push(line);
+            // Adicionar linha de bitrate alto para 4K após a linha de conexão
+            newLines.push(`b=AS:${HIGH_QUALITY_BITRATE}`);
+            videoSectionModified = true;
+            continue;
+        }
+        
+        // Modificar o profile-level-id do H264 para suportar 4K
+        if (inVideoSection && line.includes('profile-level-id') && line.includes('H264')) {
+            // Substituir por perfil de alta qualidade - 640032 suporta até 4K
+            const modifiedLine = line.replace(/profile-level-id=[0-9a-fA-F]+/i, 'profile-level-id=640032');
+            newLines.push(modifiedLine);
+            continue;
+        }
+        
+        newLines.push(line);
+    }
+    
+    return newLines.join('\n');
+};
+
 // Manipular conexões WebSocket
 wss.on('connection', (ws) => {
-    log('Nova conexão estabelecida via WebSocket');
+    log('Nova conexão WebSocket estabelecida');
     
     // Identificar cliente
     const clientId = uuidv4();
@@ -167,7 +252,7 @@ wss.on('connection', (ws) => {
     
     // Tratamento de erros específico
     ws.on('error', (error) => {
-        log(`Erro WebSocket para cliente ${ws.id}: ${error.message}`);
+        log(`Erro WebSocket para cliente ${ws.id}: ${error.message}`, false, true);
     });
     
     // Processar mensagens
@@ -246,11 +331,16 @@ wss.on('connection', (ws) => {
                 // Analisar qualidade da oferta para log
                 if (data.sdp) {
                     const quality = analyzeSdpQuality(data.sdp);
-                    log(`Qualidade da oferta: video=${quality.hasVideo}, audio=${quality.hasAudio}, codec=${quality.hasH264 ? 'H264' : (quality.hasVP9 ? 'VP9' : (quality.hasVP8 ? 'VP8' : 'unknown'))}, resolução=${quality.resolution}, fps=${quality.fps}`, true);
+                    log(`Qualidade da oferta: video=${quality.hasVideo}, audio=${quality.hasAudio}, codec=${quality.hasH264 ? 'H264' : (quality.hasVP9 ? 'VP9' : (quality.hasVP8 ? 'VP8' : 'unknown'))}, resolução=${quality.resolution}, fps=${quality.fps}, bitrate=${quality.bitrateKbps}`, true);
                     
                     // Atualizar estatísticas da sala
                     const stats = getRoomStats(roomId);
                     stats.resolution = quality.resolution;
+                    stats.fps = quality.fps;
+                    stats.codec = quality.hasH264 ? 'H264' : (quality.hasVP9 ? 'VP9' : (quality.hasVP8 ? 'VP8' : 'unknown'));
+                    
+                    // Otimizar SDP para alta qualidade
+                    data.sdp = enhanceSdpForHighQuality(data.sdp);
                 }
                 
                 // Armazenar oferta
@@ -266,7 +356,7 @@ wss.on('connection', (ws) => {
                 // Encaminhar oferta para outros clientes
                 rooms[roomId].forEach(client => {
                     if (client !== ws && client.readyState === WebSocket.OPEN) {
-                        client.send(message);
+                        client.send(JSON.stringify(data));
                     }
                 });
                 
@@ -275,6 +365,12 @@ wss.on('connection', (ws) => {
             // Processar resposta SDP
             else if (data.type === 'answer' && roomId) {
                 log(`Resposta SDP recebida de ${ws.id} na sala ${roomId}`);
+                
+                // Analisar qualidade da resposta
+                if (data.sdp) {
+                    const quality = analyzeSdpQuality(data.sdp);
+                    log(`Qualidade da resposta: video=${quality.hasVideo}, audio=${quality.hasAudio}, codec=${quality.hasH264 ? 'H264' : (quality.hasVP9 ? 'VP9' : (quality.hasVP8 ? 'VP8' : 'unknown'))}, resolução=${quality.resolution}, fps=${quality.fps}`, true);
+                }
                 
                 // Armazenar resposta
                 data.senderId = ws.id;
@@ -289,7 +385,7 @@ wss.on('connection', (ws) => {
                 // Encaminhar resposta para outros clientes
                 rooms[roomId].forEach(client => {
                     if (client !== ws && client.readyState === WebSocket.OPEN) {
-                        client.send(message);
+                        client.send(JSON.stringify(data));
                     }
                 });
                 
@@ -320,7 +416,7 @@ wss.on('connection', (ws) => {
                     // Encaminhar candidato para outros clientes
                     rooms[roomId].forEach(client => {
                         if (client !== ws && client.readyState === WebSocket.OPEN) {
-                            client.send(message);
+                            client.send(JSON.stringify(data));
                         }
                     });
                 }
@@ -350,14 +446,15 @@ wss.on('connection', (ws) => {
                 // Encaminhar mensagem para outros clientes na sala
                 rooms[roomId].forEach(client => {
                     if (client !== ws && client.readyState === WebSocket.OPEN) {
-                        client.send(message);
+                        client.send(JSON.stringify(data));
                     }
                 });
                 
                 updateRoomActivity(roomId, message.length);
             }
         } catch (e) {
-            log(`Erro ao processar mensagem WebSocket: ${e.message}`);
+            log(`Erro ao processar mensagem WebSocket: ${e.message}`, false, true);
+            log(`Mensagem problemática: ${message.toString().substring(0, 100)}...`, false, true);
             ws.send(JSON.stringify({
                 type: 'error', 
                 message: 'Invalid message format'
@@ -399,7 +496,7 @@ wss.on('connection', (ws) => {
 });
 
 // Configurar ping periódico para manter conexões vivas
-// Intervalo reduzido para 5 segundos para detecção rápida de desconexões
+// Intervalo reduzido para detecção rápida de desconexões
 const pingInterval = setInterval(() => {
     wss.clients.forEach(ws => {
         if (ws.isAlive === false) {
@@ -432,6 +529,8 @@ app.get('/info', (req, res) => {
             connections: stats.connections,
             messagesExchanged: stats.messagesExchanged,
             resolution: stats.resolution,
+            fps: stats.fps,
+            codec: stats.codec,
             created: stats.created,
             lastActivity: stats.lastActivity
         };
@@ -441,7 +540,8 @@ app.get('/info', (req, res) => {
         clients: wss.clients.size,
         rooms: Object.keys(rooms).length,
         roomsInfo: roomsInfo,
-        uptime: process.uptime()
+        uptime: process.uptime(),
+        startTime: new Date(Date.now() - process.uptime() * 1000).toISOString()
     });
 });
 
@@ -461,6 +561,8 @@ app.get('/room/:roomId/info', (req, res) => {
         connections: stats.connections,
         messagesExchanged: stats.messagesExchanged,
         resolution: stats.resolution,
+        fps: stats.fps,
+        codec: stats.codec,
         created: stats.created,
         lastActivity: stats.lastActivity
     });

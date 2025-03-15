@@ -23,6 +23,11 @@
 @property (nonatomic, assign, readonly) BOOL isReceivingFrames;
 
 /**
+ * Contador de frames recebidos.
+ */
+@property (nonatomic, assign, readonly) int frameCount;
+
+/**
  * Inicializa o conversor de frames.
  * @return Uma nova instância do conversor.
  */
@@ -63,5 +68,11 @@
  * @param frameRate Taxa de quadros desejada em fps.
  */
 - (void)setTargetFrameRate:(float)frameRate;
+
+/**
+ * Reset o conversor para um estado limpo.
+ * Limpa o cache interno e reinicia contadores.
+ */
+- (void)reset;
 
 @end
