@@ -1,5 +1,5 @@
 /*
- *  Copyright 2020 The WebRTC project authors. All Rights Reserved.
+ *  Copyright 2023 The WebRTC project authors. All Rights Reserved.
  *
  *  Use of this source code is governed by a BSD-style license
  *  that can be found in the LICENSE file in the root of the source
@@ -15,7 +15,7 @@
 #import <WebRTC/RTCMacros.h>
 #import <WebRTC/RTCMutableI420Buffer.h>
 #import <WebRTC/RTCMutableYUVPlanarBuffer.h>
-#import <WebRTC/RTCRtpFragmentationHeader.h>
+#import <WebRTC/RTCSSLCertificateVerifier.h>
 #import <WebRTC/RTCVideoCapturer.h>
 #import <WebRTC/RTCVideoCodecInfo.h>
 #import <WebRTC/RTCVideoDecoder.h>
@@ -28,6 +28,7 @@
 #import <WebRTC/RTCVideoFrameBuffer.h>
 #import <WebRTC/RTCVideoRenderer.h>
 #import <WebRTC/RTCYUVPlanarBuffer.h>
+#import <WebRTC/RTCAudioDevice.h>
 #import <WebRTC/RTCAudioSession.h>
 #import <WebRTC/RTCAudioSessionConfiguration.h>
 #import <WebRTC/RTCCameraVideoCapturer.h>
@@ -48,6 +49,7 @@
 #import <WebRTC/RTCCameraPreviewView.h>
 #import <WebRTC/RTCDispatcher.h>
 #import <WebRTC/UIDevice+RTCDevice.h>
+#import <WebRTC/RTCAudioDeviceModule.h>
 #import <WebRTC/RTCAudioSource.h>
 #import <WebRTC/RTCAudioTrack.h>
 #import <WebRTC/RTCConfiguration.h>
@@ -55,6 +57,7 @@
 #import <WebRTC/RTCDataChannelConfiguration.h>
 #import <WebRTC/RTCFieldTrials.h>
 #import <WebRTC/RTCIceCandidate.h>
+#import <WebRTC/RTCIceCandidateErrorEvent.h>
 #import <WebRTC/RTCIceServer.h>
 #import <WebRTC/RTCLegacyStatsReport.h>
 #import <WebRTC/RTCMediaConstraints.h>
@@ -86,8 +89,10 @@
 #import <WebRTC/RTCVideoCodecConstants.h>
 #import <WebRTC/RTCVideoDecoderVP8.h>
 #import <WebRTC/RTCVideoDecoderVP9.h>
+#import <WebRTC/RTCVideoDecoderAV1.h>
 #import <WebRTC/RTCVideoEncoderVP8.h>
 #import <WebRTC/RTCVideoEncoderVP9.h>
+#import <WebRTC/RTCVideoEncoderAV1.h>
 #import <WebRTC/RTCNativeI420Buffer.h>
 #import <WebRTC/RTCNativeMutableI420Buffer.h>
 #import <WebRTC/RTCCallbackLogger.h>

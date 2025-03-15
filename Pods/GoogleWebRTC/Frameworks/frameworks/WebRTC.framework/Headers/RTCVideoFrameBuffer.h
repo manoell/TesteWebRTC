@@ -10,7 +10,7 @@
 
 #import <AVFoundation/AVFoundation.h>
 
-#import "RTCMacros.h"
+#import <WebRTC/RTCMacros.h>
 
 NS_ASSUME_NONNULL_BEGIN
 
@@ -26,6 +26,14 @@ RTC_OBJC_EXPORT
 @property(nonatomic, readonly) int height;
 
 - (id<RTC_OBJC_TYPE(RTCI420Buffer)>)toI420;
+
+@optional
+- (id<RTC_OBJC_TYPE(RTCVideoFrameBuffer)>)cropAndScaleWith:(int)offsetX
+                                                   offsetY:(int)offsetY
+                                                 cropWidth:(int)cropWidth
+                                                cropHeight:(int)cropHeight
+                                                scaleWidth:(int)scaleWidth
+                                               scaleHeight:(int)scaleHeight;
 
 @end
 

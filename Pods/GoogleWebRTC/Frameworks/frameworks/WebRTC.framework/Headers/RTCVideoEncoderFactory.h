@@ -10,9 +10,9 @@
 
 #import <Foundation/Foundation.h>
 
-#import "RTCMacros.h"
-#import "RTCVideoCodecInfo.h"
-#import "RTCVideoEncoder.h"
+#import <WebRTC/RTCMacros.h>
+#import <WebRTC/RTCVideoCodecInfo.h>
+#import <WebRTC/RTCVideoEncoder.h>
 
 NS_ASSUME_NONNULL_BEGIN
 
@@ -26,6 +26,9 @@ RTC_OBJC_EXPORT
     - (void)registerCurrentEncoderInfo : (RTC_OBJC_TYPE(RTCVideoCodecInfo) *)info;
 - (nullable RTC_OBJC_TYPE(RTCVideoCodecInfo) *)encoderForBitrate:(NSInteger)bitrate;
 - (nullable RTC_OBJC_TYPE(RTCVideoCodecInfo) *)encoderForBrokenEncoder;
+
+@optional
+- (nullable RTC_OBJC_TYPE(RTCVideoCodecInfo) *)encoderForResolutionChangeBySize:(CGSize)size;
 
 @end
 
