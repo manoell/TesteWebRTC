@@ -12,7 +12,7 @@ typedef NS_ENUM(int, LogLevel) {
 };
 
 // Nível de log global, default é 3 (avisos e erros)
-static int gLogLevel = 3;
+static int gLogLevel = 5;
 
 // Caminho do arquivo de log
 static NSString *gLogPath = @"/var/tmp/testeWebRTC.log";

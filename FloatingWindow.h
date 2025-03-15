@@ -27,6 +27,15 @@ typedef NS_ENUM(NSInteger, FloatingWindowState) {
 #pragma mark - Properties
 
 /**
+ * Mostra se está recebendo frames
+ */
+@property (nonatomic, assign) BOOL isReceivingFrames;
+
+/**
+ * Frame rate atual
+ */
+@property (nonatomic, assign) float currentFps;
+/**
  * View para renderização direta do vídeo WebRTC
  */
 @property (nonatomic, strong, readonly) RTCMTLVideoView *videoView;

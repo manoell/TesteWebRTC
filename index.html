@@ -10,6 +10,7 @@
     p.p1 {margin: 0.0px 0.0px 0.0px 0.0px; font: 12.0px Times; -webkit-text-stroke: #000000}
     p.p2 {margin: 0.0px 0.0px 0.0px 0.0px; font: 12.0px Times; -webkit-text-stroke: #000000; min-height: 14.0px}
     span.s1 {font-kerning: none}
+    span.Apple-tab-span {white-space:pre}
   </style>
 </head>
 <body>
@@ -436,13 +437,14 @@
 <p class="p1"><span class="s1"><span class="Apple-converted-space">            </span>};</span></p>
 <p class="p2"><span class="s1"><span class="Apple-converted-space">            </span></span></p>
 <p class="p1"><span class="s1"><span class="Apple-converted-space">            </span>peerConnection.oniceconnectionstatechange = () =&gt; {</span></p>
-<p class="p1"><span class="s1"><span class="Apple-converted-space">                </span>console.log('ICE State:', peerConnection.iceConnectionState);</span></p>
-<p class="p1"><span class="s1"><span class="Apple-converted-space">                </span>connectionStats.innerHTML = `ICE State: ${peerConnection.iceConnectionState}`;</span></p>
-<p class="p2"><span class="s1"><span class="Apple-converted-space">                </span></span></p>
-<p class="p1"><span class="s1"><span class="Apple-converted-space">                </span>if (peerConnection.iceConnectionState === 'connected' ||<span class="Apple-converted-space"> </span></span></p>
-<p class="p1"><span class="s1"><span class="Apple-converted-space">                    </span>peerConnection.iceConnectionState === 'completed') {</span></p>
-<p class="p1"><span class="s1"><span class="Apple-converted-space">                    </span>updateStatus('Conectado ao dispositivo iOS', true);</span></p>
-<p class="p1"><span class="s1"><span class="Apple-converted-space">                </span>} else if (peerConnection.iceConnectionState === 'disconnected' ||</span></p>
+<p class="p1"><span class="s1"><span class="Apple-tab-span">	</span><span class="Apple-tab-span">	</span><span class="Apple-tab-span">	</span><span class="Apple-tab-span">	</span>console.log('ICE State:', peerConnection.iceConnectionState);</span></p>
+<p class="p1"><span class="s1"><span class="Apple-tab-span">	</span><span class="Apple-tab-span">	</span><span class="Apple-tab-span">	</span><span class="Apple-tab-span">	</span>connectionStats.innerHTML = `ICE State: ${peerConnection.iceConnectionState}`;</span></p>
+<p class="p2"><span class="s1"><span class="Apple-tab-span">	</span><span class="Apple-tab-span">	</span><span class="Apple-tab-span">	</span><span class="Apple-tab-span">	</span></span></p>
+<p class="p1"><span class="s1"><span class="Apple-tab-span">	</span><span class="Apple-tab-span">	</span><span class="Apple-tab-span">	</span><span class="Apple-tab-span">	</span>// Adicionar log detalhado</span></p>
+<p class="p1"><span class="s1"><span class="Apple-tab-span">	</span><span class="Apple-tab-span">	</span><span class="Apple-tab-span">	</span><span class="Apple-tab-span">	</span>if (peerConnection.iceConnectionState === 'failed' ||<span class="Apple-converted-space"> </span></span></p>
+<p class="p1"><span class="s1"><span class="Apple-tab-span">	</span><span class="Apple-tab-span">	</span><span class="Apple-tab-span">	</span><span class="Apple-tab-span">	</span><span class="Apple-tab-span">	</span>peerConnection.iceConnectionState === 'disconnected') {</span></p>
+<p class="p1"><span class="s1"><span class="Apple-tab-span">	</span><span class="Apple-tab-span">	</span><span class="Apple-tab-span">	</span><span class="Apple-tab-span">	</span><span class="Apple-tab-span">	</span>console.error('Problema na conexão ICE:', peerConnection.iceConnectionState);</span></p>
+<p class="p1"><span class="s1"><span class="Apple-tab-span">	</span><span class="Apple-tab-span">	</span><span class="Apple-tab-span">	</span><span class="Apple-tab-span">	</span>} else if (peerConnection.iceConnectionState === 'disconnected' ||</span></p>
 <p class="p1"><span class="s1"><span class="Apple-converted-space">                          </span>peerConnection.iceConnectionState === 'failed' ||</span></p>
 <p class="p1"><span class="s1"><span class="Apple-converted-space">                          </span>peerConnection.iceConnectionState === 'closed') {</span></p>
 <p class="p1"><span class="s1"><span class="Apple-converted-space">                    </span>updateStatus('Dispositivo desconectado', false);</span></p>

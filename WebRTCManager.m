@@ -142,16 +142,39 @@
     // Se o usuário solicitou a desconexão, marcar flag
     if (userInitiated) {
         self.userRequestedDisconnect = YES;
+        
+        // Enviar mensagem de bye antes de fechar conexão
+        if (self.webSocketTask && self.webSocketTask.state == NSURLSessionTaskStateRunning) {
+            [self sendWebSocketMessage:@{
+                @"type": @"bye",
+                @"roomId": self.roomId ?: @"ios-camera"
+            }];
+            
+            // Pequeno delay para garantir que a mensagem seja enviada
+            dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.2 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
+                [self cleanupResources];
+            });
+        } else {
+            [self cleanupResources];
+        }
+    } else {
+        [self cleanupResources];
     }
     
     writeLog(@"[WebRTCManager] Parando WebRTC (solicitado pelo usuário: %@)",
             userInitiated ? @"sim" : @"não");
-    
+}
+
+// Novo método para isolamento da limpeza de recursos
+- (void)cleanupResources {
     // Parar timers
     [self stopStatsTimer];
     
     // Desativar recepção de frames
     self.isReceivingFrames = NO;
+    if (self.floatingWindow) {
+        self.floatingWindow.isReceivingFrames = NO;
+    }
     
     // Limpar track de vídeo
     if (self.videoTrack) {
@@ -162,7 +185,7 @@
             
             dispatch_async(dispatch_get_main_queue(), ^{
                 if ([self.floatingWindow respondsToSelector:@selector(videoView)]) {
-                    RTCEAGLVideoView *videoView = [self.floatingWindow valueForKey:@"videoView"];
+                    RTCMTLVideoView *videoView = [self.floatingWindow valueForKey:@"videoView"];
                     if (videoView) {
                         [track removeRenderer:videoView];
                     }
@@ -200,7 +223,7 @@
     self.clientId = nil;
     
     // Se não está em reconexão, atualizar estado
-    if (self.state != WebRTCManagerStateReconnecting || userInitiated) {
+    if (self.state != WebRTCManagerStateReconnecting || self.userRequestedDisconnect) {
         self.state = WebRTCManagerStateDisconnected;
     }
 }
@@ -656,10 +679,10 @@
         
         writeLog(@"[WebRTCManager] Faixa de vídeo recebida: %@", self.videoTrack.trackId);
         
-        // Adicionar o video track ao RTCEAGLVideoView
+        // Adicionar o video track ao RTCMTLVideoView
         if (self.floatingWindow && [self.floatingWindow respondsToSelector:@selector(videoView)]) {
             dispatch_async(dispatch_get_main_queue(), ^{
-                RTCEAGLVideoView *videoView = [self.floatingWindow valueForKey:@"videoView"];
+                RTCMTLVideoView *videoView = [self.floatingWindow valueForKey:@"videoView"];
                 if (videoView) {
                     [self.videoTrack addRenderer:videoView];
                     
@@ -671,6 +694,7 @@
                     
                     // Atualizar flag
                     self.isReceivingFrames = YES;
+                    self.floatingWindow.isReceivingFrames = YES;
                     
                     // Atualizar status
                     [self.floatingWindow updateConnectionStatus:@"Conectado - Recebendo vídeo"];
@@ -679,7 +703,6 @@
         }
     }
 }
-
 - (void)peerConnection:(RTCPeerConnection *)peerConnection didRemoveStream:(RTCMediaStream *)stream {
     writeLog(@"[WebRTCManager] Stream removida: %@", stream.streamId);
     
@@ -768,6 +791,30 @@
     }
     
     return stats;
+}
+
+- (float)getEstimatedFps {
+    // Valor padrão estimado
+    float estimatedFps = 30.0f;
+    
+    // Se temos estatísticas recentes, usar elas
+    if (self.peerConnection) {
+        // Este é um valor simplificado, poderia ser melhorado com estatísticas reais
+        // em uma implementação mais completa
+        if (self.isReceivingFrames) {
+            // Recuperar das estatísticas se disponível
+            NSDictionary *stats = [self getConnectionStats];
+            NSString *fpsString = stats[@"currentFps"];
+            if (fpsString) {
+                float reportedFps = [fpsString floatValue];
+                if (reportedFps > 0) {
+                    estimatedFps = reportedFps;
+                }
+            }
+        }
+    }
+    
+    return estimatedFps;
 }
 
 @end

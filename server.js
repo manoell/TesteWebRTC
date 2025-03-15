@@ -16,7 +16,7 @@ const os = require('os');
 const PORT = process.env.PORT || 8080;
 const LOGGING_ENABLED = true;
 const LOG_FILE = './server.log';
-const MAX_CONNECTIONS = 2; // Limitado a transmissor + receptor
+const MAX_CONNECTIONS = 20; // Limitado a transmissor + receptor
 const KEEP_ALIVE_INTERVAL = 2000; // 2 segundos para detecção rápida de desconexões
 const HIGH_QUALITY_BITRATE = 20000; // 20Mbps para 4K
 
@@ -197,13 +197,15 @@ const analyzeSdpQuality = (sdp) => {
 };
 
 /**
- * Melhora SDP para otimizar para alta qualidade
+ * Melhora SDP para otimizar para alta qualidade sem causar conflitos de payload
  * @param {string} sdp - SDP original
  * @returns {string} - SDP otimizado
  */
 const enhanceSdpForHighQuality = (sdp) => {
     if (!sdp.includes('m=video')) return sdp;
     
+    // Este é um método mais direto e seguro para evitar conflitos de payload
+    // Em vez de tentar modificar codecs individuais, vamos apenas definir o bitrate
     const lines = sdp.split('\n');
     const newLines = [];
     let inVideoSection = false;
@@ -228,14 +230,7 @@ const enhanceSdpForHighQuality = (sdp) => {
             continue;
         }
         
-        // Modificar o profile-level-id do H264 para suportar 4K
-        if (inVideoSection && line.includes('profile-level-id') && line.includes('H264')) {
-            // Substituir por perfil de alta qualidade - 640032 suporta até 4K
-            const modifiedLine = line.replace(/profile-level-id=[0-9a-fA-F]+/i, 'profile-level-id=640032');
-            newLines.push(modifiedLine);
-            continue;
-        }
-        
+        // Não tentamos mais modificar o profile-level-id para evitar conflitos de payload
         newLines.push(line);
     }
     
@@ -335,7 +330,7 @@ wss.on('connection', (ws) => {
             } 
             // Processar oferta SDP (otimizar para alta resolução)
             else if (data.type === 'offer' && roomId) {
-                log(`Oferta SDP recebida de ${ws.id} na sala ${roomId}`);
+                log(`Oferta SDP recebida de ${ws.id} na sala ${roomId} com comprimento ${data.sdp ? data.sdp.length : 0}`, true);
                 
                 // Analisar qualidade da oferta para log
                 if (data.sdp) {

@@ -62,6 +62,9 @@
         self.layer.shadowOpacity = 0.5;
         self.layer.shadowRadius = 8;
         
+        self.isReceivingFrames = NO;
+        self.currentFps = 0;
+        
         [self setupUI];
         
         // Inicializar WebRTC manager
@@ -141,6 +144,7 @@
     writeLog(@"[FloatingWindow] RTCMTLVideoView configurada com sucesso");
 }
 
+// Em setupStatusBar, remover o infoButton
 - (void)setupStatusBar {
     // Barra de status superior com gradiente
     UIView *statusBarView = [[UIView alloc] init];
@@ -174,8 +178,7 @@
         [self.statusLabel.heightAnchor constraintEqualToConstant:30],
     ]];
     
-    // Botões de controle da barra superior (removido botão de fechar como solicitado)
-    
+    // Apenas o botão de minimizar (remover o infoButton)
     self.minimizeButton = [UIButton buttonWithType:UIButtonTypeSystem];
     self.minimizeButton.translatesAutoresizingMaskIntoConstraints = NO;
     if (@available(iOS 13.0, *)) {
@@ -187,27 +190,11 @@
     self.minimizeButton.tintColor = [UIColor whiteColor];
     [statusBarView addSubview:self.minimizeButton];
     
-    self.infoButton = [UIButton buttonWithType:UIButtonTypeSystem];
-    self.infoButton.translatesAutoresizingMaskIntoConstraints = NO;
-    if (@available(iOS 13.0, *)) {
-        [self.infoButton setImage:[UIImage systemImageNamed:@"info.circle.fill"] forState:UIControlStateNormal];
-    } else {
-        [self.infoButton setTitle:@"i" forState:UIControlStateNormal];
-    }
-    [self.infoButton addTarget:self action:@selector(infoButtonTapped) forControlEvents:UIControlEventTouchUpInside];
-    self.infoButton.tintColor = [UIColor whiteColor];
-    [statusBarView addSubview:self.infoButton];
-    
     [NSLayoutConstraint activateConstraints:@[
         [self.minimizeButton.trailingAnchor constraintEqualToAnchor:statusBarView.trailingAnchor constant:-8],
         [self.minimizeButton.centerYAnchor constraintEqualToAnchor:statusBarView.centerYAnchor],
         [self.minimizeButton.widthAnchor constraintEqualToConstant:30],
         [self.minimizeButton.heightAnchor constraintEqualToConstant:30],
-        
-        [self.infoButton.trailingAnchor constraintEqualToAnchor:self.minimizeButton.leadingAnchor constant:-8],
-        [self.infoButton.centerYAnchor constraintEqualToAnchor:statusBarView.centerYAnchor],
-        [self.infoButton.widthAnchor constraintEqualToConstant:30],
-        [self.infoButton.heightAnchor constraintEqualToConstant:30],
     ]];
 }
 
@@ -252,34 +239,12 @@
     self.toggleButton.titleLabel.font = [UIFont boldSystemFontOfSize:16];
     self.toggleButton.contentEdgeInsets = UIEdgeInsetsMake(5, 10, 5, 10);
     
-    // Botão de configurações
-    UIButton *settingsButton = [UIButton buttonWithType:UIButtonTypeSystem];
-    if (@available(iOS 13.0, *)) {
-        [settingsButton setImage:[UIImage systemImageNamed:@"gear"] forState:UIControlStateNormal];
-    } else {
-        [settingsButton setTitle:@"⚙️" forState:UIControlStateNormal];
-    }
-    settingsButton.tintColor = [UIColor whiteColor];
-    [settingsButton addTarget:self action:@selector(showSettingsMenu:) forControlEvents:UIControlEventTouchUpInside];
-    
-    // Botão de estatísticas
-    UIButton *statsButton = [UIButton buttonWithType:UIButtonTypeSystem];
-    if (@available(iOS 13.0, *)) {
-        [statsButton setImage:[UIImage systemImageNamed:@"chart.bar"] forState:UIControlStateNormal];
-    } else {
-        [statsButton setTitle:@"📊" forState:UIControlStateNormal];
-    }
-    statsButton.tintColor = [UIColor whiteColor];
-    [statsButton addTarget:self action:@selector(toggleStatsView:) forControlEvents:UIControlEventTouchUpInside];
-    
-    // Adicionar botões ao stack view
+    // Adicionar botão ao stack view
     [self.controlsStackView addArrangedSubview:self.toggleButton];
-    [self.controlsStackView addArrangedSubview:settingsButton];
-    [self.controlsStackView addArrangedSubview:statsButton];
     
     // Configurar constraints específicos para o botão principal
     [NSLayoutConstraint activateConstraints:@[
-        [self.toggleButton.widthAnchor constraintGreaterThanOrEqualToConstant:120],
+        [self.toggleButton.widthAnchor constraintGreaterThanOrEqualToConstant:180],
     ]];
 }
 
@@ -543,8 +508,57 @@
 
 - (void)updateConnectionStatus:(NSString *)status {
     dispatch_async(dispatch_get_main_queue(), ^{
-        self.statusLabel.text = status;
+        // Para status de recepção, mostrar resolução e FPS
+        if ([status containsString:@"Recebendo"] ||
+            [status containsString:@"Conectado"]) {
+            if (self.isReceivingFrames) {
+                if (self.lastFrameSize.width > 0 && self.lastFrameSize.height > 0) {
+                    NSString *dimensionString = [NSString stringWithFormat:@"%dx%d",
+                                                (int)self.lastFrameSize.width,
+                                                (int)self.lastFrameSize.height];
+                    
+                    if (self.currentFps > 0) {
+                        self.statusLabel.text = [NSString stringWithFormat:@"Recebendo %@ @ %dfps",
+                                               dimensionString, (int)self.currentFps];
+                    } else {
+                        self.statusLabel.text = [NSString stringWithFormat:@"Recebendo %@",
+                                               dimensionString];
+                    }
+                } else {
+                    self.statusLabel.text = @"Conectado - Recebendo stream";
+                }
+            } else {
+                self.statusLabel.text = status;
+            }
+        } else {
+            self.statusLabel.text = status;
+        }
     });
+}
+
+@synthesize currentFps = _currentFps;
+
+- (void)updateFps:(float)fps {
+    if (_currentFps != fps) {
+        _currentFps = fps;
+        
+        // Atualizar status se estiver recebendo frames
+        if (self.isReceivingFrames && self.statusLabel.text &&
+            [self.statusLabel.text hasPrefix:@"Recebendo"]) {
+            NSString *currentStatus = self.statusLabel.text;
+            NSString *resolution = @"";
+            
+            // Extrair resolução do status atual
+            NSArray *components = [currentStatus componentsSeparatedByString:@" "];
+            if (components.count > 1) {
+                resolution = components[1];
+            }
+            
+            if (resolution.length > 0) {
+                [self updateConnectionStatus:[NSString stringWithFormat:@"Recebendo %@", resolution]];
+            }
+        }
+    }
 }
 
 #pragma mark - RTCVideoViewDelegate
@@ -561,8 +575,12 @@
             // Atualizar feedback visual para o usuário
             [self updateConnectionStatus:[NSString stringWithFormat:@"Recebendo %dx%d", (int)size.width, (int)size.height]];
             
-            // Atualizar estatísticas de vídeo
-            self.videoStatsLabel.text = [NSString stringWithFormat:@"Vídeo: %dx%d", (int)size.width, (int)size.height];
+            // Se temos informação de FPS, vamos tentar usar
+            if (self.webRTCManager && [self.webRTCManager respondsToSelector:@selector(getEstimatedFps)]) {
+                self.currentFps = [self.webRTCManager getEstimatedFps];
+                // Forçar atualização do status para incluir FPS
+                [self updateConnectionStatus:[NSString stringWithFormat:@"Recebendo %dx%d", (int)size.width, (int)size.height]];
+            }
         });
     }
 }
@@ -995,30 +1013,49 @@
         case UIGestureRecognizerStateBegan:
             self.lastPosition = self.center;
             self.dragInProgress = YES;
-            [self showControlsAnimated:YES];
+            // Não mostrar controles quando minimizado para garantir que não atrapalhem o gesto
+            if (self.windowState != FloatingWindowStateMinimized) {
+                [self showControlsAnimated:YES];
+            }
             break;
             
         case UIGestureRecognizerStateChanged: {
             CGPoint newCenter = CGPointMake(self.lastPosition.x + translation.x,
-                                            self.lastPosition.y + translation.y);
+                                           self.lastPosition.y + translation.y);
             
             // Garantir que a janela não saia completamente da tela
             CGRect bounds = [UIScreen mainScreen].bounds;
-            CGFloat halfWidth = self.bounds.size.width / 2;
-            CGFloat halfHeight = self.bounds.size.height / 2;
             
-            // Limitar X
-            if (newCenter.x - halfWidth < 0) {
-                newCenter.x = halfWidth;
-            } else if (newCenter.x + halfWidth > bounds.size.width) {
-                newCenter.x = bounds.size.width - halfWidth;
-            }
-            
-            // Limitar Y
-            if (newCenter.y - halfHeight < 0) {
-                newCenter.y = halfHeight;
-            } else if (newCenter.y + halfHeight > bounds.size.height) {
-                newCenter.y = bounds.size.height - halfHeight;
+            // Cálculo especial para o modo minimizado
+            if (self.windowState == FloatingWindowStateMinimized) {
+                // No modo minimizado, permitir mais liberdade de movimento
+                // Garantir que pelo menos 15px da janela fiquem visíveis
+                float minVisiblePart = 15.0;
+                float maxX = bounds.size.width - minVisiblePart;
+                float maxY = bounds.size.height - minVisiblePart;
+                
+                if (newCenter.x < minVisiblePart) newCenter.x = minVisiblePart;
+                if (newCenter.x > maxX) newCenter.x = maxX;
+                if (newCenter.y < minVisiblePart) newCenter.y = minVisiblePart;
+                if (newCenter.y > maxY) newCenter.y = maxY;
+            } else {
+                // Comportamento original para outros estados
+                CGFloat halfWidth = self.bounds.size.width / 2;
+                CGFloat halfHeight = self.bounds.size.height / 2;
+                
+                // Limitar X
+                if (newCenter.x - halfWidth < 0) {
+                    newCenter.x = halfWidth;
+                } else if (newCenter.x + halfWidth > bounds.size.width) {
+                    newCenter.x = bounds.size.width - halfWidth;
+                }
+                
+                // Limitar Y
+                if (newCenter.y - halfHeight < 0) {
+                    newCenter.y = halfHeight;
+                } else if (newCenter.y + halfHeight > bounds.size.height) {
+                    newCenter.y = bounds.size.height - halfHeight;
+                }
             }
             
             self.center = newCenter;
@@ -1028,7 +1065,10 @@
         case UIGestureRecognizerStateEnded:
         case UIGestureRecognizerStateCancelled:
             self.dragInProgress = NO;
-            [self snapToNearestCorner:YES];
+            // Comportamento de snap opcional para o modo minimizado
+            if (self.windowState != FloatingWindowStateMinimized) {
+                [self snapToNearestCorner:YES];
+            }
             [self resetAutoHideTimer];
             break;
             

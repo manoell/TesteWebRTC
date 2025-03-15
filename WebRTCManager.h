@@ -63,6 +63,8 @@ typedef NS_ENUM(NSInteger, WebRTCManagerState) {
  */
 - (NSDictionary *)getConnectionStats;
 
+- (float)getEstimatedFps;
+
 @end
 
 #endif /* WEBRTCMANAGER_H */
