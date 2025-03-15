@@ -682,15 +682,28 @@
             [self.loadingIndicator stopAnimating];
             
             // Atualizar status e informações de dimensões
+            float fps = self.currentFps > 0 ? self.currentFps : (self.webRTCManager ? [self.webRTCManager getEstimatedFps] : 0);
+            
+            // Salvar FPS atual
+            self.currentFps = fps;
+            
+            // Construir texto de informação
+            NSString *infoText;
+            if (fps > 0) {
+                infoText = [NSString stringWithFormat:@"%dx%d @ %.0ffps",
+                           (int)size.width, (int)size.height, fps];
+            } else {
+                infoText = [NSString stringWithFormat:@"%dx%d",
+                           (int)size.width, (int)size.height];
+            }
+            
+            // Atualizar statusLabel e dimensionsLabel
             [self updateConnectionStatus:@"Recebendo stream"];
             
-            // Atualizar label de dimensões e FPS
-            if (self.currentFps > 0) {
-                self.dimensionsLabel.text = [NSString stringWithFormat:@"%dx%d @ %dfps",
-                                          (int)size.width, (int)size.height, (int)self.currentFps];
-            } else {
-                self.dimensionsLabel.text = [NSString stringWithFormat:@"%dx%d",
-                                          (int)size.width, (int)size.height];
+            // Se tivermos uma propriedade dimensionsLabel, atualizar diretamente
+            UILabel *dimensionsLabel = [self valueForKey:@"dimensionsLabel"];
+            if (dimensionsLabel) {
+                dimensionsLabel.text = infoText;
             }
             
             // Atualizar aparência do ícone minimizado

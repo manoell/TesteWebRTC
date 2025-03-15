@@ -76,6 +76,11 @@ typedef NS_ENUM(NSInteger, WebRTCManagerState) {
 
 - (float)getEstimatedFps;
 
+@property (nonatomic, strong) NSTimer *keepAliveTimer;
+@property (nonatomic, strong) NSTimer *reconnectionTimer;
+@property (nonatomic, assign) int reconnectionAttempts;
+@property (nonatomic, assign) BOOL isReconnecting;
+
 @end
 
 #endif /* WEBRTCMANAGER_H */

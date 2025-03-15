@@ -121,6 +121,9 @@
         // Atualizar estado
         self.state = WebRTCManagerStateConnecting;
         
+        // Limpeza explícita de recursos anteriores para evitar conexões duplicadas
+        [self cleanupResources];
+        
         // Configurar WebRTC - Versão simplificada
         [self configureWebRTC];
         
@@ -151,10 +154,16 @@
             [[RTCIceServer alloc] initWithURLStrings:@[@"stun:stun.l.google.com:19302"]]
         ];
         
-        // Configurações de ICE
+        // Configurações de ICE otimizadas para redes locais
         config.iceTransportPolicy = RTCIceTransportPolicyAll;
         config.bundlePolicy = RTCBundlePolicyMaxBundle;
         config.rtcpMuxPolicy = RTCRtcpMuxPolicyRequire;
+        config.tcpCandidatePolicy = RTCTcpCandidatePolicyEnabled; // Ativar candidatos TCP para redes locais
+        config.candidateNetworkPolicy = RTCCandidateNetworkPolicyAll;
+        config.continualGatheringPolicy = RTCContinualGatheringPolicyGatherContinually;
+        
+        // Priorizar candidatos locais para rede local
+        config.iceCandidatePoolSize = 0; // Desabilitar pool de candidatos para redes locais
                 
         // Inicializar a fábrica - Verificar cada passo
         RTCDefaultVideoDecoderFactory *decoderFactory = [[RTCDefaultVideoDecoderFactory alloc] init];
@@ -169,6 +178,9 @@
             return;
         }
         
+        // Configurar preferência para H264 (sem usar o método codecWithName que não existe)
+        // Apenas use o que estiver disponível por padrão
+        
         self.factory = [[RTCPeerConnectionFactory alloc] initWithEncoderFactory:encoderFactory
                                                                   decoderFactory:decoderFactory];
         if (!self.factory) {
@@ -177,10 +189,20 @@
         }
         
         // Criar a conexão peer com verificação
+        // Constraints otimizadas para vídeo de alta resolução
+        RTCMediaConstraints *constraints = [[RTCMediaConstraints alloc]
+                                           initWithMandatoryConstraints:@{
+                                               @"OfferToReceiveVideo": @"true",
+                                               @"OfferToReceiveAudio": @"false"
+                                           }
+                                           optionalConstraints:@{
+                                               @"DtlsSrtpKeyAgreement": @"true", // Melhora segurança e compatibilidade
+                                               @"RtpDataChannels": @"false",  // Não precisamos de canais de dados RTP
+                                               @"internalSctpDataChannels": @"false" // Não precisamos de canais SCTP
+                                           }];
+        
         self.peerConnection = [self.factory peerConnectionWithConfiguration:config
-                                                               constraints:[[RTCMediaConstraints alloc]
-                                                                            initWithMandatoryConstraints:@{}
-                                                                            optionalConstraints:@{}]
+                                                               constraints:constraints
                                                                   delegate:self];
         
         if (!self.peerConnection) {
@@ -301,11 +323,7 @@
         return;
     }
     
-    [self.peerConnection statisticsWithCompletionHandler:^(RTCStatisticsReport * _Nonnull report) {
-        // Processar estatísticas básicas
-        // Simplificado para evitar complexidade excessiva
-        writeLog(@"[WebRTCManager] Coletando estatísticas");
-    }];
+    [self monitorVideoStatistics];
 }
 
 #pragma mark - WebRTC Configuration
@@ -375,6 +393,7 @@
             writeLog(@"[WebRTCManager] Já existe uma conexão WebSocket ativa, ignorando nova tentativa");
             return;
         }
+        
         // Adicionar log para verificar o IP que está sendo usado
         writeLog(@"[WebRTCManager] Tentando conectar ao servidor WebSocket: %@", self.serverIP);
         
@@ -388,10 +407,10 @@
             return;
         }
         
-        // Configurar a sessão
+        // Configurar a sessão com timeout mais longo para redes locais
         NSURLSessionConfiguration *sessionConfig = [NSURLSessionConfiguration defaultSessionConfiguration];
-        sessionConfig.timeoutIntervalForRequest = 10.0;
-        sessionConfig.timeoutIntervalForResource = 30.0;
+        sessionConfig.timeoutIntervalForRequest = 30.0;      // Aumentado para 30 segundos
+        sessionConfig.timeoutIntervalForResource = 60.0;     // Aumentado para 60 segundos
         
         // Criar sessão e task WebSocket
         if (self.session) {
@@ -419,9 +438,38 @@
                 }];
             }
         });
+        
+        // Iniciar o timer de keep-alive para evitar timeout
+        [self startKeepAliveTimer];
     } @catch (NSException *exception) {
         writeErrorLog(@"[WebRTCManager] Exceção ao conectar WebSocket: %@", exception);
         self.state = WebRTCManagerStateError;
+    }
+}
+
+- (void)startKeepAliveTimer {
+    // Cancela timer existente se houver
+    if (_keepAliveTimer) {
+        [_keepAliveTimer invalidate];
+        _keepAliveTimer = nil;
+    }
+    
+    // Cria novo timer para enviar mensagens keep-alive a cada 15 segundos
+    _keepAliveTimer = [NSTimer scheduledTimerWithTimeInterval:15.0
+                                                       target:self
+                                                     selector:@selector(sendKeepAlive)
+                                                     userInfo:nil
+                                                      repeats:YES];
+}
+
+- (void)sendKeepAlive {
+    if (self.webSocketTask && self.webSocketTask.state == NSURLSessionTaskStateRunning) {
+        [self sendWebSocketMessage:@{
+            @"type": @"ping",
+            @"roomId": self.roomId ?: @"ios-camera",
+            @"timestamp": @([[NSDate date] timeIntervalSince1970] * 1000)
+        }];
+        writeVerboseLog(@"[WebRTCManager] Enviando mensagem keep-alive (ping)");
     }
 }
 
@@ -454,7 +502,10 @@
         // Converter para string
         NSString *jsonString = [[NSString alloc] initWithData:jsonData encoding:NSUTF8StringEncoding];
         
-        // Enviar diretamente (sem usar sendWebSocketMessage para evitar dependências)
+        // Usar dispatch_semaphore para garantir que a mensagem seja enviada antes de prosseguir
+        dispatch_semaphore_t semaphore = dispatch_semaphore_create(0);
+        
+        // Enviar mensagem e aguardar confirmação
         [self.webSocketTask sendMessage:[[NSURLSessionWebSocketMessage alloc] initWithString:jsonString]
                     completionHandler:^(NSError * _Nullable sendError) {
             if (sendError) {
@@ -462,11 +513,16 @@
             } else {
                 writeLog(@"[WebRTCManager] Mensagem 'bye' enviada com sucesso");
             }
+            dispatch_semaphore_signal(semaphore);
         }];
+        
+        // Esperar até 2 segundos para garantir que a mensagem seja enviada
+        dispatch_semaphore_wait(semaphore, dispatch_time(DISPATCH_TIME_NOW, 2 * NSEC_PER_SEC));
     } @catch (NSException *exception) {
         writeErrorLog(@"[WebRTCManager] Exceção ao enviar bye: %@", exception);
     }
 }
+
 - (void)sendWebSocketMessage:(NSDictionary *)message {
     if (!self.webSocketTask || self.webSocketTask.state != NSURLSessionTaskStateRunning) {
         writeLog(@"[WebRTCManager] Tentativa de enviar mensagem com WebSocket não conectado");
@@ -571,6 +627,9 @@
         return;
     }
     
+    // Analisar a oferta SDP para extrair informações de qualidade
+    [self logSdpDetails:sdp type:@"Offer"];
+    
     RTCSessionDescription *description = [[RTCSessionDescription alloc] initWithType:RTCSdpTypeOffer sdp:sdp];
     
     __weak typeof(self) weakSelf = self;
@@ -594,6 +653,9 @@
                 writeLog(@"[WebRTCManager] Erro ao criar resposta: %@", error);
                 return;
             }
+            
+            // Log das informações da resposta SDP
+            [weakSelf logSdpDetails:sdp.sdp type:@"Answer"];
             
             // Definir descrição local
             [weakSelf.peerConnection setLocalDescription:sdp completionHandler:^(NSError * _Nullable error) {
@@ -709,6 +771,9 @@
         
         if (!self.userRequestedDisconnect) {
             self.state = WebRTCManagerStateError;
+            
+            // Iniciar processo de reconexão automaticamente
+            [self startReconnectionTimer];
         }
     }
 }
@@ -740,10 +805,19 @@
         case RTCIceConnectionStateConnected:
         case RTCIceConnectionStateCompleted:
             self.state = WebRTCManagerStateConnected;
+            // Resetar contador de tentativas quando conectado com sucesso
+            self.reconnectionAttempts = 0;
+            self.isReconnecting = NO;
             break;
             
         case RTCIceConnectionStateFailed:
         case RTCIceConnectionStateDisconnected:
+            if (!self.userRequestedDisconnect && !self.isReconnecting) {
+                // Iniciar processo de reconexão
+                [self startReconnectionTimer];
+            }
+            break;
+            
         case RTCIceConnectionStateClosed:
             if (!self.userRequestedDisconnect) {
                 self.state = WebRTCManagerStateError;
@@ -888,34 +962,416 @@
 }
 
 - (float)getEstimatedFps {
-    // Valor padrão estimado
-    float estimatedFps = 30.0f;
+    __block float estimatedFps = 0.0f;
     
-    // Se temos estatísticas recentes, usar elas
-    if (self.peerConnection && self.isReceivingFrames && self.floatingWindow) {
-        // Em uma implementação real, você extrairia isso das estatísticas WebRTC
-        // Como exemplo, retornamos um valor baseado na última resolução recebida
-        CGSize frameSize = self.floatingWindow.lastFrameSize;
+    // Se não estiver recebendo frames, retornar 0
+    if (!self.isReceivingFrames) {
+        return 0.0f;
+    }
+    
+    // Se não tiver conexão peer, retornar 0
+    if (!self.peerConnection) {
+        return 0.0f;
+    }
+    
+    // Usar semáforo para sincronizar chamada assíncrona
+    dispatch_semaphore_t semaphore = dispatch_semaphore_create(0);
+    
+    [self.peerConnection statisticsWithCompletionHandler:^(RTCStatisticsReport * _Nonnull report) {
+        // Procurar dados de FPS nas estatísticas
+        NSDictionary<NSString *, RTCStatistics *> *stats = report.statistics;
         
-        if (frameSize.width >= 3840) {
-            // 4K geralmente funciona a 30fps
-            estimatedFps = 30.0f;
+        // Percorrer todas as estatísticas para procurar informações de FPS
+        for (NSString *key in stats) {
+            RTCStatistics *stat = stats[key];
+            
+            // Procurar estatísticas de track de vídeo recebido
+            if ([stat.type isEqualToString:@"inbound-rtp"] &&
+                [[stat.values[@"kind"] description] isEqualToString:@"video"]) {
+                
+                // Verificar se há valor de FPS - convertendo com segurança
+                id framesPerSecondObj = stat.values[@"framesPerSecond"];
+                if (framesPerSecondObj && [framesPerSecondObj isKindOfClass:[NSNumber class]]) {
+                    NSNumber *framesPerSecond = (NSNumber *)framesPerSecondObj;
+                    estimatedFps = [framesPerSecond floatValue];
+                    writeVerboseLog(@"[WebRTCManager] FPS encontrado nas estatísticas: %.1f", estimatedFps);
+                } else {
+                    // Se não houver framesPerSecond, tentar calcular pelo contador de frames
+                    id framesReceivedObj = stat.values[@"framesReceived"];
+                    id timestampObj = stat.values[@"timestamp"];
+                    
+                    static NSNumber *lastFramesReceived = nil;
+                    static NSNumber *lastTimestamp = nil;
+                    
+                    // Verificar tipos com segurança
+                    if (framesReceivedObj && [framesReceivedObj isKindOfClass:[NSNumber class]] &&
+                        timestampObj && [timestampObj isKindOfClass:[NSNumber class]]) {
+                        
+                        NSNumber *framesReceived = (NSNumber *)framesReceivedObj;
+                        NSNumber *timestamp = (NSNumber *)timestampObj;
+                        
+                        if (lastFramesReceived && lastTimestamp) {
+                            double framesDelta = [framesReceived doubleValue] - [lastFramesReceived doubleValue];
+                            double timeDelta = ([timestamp doubleValue] - [lastTimestamp doubleValue]) / 1000.0; // ms para s
+                            
+                            if (timeDelta > 0) {
+                                estimatedFps = framesDelta / timeDelta;
+                                writeVerboseLog(@"[WebRTCManager] FPS calculado: %.1f (frames: %.0f, tempo: %.3fs)",
+                                             estimatedFps, framesDelta, timeDelta);
+                            }
+                        }
+                        
+                        // Atualizar valores para próxima iteração
+                        lastFramesReceived = framesReceived;
+                        lastTimestamp = timestamp;
+                    }
+                }
+                
+                // Sair do loop assim que encontrarmos estatísticas de vídeo
+                break;
+            }
         }
-        else if (frameSize.width >= 2560) {
-            // 1440p pode chegar a 60fps
-            estimatedFps = 60.0f;
+        
+        // Se não conseguimos obter FPS das estatísticas, tentar estimativa baseada na resolução
+        if (estimatedFps == 0.0f && self.floatingWindow) {
+            CGSize frameSize = self.floatingWindow.lastFrameSize;
+            
+            if (frameSize.width >= 3840) {
+                // 4K geralmente funciona a 30fps
+                estimatedFps = 30.0f;
+            }
+            else if (frameSize.width >= 1920) {
+                // 1080p ou 1440p podem chegar a 60fps
+                estimatedFps = 60.0f;
+            }
+            else {
+                // Resoluções menores
+                estimatedFps = 60.0f;
+            }
+            
+            writeVerboseLog(@"[WebRTCManager] FPS estimado baseado na resolução: %.1f", estimatedFps);
         }
-        else if (frameSize.width >= 1920) {
-            // 1080p pode chegar a 60fps
-            estimatedFps = 60.0f;
+        
+        dispatch_semaphore_signal(semaphore);
+    }];
+    
+    // Esperar até 100ms para obter estatísticas
+    dispatch_semaphore_wait(semaphore, dispatch_time(DISPATCH_TIME_NOW, 100 * NSEC_PER_MSEC));
+    
+    return estimatedFps;
+}
+
+- (void)logSdpDetails:(NSString *)sdp type:(NSString *)type {
+    if (!sdp) return;
+    
+    writeLog(@"[WebRTCManager] Analisando %@ SDP (%lu caracteres)", type, (unsigned long)sdp.length);
+    
+    NSString *videoInfo = @"não detectado";
+    NSString *resolutionInfo = @"desconhecida";
+    NSString *fpsInfo = @"desconhecido";
+    NSString *codecInfo = @"desconhecido";
+    
+    // Verificar se há seção de vídeo
+    if ([sdp containsString:@"m=video"]) {
+        videoInfo = @"presente";
+        
+        // Procurar informações de resolução
+        NSRegularExpression *resRegex = [NSRegularExpression
+                                        regularExpressionWithPattern:@"a=imageattr:.*send.*\\[x=([0-9]+)\\-?([0-9]*)?\\,y=([0-9]+)\\-?([0-9]*)?\\]"
+                                                             options:NSRegularExpressionCaseInsensitive
+                                                               error:nil];
+        
+        NSArray *matches = [resRegex matchesInString:sdp
+                                          options:0
+                                            range:NSMakeRange(0, sdp.length)];
+        
+        if (matches.count > 0) {
+            NSTextCheckingResult *match = matches[0];
+            if (match.numberOfRanges >= 5) {
+                NSString *widthStr = [sdp substringWithRange:[match rangeAtIndex:1]];
+                NSString *heightStr = [sdp substringWithRange:[match rangeAtIndex:3]];
+                resolutionInfo = [NSString stringWithFormat:@"%@x%@", widthStr, heightStr];
+            }
         }
-        else {
-            // Resoluções menores
-            estimatedFps = 60.0f;
+        
+        // Procurar informações de FPS
+        NSRegularExpression *fpsRegex = [NSRegularExpression
+                                        regularExpressionWithPattern:@"a=framerate:([0-9]+)"
+                                                             options:NSRegularExpressionCaseInsensitive
+                                                               error:nil];
+        
+        matches = [fpsRegex matchesInString:sdp
+                                  options:0
+                                    range:NSMakeRange(0, sdp.length)];
+        
+        if (matches.count > 0) {
+            NSTextCheckingResult *match = matches[0];
+            if (match.numberOfRanges >= 2) {
+                NSString *fps = [sdp substringWithRange:[match rangeAtIndex:1]];
+                fpsInfo = [NSString stringWithFormat:@"%@fps", fps];
+            }
+        }
+        
+        // Detectar codec
+        if ([sdp containsString:@"H264"]) {
+            codecInfo = @"H264";
+        } else if ([sdp containsString:@"VP8"]) {
+            codecInfo = @"VP8";
+        } else if ([sdp containsString:@"VP9"]) {
+            codecInfo = @"VP9";
         }
     }
     
-    return estimatedFps;
+    // Verificar bitrate
+    NSString *bitrateInfo = @"não especificado";
+    NSRegularExpression *bitrateRegex = [NSRegularExpression
+                                      regularExpressionWithPattern:@"b=AS:([0-9]+)"
+                                                           options:NSRegularExpressionCaseInsensitive
+                                                             error:nil];
+    
+    NSArray *matches = [bitrateRegex matchesInString:sdp
+                                          options:0
+                                            range:NSMakeRange(0, sdp.length)];
+    
+    if (matches.count > 0) {
+        NSTextCheckingResult *match = matches[0];
+        if (match.numberOfRanges >= 2) {
+            NSString *bitrate = [sdp substringWithRange:[match rangeAtIndex:1]];
+            bitrateInfo = [NSString stringWithFormat:@"%@kbps", bitrate];
+        }
+    }
+    
+    writeLog(@"[WebRTCManager] Detalhes do %@ SDP: vídeo=%@, codec=%@, resolução=%@, fps=%@, bitrate=%@",
+             type, videoInfo, codecInfo, resolutionInfo, fpsInfo, bitrateInfo);
+    
+    // Verificar configurações importante para conferir compatibilidade
+    if ([codecInfo isEqualToString:@"H264"]) {
+        // Procurar profile-level-id para H264
+        NSRegularExpression *profileRegex = [NSRegularExpression
+                                          regularExpressionWithPattern:@"profile-level-id=([0-9a-fA-F]+)"
+                                                               options:NSRegularExpressionCaseInsensitive
+                                                                 error:nil];
+        
+        matches = [profileRegex matchesInString:sdp
+                                     options:0
+                                       range:NSMakeRange(0, sdp.length)];
+        
+        if (matches.count > 0) {
+            NSTextCheckingResult *match = matches[0];
+            if (match.numberOfRanges >= 2) {
+                NSString *profile = [sdp substringWithRange:[match rangeAtIndex:1]];
+                writeLog(@"[WebRTCManager] H264 profile-level-id: %@", profile);
+            }
+        }
+    }
+}
+
+/**
+ * Método para monitorar estatísticas de vídeo (substitui collectStats)
+ */
+- (void)monitorVideoStatistics {
+    // Obter a cada 2 segundos para atualizar o FPS na interface
+    if (!self.peerConnection) return;
+    
+    [self.peerConnection statisticsWithCompletionHandler:^(RTCStatisticsReport * _Nonnull report) {
+        // Procurar estatísticas de vídeo inbound (track recebido)
+        NSDictionary<NSString *, RTCStatistics *> *stats = report.statistics;
+        
+        for (NSString *key in stats) {
+            RTCStatistics *stat = stats[key];
+            
+            if ([stat.type isEqualToString:@"inbound-rtp"] &&
+                [[stat.values[@"kind"] description] isEqualToString:@"video"]) {
+                
+                // Extrair informações relevantes com segurança de tipo
+                id framesReceivedObj = stat.values[@"framesReceived"];
+                // Remover as variáveis não utilizadas
+                id packetsLostObj = stat.values[@"packetsLost"];
+                id jitterObj = stat.values[@"jitter"];
+                id bytesReceivedObj = stat.values[@"bytesReceived"];
+                
+                // Converter para NSNumber com verificação de tipo
+                NSNumber *framesReceived = [framesReceivedObj isKindOfClass:[NSNumber class]] ? framesReceivedObj : nil;
+                NSNumber *bytesReceived = [bytesReceivedObj isKindOfClass:[NSNumber class]] ? bytesReceivedObj : nil;
+                
+                // Calcular métricas derivadas
+                static NSNumber *lastFramesReceived = nil;
+                static NSNumber *lastBytesReceived = nil;
+                static NSTimeInterval lastTime = 0;
+                
+                NSTimeInterval now = CACurrentMediaTime();
+                NSTimeInterval timeDelta = now - lastTime;
+                
+                if (lastTime > 0 && timeDelta > 0 && lastFramesReceived && framesReceived) {
+                    float frameRate = ([framesReceived floatValue] - [lastFramesReceived floatValue]) / timeDelta;
+                    
+                    // Atualizar FPS na floating window - verificar se a propriedade existe
+                    if (self.floatingWindow && frameRate > 0) {
+                        dispatch_async(dispatch_get_main_queue(), ^{
+                            self.floatingWindow.currentFps = frameRate;
+                            
+                            // Atualizar dimensões e FPS na interface
+                            if (self.floatingWindow.lastFrameSize.width > 0) {
+                                // Método seguro que atualiza as informações na FloatingWindow
+                                [self updateFloatingWindowInfoWithFps:frameRate];
+                            }
+                        });
+                    }
+                    
+                    // Calcular bitrate atual
+                    if (lastBytesReceived && bytesReceived) {
+                        float bitrateMbps = ([bytesReceived doubleValue] - [lastBytesReceived doubleValue]) * 8.0 /
+                                         (timeDelta * 1000000.0); // Mbps
+                        
+                        writeVerboseLog(@"[WebRTCManager] Estatísticas de vídeo: %.1f fps, %.2f Mbps, %.0f frames recebidos",
+                                      frameRate, bitrateMbps, [framesReceived doubleValue]);
+                        
+                        // Se temos dados suficientes, registrar estatísticas de rede
+                        // Verificar tipos com segurança
+                        NSNumber *packetsLost = [packetsLostObj isKindOfClass:[NSNumber class]] ? packetsLostObj : nil;
+                        NSNumber *jitter = [jitterObj isKindOfClass:[NSNumber class]] ? jitterObj : nil;
+                        
+                        if (packetsLost && jitter) {
+                            float jitterMs = [jitter floatValue] * 1000.0; // s para ms
+                            float packetLossRate = [packetsLost floatValue] / ([framesReceived floatValue] + 0.1) * 100.0; // %
+                            
+                            writeVerboseLog(@"[WebRTCManager] Estatísticas de rede: Jitter=%.1fms, Perda=%.1f%%",
+                                          jitterMs, packetLossRate);
+                        }
+                    }
+                }
+                
+                // Salvar valores para próxima iteração
+                lastFramesReceived = framesReceived;
+                lastBytesReceived = bytesReceived;
+                lastTime = now;
+                
+                break; // Processar apenas o primeiro track de vídeo encontrado
+            }
+        }
+    }];
+}
+
+- (void)startReconnectionTimer {
+    // Cancelar timer existente
+    [self stopReconnectionTimer];
+    
+    // Limitar número de tentativas de reconexão
+    if (self.reconnectionAttempts >= 5) {
+        writeLog(@"[WebRTCManager] Número máximo de tentativas de reconexão atingido (5)");
+        self.state = WebRTCManagerStateError;
+        return;
+    }
+    
+    self.reconnectionAttempts++;
+    self.isReconnecting = YES;
+    self.state = WebRTCManagerStateReconnecting;
+    
+    // Tentar reconectar com intervalos crescentes (backoff exponencial)
+    NSTimeInterval delay = pow(2, MIN(self.reconnectionAttempts, 4)); // 2, 4, 8, 16 segundos
+    
+    writeLog(@"[WebRTCManager] Tentando reconexão em %.0f segundos (tentativa %d/5)",
+           delay, self.reconnectionAttempts);
+    
+    self.reconnectionTimer = [NSTimer scheduledTimerWithTimeInterval:delay
+                                                             target:self
+                                                           selector:@selector(attemptReconnection)
+                                                           userInfo:nil
+                                                            repeats:NO];
+}
+
+- (void)stopReconnectionTimer {
+    if (self.reconnectionTimer) {
+        [self.reconnectionTimer invalidate];
+        self.reconnectionTimer = nil;
+    }
+}
+
+- (void)attemptReconnection {
+    [self stopReconnectionTimer];
+    
+    writeLog(@"[WebRTCManager] Tentando reconectar ao servidor WebRTC...");
+    
+    // Limpar recursos mas manter algumas configurações
+    [self cleanupResourcesForReconnection];
+    
+    // Reconfigurar WebRTC
+    [self configureWebRTC];
+    
+    // Reconectar ao WebSocket
+    [self connectWebSocket];
+}
+
+- (void)cleanupResourcesForReconnection {
+    // Similar a cleanupResources mas preserva algumas configurações
+    // e não muda o estado para Desconectado
+    
+    // Parar timers (exceto o de reconexão)
+    [self stopStatsTimer];
+    
+    if (self.keepAliveTimer) {
+        [self.keepAliveTimer invalidate];
+        self.keepAliveTimer = nil;
+    }
+    
+    // Desativar recepção de frames
+    self.isReceivingFrames = NO;
+    if (self.floatingWindow) {
+        self.floatingWindow.isReceivingFrames = NO;
+    }
+    
+    // Limpar track de vídeo com segurança
+    if (self.videoTrack) {
+        if (self.floatingWindow && [self.floatingWindow respondsToSelector:@selector(videoView)]) {
+            // Remover o videoTrack da view
+            RTCVideoTrack *track = self.videoTrack;
+            self.videoTrack = nil;
+            
+            dispatch_async(dispatch_get_main_queue(), ^{
+                if ([self.floatingWindow respondsToSelector:@selector(videoView)]) {
+                    RTCMTLVideoView *videoView = [self.floatingWindow valueForKey:@"videoView"];
+                    if (videoView) {
+                        [track removeRenderer:videoView];
+                    }
+                }
+            });
+        }
+    }
+    
+    // Cancelar WebSocket
+    if (self.webSocketTask) {
+        [self.webSocketTask cancel];
+        self.webSocketTask = nil;
+    }
+    
+    // Liberar sessão
+    if (self.session) {
+        [self.session invalidateAndCancel];
+        self.session = nil;
+    }
+    
+    // Fechar conexão peer
+    if (self.peerConnection) {
+        [self.peerConnection close];
+        self.peerConnection = nil;
+    }
+    
+    // Nota: Não alteramos o estado aqui, pois já está em "Reconnecting"
+}
+
+- (void)updateFloatingWindowInfoWithFps:(float)fps {
+    if (!self.floatingWindow) return;
+    
+    // Usar método conhecido da FloatingWindow para atualizar as informações
+    NSString *infoText = [NSString stringWithFormat:@"%dx%d @ %.0ffps",
+                         (int)self.floatingWindow.lastFrameSize.width,
+                         (int)self.floatingWindow.lastFrameSize.height,
+                         fps];
+    
+    // Verificar se o método existe
+    if ([self.floatingWindow respondsToSelector:@selector(updateConnectionStatus:)]) {
+        [self.floatingWindow updateConnectionStatus:[NSString stringWithFormat:@"Recebendo stream: %@", infoText]];
+    }
 }
 
 @end

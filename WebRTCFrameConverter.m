@@ -608,6 +608,56 @@
         return NULL;
     }
     
+    // Verificar formato do pixel
+    OSType pixelFormat = CVPixelBufferGetPixelFormatType(pixelBuffer);
+    
+    // Registrar o formato para diagnóstico
+    char formatChars[5] = {
+        (char)((pixelFormat >> 24) & 0xFF),
+        (char)((pixelFormat >> 16) & 0xFF),
+        (char)((pixelFormat >> 8) & 0xFF),
+        (char)(pixelFormat & 0xFF),
+        0
+    };
+    writeVerboseLog(@"[WebRTCFrameConverter] Formato de pixel: %s (0x%08X)",
+                  formatChars, (unsigned int)pixelFormat);
+    
+    // Se o formato não for compatível com o iOS, converter para um formato compatível
+    // Os formatos nativos do iOS são kCVPixelFormatType_32BGRA e kCVPixelFormatType_420YpCbCr8BiPlanarFullRange
+    if (pixelFormat != kCVPixelFormatType_32BGRA &&
+        pixelFormat != kCVPixelFormatType_420YpCbCr8BiPlanarFullRange) {
+        
+        writeLog(@"[WebRTCFrameConverter] Convertendo formato de pixel para compatibilidade com iOS");
+        
+        // Criar um novo buffer com formato compatível (BGRA)
+        CVPixelBufferRef compatibleBuffer = NULL;
+        NSDictionary *pixelBufferAttributes = @{
+            (NSString *)kCVPixelBufferPixelFormatTypeKey: @(kCVPixelFormatType_32BGRA),
+            (NSString *)kCVPixelBufferWidthKey: @(CVPixelBufferGetWidth(pixelBuffer)),
+            (NSString *)kCVPixelBufferHeightKey: @(CVPixelBufferGetHeight(pixelBuffer)),
+            (NSString *)kCVPixelBufferIOSurfacePropertiesKey: @{}
+        };
+        
+        CVReturn result = CVPixelBufferCreate(kCFAllocatorDefault,
+                                            CVPixelBufferGetWidth(pixelBuffer),
+                                            CVPixelBufferGetHeight(pixelBuffer),
+                                            kCVPixelFormatType_32BGRA,
+                                            (__bridge CFDictionaryRef)pixelBufferAttributes,
+                                            &compatibleBuffer);
+        
+        if (result != kCVReturnSuccess || !compatibleBuffer) {
+            writeErrorLog(@"[WebRTCFrameConverter] Falha ao criar buffer compatível: %d", result);
+            return NULL;
+        }
+        
+        // Converter o conteúdo usando CIImage/CIContext para máxima compatibilidade
+        CIImage *ciImage = [CIImage imageWithCVPixelBuffer:pixelBuffer];
+        [_ciContext render:ciImage toCVPixelBuffer:compatibleBuffer];
+        
+        // Usar o buffer compatível em vez do original
+        pixelBuffer = compatibleBuffer;
+    }
+    
     // Criar um CMVideoFormatDescription a partir do CVPixelBuffer
     CMVideoFormatDescriptionRef formatDescription;
     OSStatus status = CMVideoFormatDescriptionCreateForImageBuffer(kCFAllocatorDefault, pixelBuffer, &formatDescription);
