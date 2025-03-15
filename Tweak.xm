@@ -8,13 +8,20 @@ static FloatingWindow *floatingWindow;
 
 - (void)applicationDidFinishLaunching:(id)application {
     %orig;
+    
+    // Configurar nível de log para máximo durante testes
     setLogLevel(5);
     writeLog(@"Tweak carregado em SpringBoard");
     
+    // Inicializar a janela flutuante no thread principal
     dispatch_async(dispatch_get_main_queue(), ^{
         writeLog(@"Inicializando FloatingWindow");
-        CGRect windowFrame = CGRectMake(20, 60, 200, 300);
+        
+        // Criar janela com tamanho menor para começar
+        CGRect windowFrame = CGRectMake(20, 60, 160, 240);
         floatingWindow = [[FloatingWindow alloc] initWithFrame:windowFrame];
+        
+        // Mostrar a janela
         [floatingWindow show];
         writeLog(@"Janela flutuante exibida");
     });

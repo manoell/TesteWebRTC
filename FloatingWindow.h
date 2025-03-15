@@ -17,18 +17,17 @@ typedef NS_ENUM(NSInteger, FloatingWindowState) {
 /**
  * FloatingWindow
  *
- * Janela flutuante aprimorada que exibe o preview do stream WebRTC e permite controlar a conexão.
- * Inclui funcionalidades para manipulação e visualização do vídeo em alta resolução.
- * Suporta múltiplos gestos, modos de visualização e exibição de métricas.
+ * Janela flutuante simplificada que exibe o preview do stream WebRTC.
+ * Utiliza RTCMTLVideoView para renderização direta e eficiente do vídeo.
  */
-@interface FloatingWindow : UIWindow
+@interface FloatingWindow : UIWindow <RTCVideoViewDelegate>
 
 #pragma mark - Properties
 
 /**
- * View para exibição do preview da imagem recebida
+ * View para renderização direta do vídeo WebRTC
  */
-@property (nonatomic, strong) UIImageView *previewImageView;
+@property (nonatomic, strong, readonly) RTCMTLVideoView *videoView;
 
 /**
  * Gerenciador WebRTC para controle da conexão
@@ -39,21 +38,6 @@ typedef NS_ENUM(NSInteger, FloatingWindowState) {
  * Estado atual da janela
  */
 @property (nonatomic, assign) FloatingWindowState windowState;
-
-/**
- * Exibir métricas de performance
- */
-@property (nonatomic, assign) BOOL showPerformanceMetrics;
-
-/**
- * Exibir estatísticas da conexão
- */
-@property (nonatomic, assign) BOOL showConnectionStats;
-
-/**
- * Exibir controles avançados
- */
-@property (nonatomic, assign) BOOL showAdvancedControls;
 
 /**
  * Mostra se o bloco de transparência está ativo
@@ -73,24 +57,9 @@ typedef NS_ENUM(NSInteger, FloatingWindowState) {
 @property (nonatomic, strong) UILabel *statusLabel;
 
 /**
- * Label para estatísticas de conexão
- */
-@property (nonatomic, strong) UILabel *statsLabel;
-
-/**
  * View container para componentes da UI
  */
 @property (nonatomic, strong) UIView *contentView;
-
-/**
- * Toolbar com botões de controle
- */
-@property (nonatomic, strong) UIToolbar *controlToolbar;
-
-/**
- * View que contém informações de diagnóstico
- */
-@property (nonatomic, strong) UIView *diagnosticView;
 
 #pragma mark - Gesture Recognizers
 
@@ -103,26 +72,6 @@ typedef NS_ENUM(NSInteger, FloatingWindowState) {
  * Gesture de duplo toque para minimizar/maximizar
  */
 @property (nonatomic, strong) UITapGestureRecognizer *doubleTapGesture;
-
-/**
- * Gesture de pinça para redimensionar
- */
-@property (nonatomic, strong) UIPinchGestureRecognizer *pinchGesture;
-
-/**
- * Gesture de toque longo para mostrar menu de opções
- */
-@property (nonatomic, strong) UILongPressGestureRecognizer *longPressGesture;
-
-/**
- * Gesture de deslizar para baixo para mostrar métricas
- */
-@property (nonatomic, strong) UISwipeGestureRecognizer *swipeDownGesture;
-
-/**
- * Gesture de deslizar para cima para esconder métricas
- */
-@property (nonatomic, strong) UISwipeGestureRecognizer *swipeUpGesture;
 
 #pragma mark - Initialization & Lifecycle Methods
 
@@ -164,14 +113,7 @@ typedef NS_ENUM(NSInteger, FloatingWindowState) {
 - (void)stopPreview;
 
 /**
- * Atualiza a imagem de preview.
- * @param image Nova imagem para exibir no preview.
- */
-- (void)updatePreviewImage:(UIImage *)image;
-
-/**
  * Atualiza o status da conexão exibido.
- * Também adapta a cor do indicador conforme o status.
  * @param status String de status a ser exibida.
  */
 - (void)updateConnectionStatus:(NSString *)status;
@@ -196,69 +138,5 @@ typedef NS_ENUM(NSInteger, FloatingWindowState) {
  * @param animated Se a transição deve ser animada.
  */
 - (void)expandWindow:(BOOL)animated;
-
-/**
- * Expande a janela para ocupar toda a tela.
- * @param animated Se a transição deve ser animada.
- */
-- (void)maximizeWindow:(BOOL)animated;
-
-/**
- * Move a janela para o canto mais próximo da tela.
- * @param animated Se a movimentação deve ser animada.
- */
-- (void)snapToNearestCorner:(BOOL)animated;
-
-/**
- * Ajusta a transparência da janela.
- * @param translucent Se a janela deve ficar translúcida/transparente.
- */
-- (void)setWindowTranslucency:(BOOL)translucent;
-
-#pragma mark - UI Display Methods
-
-/**
- * Mostra/esconde informações de diagnóstico.
- * @param show Se deve mostrar ou esconder as informações.
- * @param animated Se a transição deve ser animada.
- */
-- (void)showDiagnosticInfo:(BOOL)show animated:(BOOL)animated;
-
-/**
- * Mostra/esconde estatísticas de desempenho.
- * @param show Se deve mostrar ou esconder as estatísticas.
- * @param animated Se a transição deve ser animada.
- */
-- (void)showPerformanceStats:(BOOL)show animated:(BOOL)animated;
-
-/**
- * Mostra/esconde controles avançados.
- * @param show Se deve mostrar ou esconder os controles.
- * @param animated Se a transição deve ser animada.
- */
-- (void)showAdvancedControlPanel:(BOOL)show animated:(BOOL)animated;
-
-/**
- * Exibe um menu de opções.
- * @param sender View que acionou o menu (para posicionamento).
- */
-- (void)showSettingsMenu:(UIView *)sender;
-
-/**
- * Atualiza estatísticas exibidas na interface.
- * Coleta estatísticas do WebRTCManager e as exibe formatadas.
- */
-- (void)updateStatistics;
-
-/**
- * Adiciona gesture de duplo toque para minimizar/maximizar
- */
-- (void)addDoubleTapGesture;
-
-/**
- * Configura a janela para substituição do feed da câmera.
- * Prepara a integração com o sistema de câmera do iOS.
- */
-- (void)setupForCameraReplacement;
 
 @end
