@@ -2,13 +2,14 @@
 
 ## Visão Geral do Projeto
 
-Este projeto implementa um sistema de recepção WebRTC em alta qualidade para iOS, otimizado para futura substituição de feed de câmera. O sistema consiste em um servidor Node.js e um tweak para iOS jailbroken que trabalham em conjunto para fornecer streaming de vídeo em 4K a 60fps com mínima latência em redes locais.
+Este projeto implementa um sistema avançado de recepção WebRTC em alta qualidade para iOS, otimizado para visualização e futura substituição de feed de câmera. O sistema consiste em um servidor Node.js e um tweak para iOS jailbroken que trabalham em conjunto para fornecer streaming de vídeo em 4K a 60fps com mínima latência em redes locais.
 
 ### Objetivos Principais
 
 - Receber e processar streams WebRTC em alta qualidade (até 4K/60fps)
-- Oferecer preview em janela flutuante para monitoramento em tempo real
+- Oferecer preview em janela flutuante interativa com múltiplos gestos e estados
 - Adaptar automaticamente à resolução e FPS da câmera nativa do iOS
+- Fornecer diagnóstico avançado e monitoramento de performance em tempo real
 - Preparar estrutura para futura substituição do feed da câmera
 - Otimizar para baixa latência e alta performance em redes locais
 
@@ -32,11 +33,14 @@ Um tweak para dispositivos iOS jailbroken que exibe uma janela flutuante com o p
 
 **Características:**
 - Janela flutuante interativa com controles de conexão
+- Sistema de gestos intuitivos (arrastar, pinçar, toques)
+- Auto-adaptação para diferentes estados (normal, minimizado, expandido, tela cheia)
 - Recepção otimizada de streams WebRTC
 - Auto-reconexão em caso de falhas de rede
 - Sistema avançado de manipulação de frames
 - Adaptação automática com base nas dimensões da câmera iOS
 - Estatísticas de performance em tempo real
+- Sistema de diagnóstico integrado
 - Preparado para futura substituição do feed de câmera
 
 ## Arquitetura Técnica
@@ -53,9 +57,11 @@ Um tweak para dispositivos iOS jailbroken que exibe uma janela flutuante com o p
 ### Cliente iOS
 
 **Componentes principais:**
-- `FloatingWindow` - Interface de usuário e controles
+- `FloatingWindow` - Interface de usuário interativa com múltiplos gestos e estados
 - `WebRTCManager` - Gerenciamento de conexão WebRTC e sinalização
 - `WebRTCFrameConverter` - Processamento e adaptação de frames
+- `WebRTCDiagnostics` - Sistema de diagnóstico e monitoramento de performance
+- `logger` - Sistema avançado de logging com níveis e rotação de arquivos
 - `CameraHook` (futura implementação) - Substituição do feed da câmera
 
 ## Fluxo de Funcionamento
@@ -65,8 +71,14 @@ Um tweak para dispositivos iOS jailbroken que exibe uma janela flutuante com o p
 3. O tweak iOS exibe uma janela flutuante no dispositivo
 4. Ao clicar em "Ativar Preview", o tweak conecta-se ao servidor WebRTC
 5. O tweak recebe o stream e exibe o preview na janela flutuante
-6. O sistema mantém a conexão estável e se reconecta automaticamente em caso de falhas
-7. Para encerrar, o usuário clica em "Desativar Preview"
+6. O usuário pode interagir com a janela usando gestos:
+   - Arrastar para mover
+   - Duplo toque para alternar entre estados
+   - Pinçar para redimensionar
+   - Toque único para mostrar/ocultar controles
+   - Toque longo para menu de configurações
+7. O sistema de diagnóstico monitora continuamente a performance
+8. Para encerrar, o usuário clica em "Desativar Preview"
 
 ## Otimizações Específicas
 
@@ -80,6 +92,20 @@ Um tweak para dispositivos iOS jailbroken que exibe uma janela flutuante com o p
 - Aceleração de hardware para processamento de frames
 - Pipeline otimizado para reduzir cópias de buffer
 - Adaptação automática das dimensões do vídeo
+
+### Interface do Usuário
+- Gestos intuitivos para controle da janela flutuante
+- Feedback visual e tátil para melhor experiência
+- Auto-ocultação de controles para visualização limpa
+- Diferentes estados para adaptação ao contexto de uso
+- Animações suaves para transições entre estados
+
+### Diagnóstico e Monitoramento
+- Sistema de logging com múltiplos níveis de detalhe
+- Monitoramento em tempo real de métricas de performance
+- Detecção automática de problemas e recomendações
+- Relatórios detalhados para análise e depuração
+- Estatísticas de rede e vídeo para avaliação de qualidade
 
 ### Conexão e Estabilidade
 - Sistema robusto de reconexão automática
@@ -111,7 +137,7 @@ Um tweak para dispositivos iOS jailbroken que exibe uma janela flutuante com o p
 ### Servidor
 1. Instalar Node.js 14.0 ou superior
 2. Clonar o repositório
-3. Executar `npm install` para instalar dependências
+3. Executar `npm install` na pasta `server` para instalar dependências
 4. Iniciar o servidor com `node server.js`
 5. O servidor exibirá o IP e porta para conexão
 
@@ -132,10 +158,13 @@ Um tweak para dispositivos iOS jailbroken que exibe uma janela flutuante com o p
 ### Receptor (iOS)
 1. A janela flutuante aparecerá automaticamente na tela
 2. Clique no botão "Ativar Preview" para iniciar a recepção
-3. Use gestos para redimensionar ou mover a janela:
+3. Use gestos para interagir com a janela:
    - Arraste para mover
-   - Toque duplo para minimizar/maximizar
-4. Observe as informações de status para verificar a qualidade da conexão
+   - Toque duplo para alternar entre normal/minimizado/expandido/tela cheia
+   - Pinçe para redimensionar
+   - Toque único para mostrar/ocultar controles
+   - Toque longo para mostrar menu de opções
+4. Observe as informações de status e estatísticas para verificar a qualidade da conexão
 5. Para encerrar, clique em "Desativar Preview"
 
 ## Diagnóstico e Monitoramento
@@ -144,14 +173,16 @@ A interface do tweak fornece informações em tempo real sobre:
 - Estado da conexão WebRTC
 - Qualidade do stream (resolução, FPS)
 - Estatísticas de rede (latência, perda de pacotes)
+- Alertas sobre problemas detectados
 - Logs detalhados em `/var/tmp/testeWebRTC.log`
 
 ### Níveis de Log
-- 1: Apenas erros críticos
-- 2: Erros
-- 3: Avisos e erros (padrão)
-- 4: Informações, avisos e erros
-- 5: Verbose (todos os logs)
+- 0 = Sem logging
+- 1 = Apenas erros críticos
+- 2 = Erros
+- 3 = Avisos e erros (padrão)
+- 4 = Informações, avisos e erros
+- 5 = Verbose (todos os logs)
 
 ## Limitações Atuais
 - Funciona apenas em rede local WiFi para garantir latência mínima
@@ -164,11 +195,12 @@ A interface do tweak fornece informações em tempo real sobre:
 - Suporte para mais opções de qualidade/desempenho
 - Interface de configuração aprimorada
 - Possibilidade de gravação do stream recebido
+- Suporte a múltiplas fontes de vídeo
 
 ## Estrutura de Arquivos
 
 ```
-TesteWebRTC/
+WebRTCTweak/
 ├── server/
 │   ├── server.js                # Servidor WebRTC principal
 │   ├── package.json             # Dependências do servidor
@@ -181,6 +213,8 @@ TesteWebRTC/
 │   ├── WebRTCManager.m          # Implementação do gerenciador
 │   ├── WebRTCFrameConverter.h   # Conversor de frames WebRTC
 │   ├── WebRTCFrameConverter.m   # Implementação do conversor
+│   ├── WebRTCDiagnostics.h      # Sistema de diagnóstico
+│   ├── WebRTCDiagnostics.m      # Implementação do diagnóstico
 │   ├── logger.h                 # Sistema de logging
 │   ├── logger.m                 # Implementação do logging
 │   ├── Makefile                 # Configuração de compilação
@@ -199,7 +233,7 @@ TesteWebRTC/
 ### Problemas de Qualidade
 - Reduza a resolução ou FPS se a rede não suportar 4K/60fps
 - Verifique se há interferência na rede WiFi
-- Monitore os logs para identificar gargalos de processamento
+- Consulte o relatório de diagnóstico para identificar gargalos
 
 ### Crashes do Tweak
 - Verifique os logs em `/var/tmp/testeWebRTC.log`
