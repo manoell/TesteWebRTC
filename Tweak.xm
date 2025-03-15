@@ -1,4 +1,5 @@
 #import "FloatingWindow.h"
+#import "WebRTCManager.h"
 #import <UIKit/UIKit.h>
 #import "logger.h"
 
@@ -17,25 +18,18 @@ static FloatingWindow *floatingWindow;
     dispatch_async(dispatch_get_main_queue(), ^{
         writeLog(@"Inicializando FloatingWindow");
         
-        // Criar janela com tamanho para tela cheia primeiro
-        // Será redimensionada para AssistiveTouch após setState
-        CGRect screenBounds = [UIScreen mainScreen].bounds;
-        CGRect windowFrame = CGRectMake(
-            screenBounds.size.width - 70,  // Posicionar na direita
-            screenBounds.size.height / 2 - 25, // Centro vertical
-            50, // Tamanho da bolinha
-            50  // Tamanho da bolinha
-        );
+        // Criar a janela flutuante
+        floatingWindow = [[FloatingWindow alloc] init];
         
-        floatingWindow = [[FloatingWindow alloc] initWithFrame:windowFrame];
+        // Inicializar o WebRTCManager e atribuí-lo à janela
+        WebRTCManager *manager = [[WebRTCManager alloc] initWithFloatingWindow:floatingWindow];
+        floatingWindow.webRTCManager = manager;
         
-        // É crucial definir o estado ANTES de mostrar
-        // Isso aplica as configurações de AssistiveTouch
-        floatingWindow.windowState = FloatingWindowStateMinimized;
-        
-        // Mostrar a janela
-        [floatingWindow show];
-        writeLog(@"Janela flutuante exibida em modo minimizado");
+        // Mostrar a janela após um pequeno delay para garantir inicialização completa
+        dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(1.0 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
+            [floatingWindow show];
+            writeLog(@"Janela flutuante exibida em modo minimizado");
+        });
     });
 }
 

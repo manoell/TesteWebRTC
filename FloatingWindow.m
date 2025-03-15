@@ -8,21 +8,21 @@
 @property (nonatomic, strong) UIView *contentView;
 @property (nonatomic, strong) UIActivityIndicatorView *loadingIndicator;
 @property (nonatomic, strong) UIButton *minimizeButton;
-@property (nonatomic, strong) NSLayoutConstraint *heightConstraint;
-@property (nonatomic, strong) NSLayoutConstraint *widthConstraint;
-@property (nonatomic, strong) UIStackView *controlsStackView;
-@property (nonatomic, strong) CAGradientLayer *gradientLayer;
+@property (nonatomic, strong) UIButton *toggleButton;
+@property (nonatomic, strong, readwrite) RTCMTLVideoView *videoView;
+@property (nonatomic, strong) UILabel *dimensionsLabel;
+@property (nonatomic, strong) UIView *topBarView;
+@property (nonatomic, strong) UIView *buttonContainer;
+@property (nonatomic, strong) CAGradientLayer *topGradient;
+@property (nonatomic, strong) CAGradientLayer *bottomGradient;
+@property (nonatomic, strong) UIImageView *iconView;
 
 // State tracking
 @property (nonatomic, assign) CGPoint lastPosition;
 @property (nonatomic, assign) BOOL isPreviewActive;
-@property (nonatomic, assign) CGRect originalFrame;
-@property (nonatomic, assign) BOOL dragInProgress;
-@property (nonatomic, strong) NSTimer *autoHideTimer;
-@property (nonatomic, assign) BOOL controlsVisible;
-
-// RTCMTLVideoView para renderização
-@property (nonatomic, strong, readwrite) RTCMTLVideoView *videoView;
+@property (nonatomic, assign) CGRect expandedFrame;
+@property (nonatomic, assign) CGRect minimizedFrame;
+@property (nonatomic, assign) BOOL isDragging;
 
 @end
 
@@ -30,52 +30,72 @@
 
 #pragma mark - Initialization & Setup
 
-- (instancetype)initWithFrame:(CGRect)frame {
+- (instancetype)init {
     if (@available(iOS 13.0, *)) {
         UIScene *scene = [[UIApplication sharedApplication].connectedScenes anyObject];
         if ([scene isKindOfClass:[UIWindowScene class]]) {
             self = [super initWithWindowScene:(UIWindowScene *)scene];
         } else {
-            self = [super initWithFrame:frame];
+            self = [super init];
         }
     } else {
-        self = [super initWithFrame:frame];
+        self = [super init];
     }
     
     if (self) {
-        self.frame = frame;
-        self.originalFrame = frame;
-        self.windowState = FloatingWindowStateNormal;
+        // Configurações básicas da janela
         self.windowLevel = UIWindowLevelAlert + 1;
-        self.backgroundColor = [UIColor colorWithRed:0.1 green:0.1 blue:0.1 alpha:0.85];
-        self.layer.cornerRadius = 12;
+        self.backgroundColor = [UIColor colorWithRed:0.2 green:0.2 blue:0.2 alpha:0.9];
+        self.layer.cornerRadius = 25;
         self.clipsToBounds = YES;
-        self.layer.borderWidth = 1.5;
-        self.layer.borderColor = [UIColor colorWithWhite:0.3 alpha:0.7].CGColor;
         
-        // Configuração da sombra
+        // Configurar sombra
         self.layer.shadowColor = [UIColor blackColor].CGColor;
         self.layer.shadowOffset = CGSizeMake(0, 4);
         self.layer.shadowOpacity = 0.5;
         self.layer.shadowRadius = 8;
         
-        [self setupUI];
+        // Inicializar frames para os dois estados
+        CGRect screenBounds = [UIScreen mainScreen].bounds;
         
-        // Inicializar WebRTC manager
-        self.webRTCManager = [[WebRTCManager alloc] initWithFloatingWindow:self];
+        // Frame para o estado expandido (quase tela cheia com margens)
+        CGFloat margin = 20.0; // Margem pequena nas laterais, topo e base
+        CGFloat expandedWidth = screenBounds.size.width - (2 * margin); // 95% da largura com margens
+        CGFloat expandedHeight = screenBounds.size.height - (2 * margin) - 20; // Altura com margens, ajustada pra barra de status
+        self.expandedFrame = CGRectMake(
+            margin, // Margem à esquerda
+            margin + 10, // Margem no topo + espaço pra barra de status
+            expandedWidth,
+            expandedHeight
+        );
         
-        // Estado inicial
-        self.isPreviewActive = NO;
-        self.controlsVisible = YES;
+        // Frame para o estado minimizado (AssistiveTouch)
+        CGFloat minimizedSize = 50;
+        self.minimizedFrame = CGRectMake(
+            screenBounds.size.width - minimizedSize - 20,
+            screenBounds.size.height * 0.4,
+            minimizedSize,
+            minimizedSize
+        );
+        
+        // Estado inicial (minimizado como AssistiveTouch)
+        self.frame = self.minimizedFrame;
+        self.windowState = FloatingWindowStateMinimized;
+        
+        // Configurações iniciais
         self.lastFrameSize = CGSizeZero;
-        self.isTranslucent = YES;
+        self.isPreviewActive = NO;
         self.isReceivingFrames = NO;
         self.currentFps = 0;
         
-        // Iniciar temporizador para auto-ocultar controles
-        [self resetAutoHideTimer];
+        // Configurar UI
+        [self setupUI];
+        [self setupGestureRecognizers];
         
-        writeLog(@"[FloatingWindow] Janela flutuante inicializada com UI aprimorada e RTCMTLVideoView");
+        // Atualize a aparência baseada no estado inicial
+        [self updateAppearanceForState:self.windowState];
+        
+        writeLog(@"[FloatingWindow] Janela flutuante inicializada em modo minimizado");
     }
     return self;
 }
@@ -97,11 +117,11 @@
     
     // Configurar componentes da UI
     [self setupVideoView];
-    [self setupStatusBar];
-    [self setupControlButtons];
+    [self setupTopBar];
+    [self setupBottomControls];
     [self setupLoadingIndicator];
-    [self setupGestureRecognizers];
     [self setupGradients];
+    [self setupMinimizedIcon];
 }
 
 - (void)setupVideoView {
@@ -118,114 +138,89 @@
         [self.videoView.trailingAnchor constraintEqualToAnchor:self.contentView.trailingAnchor],
         [self.videoView.bottomAnchor constraintEqualToAnchor:self.contentView.bottomAnchor],
     ]];
-    
-    writeLog(@"[FloatingWindow] RTCMTLVideoView configurada com sucesso");
 }
 
-- (void)setupStatusBar {
-    // Barra de status superior com gradiente
-    UIView *statusBarView = [[UIView alloc] init];
-    statusBarView.translatesAutoresizingMaskIntoConstraints = NO;
-    statusBarView.backgroundColor = [UIColor clearColor];
-    [self.contentView addSubview:statusBarView];
+- (void)setupTopBar {
+    // Barra superior com informações
+    self.topBarView = [[UIView alloc] init];
+    self.topBarView.translatesAutoresizingMaskIntoConstraints = NO;
+    self.topBarView.backgroundColor = [UIColor clearColor];
+    [self.contentView addSubview:self.topBarView];
     
     [NSLayoutConstraint activateConstraints:@[
-        [statusBarView.topAnchor constraintEqualToAnchor:self.contentView.topAnchor],
-        [statusBarView.leadingAnchor constraintEqualToAnchor:self.contentView.leadingAnchor],
-        [statusBarView.trailingAnchor constraintEqualToAnchor:self.contentView.trailingAnchor],
-        [statusBarView.heightAnchor constraintEqualToConstant:44],
+        [self.topBarView.topAnchor constraintEqualToAnchor:self.contentView.topAnchor],
+        [self.topBarView.leadingAnchor constraintEqualToAnchor:self.contentView.leadingAnchor],
+        [self.topBarView.trailingAnchor constraintEqualToAnchor:self.contentView.trailingAnchor],
+        [self.topBarView.heightAnchor constraintEqualToConstant:50],
     ]];
     
-    // Status Label com design aprimorado
+    // Label para status da conexão
     self.statusLabel = [[UILabel alloc] init];
     self.statusLabel.translatesAutoresizingMaskIntoConstraints = NO;
     self.statusLabel.text = @"WebRTC Preview";
     self.statusLabel.textColor = [UIColor whiteColor];
     self.statusLabel.textAlignment = NSTextAlignmentCenter;
     self.statusLabel.backgroundColor = [UIColor clearColor];
-    self.statusLabel.layer.cornerRadius = 8;
-    self.statusLabel.clipsToBounds = YES;
     self.statusLabel.font = [UIFont boldSystemFontOfSize:14];
-    [statusBarView addSubview:self.statusLabel];
+    [self.topBarView addSubview:self.statusLabel];
     
     [NSLayoutConstraint activateConstraints:@[
-        [self.statusLabel.centerXAnchor constraintEqualToAnchor:statusBarView.centerXAnchor],
-        [self.statusLabel.centerYAnchor constraintEqualToAnchor:statusBarView.centerYAnchor],
-        [self.statusLabel.widthAnchor constraintLessThanOrEqualToAnchor:statusBarView.widthAnchor constant:-80],
-        [self.statusLabel.heightAnchor constraintEqualToConstant:30],
+        [self.statusLabel.topAnchor constraintEqualToAnchor:self.topBarView.topAnchor constant:8],
+        [self.statusLabel.centerXAnchor constraintEqualToAnchor:self.topBarView.centerXAnchor],
+        [self.statusLabel.widthAnchor constraintLessThanOrEqualToAnchor:self.topBarView.widthAnchor constant:-20],
     ]];
     
-    // Botão de minimizar
-    self.minimizeButton = [UIButton buttonWithType:UIButtonTypeSystem];
-    self.minimizeButton.translatesAutoresizingMaskIntoConstraints = NO;
-    if (@available(iOS 13.0, *)) {
-        [self.minimizeButton setImage:[UIImage systemImageNamed:@"minus.circle.fill"] forState:UIControlStateNormal];
-    } else {
-        [self.minimizeButton setTitle:@"-" forState:UIControlStateNormal];
-    }
-    [self.minimizeButton addTarget:self action:@selector(minimizeButtonTapped) forControlEvents:UIControlEventTouchUpInside];
-    self.minimizeButton.tintColor = [UIColor whiteColor];
-    [statusBarView addSubview:self.minimizeButton];
+    // Label para dimensões e FPS
+    self.dimensionsLabel = [[UILabel alloc] init];
+    self.dimensionsLabel.translatesAutoresizingMaskIntoConstraints = NO;
+    self.dimensionsLabel.text = @"";
+    self.dimensionsLabel.textColor = [UIColor whiteColor];
+    self.dimensionsLabel.textAlignment = NSTextAlignmentCenter;
+    self.dimensionsLabel.backgroundColor = [UIColor clearColor];
+    self.dimensionsLabel.font = [UIFont systemFontOfSize:12];
+    [self.topBarView addSubview:self.dimensionsLabel];
     
     [NSLayoutConstraint activateConstraints:@[
-        [self.minimizeButton.trailingAnchor constraintEqualToAnchor:statusBarView.trailingAnchor constant:-8],
-        [self.minimizeButton.centerYAnchor constraintEqualToAnchor:statusBarView.centerYAnchor],
-        [self.minimizeButton.widthAnchor constraintEqualToConstant:30],
-        [self.minimizeButton.heightAnchor constraintEqualToConstant:30],
+        [self.dimensionsLabel.topAnchor constraintEqualToAnchor:self.statusLabel.bottomAnchor constant:4],
+        [self.dimensionsLabel.centerXAnchor constraintEqualToAnchor:self.topBarView.centerXAnchor],
+        [self.dimensionsLabel.widthAnchor constraintLessThanOrEqualToAnchor:self.topBarView.widthAnchor constant:-20],
     ]];
 }
 
-- (void)setupControlButtons {
-    // Barra de controles inferior
-    UIView *controlBarView = [[UIView alloc] init];
-    controlBarView.translatesAutoresizingMaskIntoConstraints = NO;
-    controlBarView.backgroundColor = [UIColor clearColor];
-    [self.contentView addSubview:controlBarView];
+- (void)setupBottomControls {
+    // Container para botão
+    self.buttonContainer = [[UIView alloc] init];
+    self.buttonContainer.translatesAutoresizingMaskIntoConstraints = NO;
+    self.buttonContainer.backgroundColor = [UIColor clearColor];
+    [self.contentView addSubview:self.buttonContainer];
     
     [NSLayoutConstraint activateConstraints:@[
-        [controlBarView.bottomAnchor constraintEqualToAnchor:self.contentView.bottomAnchor],
-        [controlBarView.leadingAnchor constraintEqualToAnchor:self.contentView.leadingAnchor],
-        [controlBarView.trailingAnchor constraintEqualToAnchor:self.contentView.trailingAnchor],
-        [controlBarView.heightAnchor constraintEqualToConstant:60],
+        [self.buttonContainer.bottomAnchor constraintEqualToAnchor:self.contentView.bottomAnchor constant:-20],
+        [self.buttonContainer.centerXAnchor constraintEqualToAnchor:self.contentView.centerXAnchor],
+        [self.buttonContainer.widthAnchor constraintEqualToConstant:180],
+        [self.buttonContainer.heightAnchor constraintEqualToConstant:50],
     ]];
     
-    // Stack view para controles
-    self.controlsStackView = [[UIStackView alloc] init];
-    self.controlsStackView.translatesAutoresizingMaskIntoConstraints = NO;
-    self.controlsStackView.axis = UILayoutConstraintAxisHorizontal;
-    self.controlsStackView.distribution = UIStackViewDistributionFillEqually;
-    self.controlsStackView.alignment = UIStackViewAlignmentCenter;
-    self.controlsStackView.spacing = 10;
-    [controlBarView addSubview:self.controlsStackView];
-    
-    [NSLayoutConstraint activateConstraints:@[
-        [self.controlsStackView.leadingAnchor constraintEqualToAnchor:controlBarView.leadingAnchor constant:10],
-        [self.controlsStackView.trailingAnchor constraintEqualToAnchor:controlBarView.trailingAnchor constant:-10],
-        [self.controlsStackView.centerYAnchor constraintEqualToAnchor:controlBarView.centerYAnchor],
-        [self.controlsStackView.heightAnchor constraintEqualToConstant:40],
-    ]];
-    
-    // Botão principal
-    self.toggleButton = [UIButton buttonWithType:UIButtonTypeCustom];
+    // Botão de ativar/desativar
+    self.toggleButton = [UIButton buttonWithType:UIButtonTypeSystem];
     self.toggleButton.translatesAutoresizingMaskIntoConstraints = NO;
     [self.toggleButton setTitle:@"Ativar Preview" forState:UIControlStateNormal];
-    [self.toggleButton setTitleColor:[UIColor whiteColor] forState:UIControlStateNormal];
+    [self.toggleButton setTitleColor:[UIColor blackColor] forState:UIControlStateNormal];
+    self.toggleButton.backgroundColor = [UIColor greenColor]; // Verde inicialmente
+    self.toggleButton.layer.cornerRadius = 10;
     [self.toggleButton addTarget:self action:@selector(togglePreview:) forControlEvents:UIControlEventTouchUpInside];
-    self.toggleButton.backgroundColor = [UIColor colorWithRed:0.0 green:0.5 blue:0.8 alpha:1.0];
-    self.toggleButton.layer.cornerRadius = 8;
-    self.toggleButton.titleLabel.font = [UIFont boldSystemFontOfSize:16];
-    self.toggleButton.contentEdgeInsets = UIEdgeInsetsMake(5, 10, 5, 10);
+    [self.buttonContainer addSubview:self.toggleButton];
     
-    // Adicionar botão ao stack view
-    [self.controlsStackView addArrangedSubview:self.toggleButton];
-    
-    // Configurar constraints específicos para o botão principal
     [NSLayoutConstraint activateConstraints:@[
-        [self.toggleButton.widthAnchor constraintGreaterThanOrEqualToConstant:180],
+        [self.toggleButton.leadingAnchor constraintEqualToAnchor:self.buttonContainer.leadingAnchor],
+        [self.toggleButton.trailingAnchor constraintEqualToAnchor:self.buttonContainer.trailingAnchor],
+        [self.toggleButton.topAnchor constraintEqualToAnchor:self.buttonContainer.topAnchor],
+        [self.toggleButton.bottomAnchor constraintEqualToAnchor:self.buttonContainer.bottomAnchor],
     ]];
 }
 
 - (void)setupLoadingIndicator {
+    // Indicador de carregamento
     if (@available(iOS 13.0, *)) {
         self.loadingIndicator = [[UIActivityIndicatorView alloc] initWithActivityIndicatorStyle:UIActivityIndicatorViewStyleMedium];
         self.loadingIndicator.color = [UIColor whiteColor];
@@ -246,69 +241,93 @@
     ]];
 }
 
-- (void)setupGestureRecognizers {
-    // Gesture para mover a janela
-    UIPanGestureRecognizer *panGesture = [[UIPanGestureRecognizer alloc] initWithTarget:self action:@selector(handlePan:)];
-    [self addGestureRecognizer:panGesture];
+- (void)setupMinimizedIcon {
+    // Criar o ícone para o estado minimizado
+    self.iconView = [[UIImageView alloc] init];
+    self.iconView.translatesAutoresizingMaskIntoConstraints = NO;
+    self.iconView.contentMode = UIViewContentModeScaleAspectFit;
+    self.iconView.tintColor = [UIColor whiteColor];
+    [self addSubview:self.iconView];
     
-    // Adicionar double tap para minimizar/maximizar
-    UITapGestureRecognizer *doubleTapGesture = [[UITapGestureRecognizer alloc] initWithTarget:self action:@selector(handleDoubleTap:)];
-    doubleTapGesture.numberOfTapsRequired = 2;
-    [self addGestureRecognizer:doubleTapGesture];
+    // Centralizar o ícone
+    [NSLayoutConstraint activateConstraints:@[
+        [self.iconView.centerXAnchor constraintEqualToAnchor:self.centerXAnchor],
+        [self.iconView.centerYAnchor constraintEqualToAnchor:self.centerYAnchor],
+        [self.iconView.widthAnchor constraintEqualToConstant:26],
+        [self.iconView.heightAnchor constraintEqualToConstant:26]
+    ]];
     
-    // Tap para mostrar/ocultar controles
-    UITapGestureRecognizer *tapGesture = [[UITapGestureRecognizer alloc] initWithTarget:self action:@selector(handleSingleTap:)];
-    tapGesture.numberOfTapsRequired = 1;
-    [self addGestureRecognizer:tapGesture];
+    // Definir o ícone inicial
+    [self updateMinimizedIconWithState];
     
-    // Evitar conflitos entre gestures
-    [panGesture requireGestureRecognizerToFail:tapGesture];
-    [tapGesture requireGestureRecognizerToFail:doubleTapGesture];
+    // Inicialmente oculto até que a janela seja minimizada
+    self.iconView.hidden = YES;
 }
 
 - (void)setupGradients {
     // Gradiente para topo
-    CAGradientLayer *topGradient = [CAGradientLayer layer];
-    topGradient.colors = @[
-        (id)[[UIColor colorWithWhite:0 alpha:0.7] CGColor],
+    self.topGradient = [CAGradientLayer layer];
+    self.topGradient.colors = @[
+        (id)[[UIColor colorWithWhite:0 alpha:0.8] CGColor],
         (id)[[UIColor colorWithWhite:0 alpha:0] CGColor]
     ];
-    topGradient.locations = @[@0.0, @1.0];
-    topGradient.startPoint = CGPointMake(0.5, 0.0);
-    topGradient.endPoint = CGPointMake(0.5, 1.0);
-    topGradient.frame = CGRectMake(0, 0, self.bounds.size.width, 60);
-    [self.contentView.layer insertSublayer:topGradient atIndex:0];
+    self.topGradient.locations = @[@0.0, @1.0];
+    self.topGradient.startPoint = CGPointMake(0.5, 0.0);
+    self.topGradient.endPoint = CGPointMake(0.5, 1.0);
+    [self.contentView.layer insertSublayer:self.topGradient atIndex:0];
     
     // Gradiente para base
-    CAGradientLayer *bottomGradient = [CAGradientLayer layer];
-    bottomGradient.colors = @[
+    self.bottomGradient = [CAGradientLayer layer];
+    self.bottomGradient.colors = @[
         (id)[[UIColor colorWithWhite:0 alpha:0] CGColor],
-        (id)[[UIColor colorWithWhite:0 alpha:0.7] CGColor]
+        (id)[[UIColor colorWithWhite:0 alpha:0.8] CGColor]
     ];
-    bottomGradient.locations = @[@0.0, @1.0];
-    bottomGradient.startPoint = CGPointMake(0.5, 0.0);
-    bottomGradient.endPoint = CGPointMake(0.5, 1.0);
-    bottomGradient.frame = CGRectMake(0, self.bounds.size.height - 60, self.bounds.size.width, 60);
-    [self.contentView.layer insertSublayer:bottomGradient atIndex:0];
+    self.bottomGradient.locations = @[@0.0, @1.0];
+    self.bottomGradient.startPoint = CGPointMake(0.5, 0.0);
+    self.bottomGradient.endPoint = CGPointMake(0.5, 1.0);
+    [self.contentView.layer insertSublayer:self.bottomGradient atIndex:0];
+}
+
+- (void)setupGestureRecognizers {
+    // Gestor para mover a janela - Prioridade alta para melhor resposta
+    UIPanGestureRecognizer *panGesture = [[UIPanGestureRecognizer alloc] initWithTarget:self action:@selector(handlePan:)];
+    panGesture.maximumNumberOfTouches = 1;
+    panGesture.minimumNumberOfTouches = 1;
+    [self addGestureRecognizer:panGesture];
     
-    self.gradientLayer = [CAGradientLayer layer];
-    self.gradientLayer.colors = @[
-        (id)[[UIColor colorWithRed:0.1 green:0.1 blue:0.2 alpha:0.9] CGColor],
-        (id)[[UIColor colorWithRed:0.0 green:0.1 blue:0.3 alpha:0.8] CGColor]
-    ];
-    self.gradientLayer.frame = self.bounds;
-    [self.layer insertSublayer:self.gradientLayer atIndex:0];
+    // Tap para expandir/minimizar
+    UITapGestureRecognizer *tapGesture = [[UITapGestureRecognizer alloc] initWithTarget:self action:@selector(handleTap:)];
+    tapGesture.numberOfTapsRequired = 1;
+    [self addGestureRecognizer:tapGesture];
+    
+    // Configurar dependências entre gestos para evitar conflitos
+    [tapGesture requireGestureRecognizerToFail:panGesture];
+}
+
+#pragma mark - Layout
+
+- (void)layoutSubviews {
+    [super layoutSubviews];
+    
+    // Atualizar layout dos gradientes
+    self.topGradient.frame = CGRectMake(0, 0, self.bounds.size.width, 60);
+    self.bottomGradient.frame = CGRectMake(0, self.bounds.size.height - 80, self.bounds.size.width, 80);
 }
 
 #pragma mark - Public Methods
 
 - (void)show {
-    self.hidden = NO;
-    [self makeKeyAndVisible];
+    // Configurar para o estado inicial
+    self.frame = self.minimizedFrame;
+    self.windowState = FloatingWindowStateMinimized;
+    [self updateAppearanceForState:self.windowState];
     
-    // Animação de entrada
-    self.transform = CGAffineTransformMakeScale(0.7, 0.7);
+    // Tornar visível
+    self.hidden = NO;
     self.alpha = 0;
+    
+    // Animar entrada
+    self.transform = CGAffineTransformMakeScale(0.5, 0.5);
     
     [UIView animateWithDuration:0.3
                           delay:0
@@ -317,703 +336,299 @@
                         options:UIViewAnimationOptionCurveEaseOut
                      animations:^{
         self.transform = CGAffineTransformIdentity;
-        self.alpha = 1;
+        self.alpha = 0.8; // Começar com alfa reduzido para minimizado
     } completion:nil];
     
-    writeLog(@"[FloatingWindow] Janela flutuante mostrada com animação");
+    [self makeKeyAndVisible];
+    writeLog(@"[FloatingWindow] Janela flutuante mostrada");
 }
 
 - (void)hide {
     [self stopPreview];
     
-    // Animação de saída
+    // Animar saída
     [UIView animateWithDuration:0.2 animations:^{
-        self.transform = CGAffineTransformMakeScale(0.7, 0.7);
+        self.transform = CGAffineTransformMakeScale(0.5, 0.5);
         self.alpha = 0;
     } completion:^(BOOL finished) {
         self.hidden = YES;
         self.transform = CGAffineTransformIdentity;
     }];
     
-    writeLog(@"[FloatingWindow] Janela flutuante ocultada com animação");
+    writeLog(@"[FloatingWindow] Janela flutuante ocultada");
 }
 
 - (void)togglePreview:(UIButton *)sender {
     if (self.isPreviewActive) {
         [self stopPreview];
-        [sender setTitle:@"Ativar Preview" forState:UIControlStateNormal];
-        sender.backgroundColor = [UIColor colorWithRed:0.0 green:0.5 blue:0.8 alpha:1.0];
-        self.isPreviewActive = NO;
-        
-        // Atualizar a cor da bolinha quando minimizada
-        [self updateAssistiveTouchColor];
     } else {
-        // Verificar se WebRTCManager existe
-        if (!self.webRTCManager) {
-            writeErrorLog(@"[FloatingWindow] WebRTCManager não inicializado");
-            return;
-        }
-        
         [self startPreview];
-        [sender setTitle:@"Desativar Preview" forState:UIControlStateNormal];
-        sender.backgroundColor = [UIColor colorWithRed:0.8 green:0.0 blue:0.0 alpha:1.0];
-        self.isPreviewActive = YES;
-        
-        // Atualizar a cor da bolinha quando minimizada
-        [self updateAssistiveTouchColor];
     }
 }
 
 - (void)startPreview {
-    self.statusLabel.text = @"Conectando...";
-    writeLog(@"[FloatingWindow] Iniciando preview");
+    // Verificar se o WebRTCManager está presente
+    if (!self.webRTCManager) {
+        writeErrorLog(@"[FloatingWindow] WebRTCManager não inicializado");
+        [self updateConnectionStatus:@"Erro: gerenciador não inicializado"];
+        return;
+    }
+    
+    self.isPreviewActive = YES;
+    [self.toggleButton setTitle:@"Desativar Preview" forState:UIControlStateNormal];
+    self.toggleButton.backgroundColor = [UIColor redColor]; // Vermelho quando ativo
     
     // Mostrar indicador de carregamento
     [self.loadingIndicator startAnimating];
+    [self updateConnectionStatus:@"Conectando..."];
     
-    // Iniciar WebRTC com tratamento de erro
+    // Iniciar WebRTC
     @try {
-        if (!self.webRTCManager) {
-            writeErrorLog(@"[FloatingWindow] ERRO: WebRTCManager não inicializado");
-            [self updateConnectionStatus:@"Erro: Gerenciador não inicializado"];
-            [self.loadingIndicator stopAnimating];
-            return;
-        }
-        
         [self.webRTCManager startWebRTC];
     } @catch (NSException *exception) {
         writeErrorLog(@"[FloatingWindow] Exceção ao iniciar WebRTC: %@", exception);
         self.isPreviewActive = NO;
         [self.loadingIndicator stopAnimating];
         [self updateConnectionStatus:@"Erro ao iniciar conexão"];
+        
+        // Reverter UI
+        [self.toggleButton setTitle:@"Ativar Preview" forState:UIControlStateNormal];
+        self.toggleButton.backgroundColor = [UIColor colorWithRed:0.0 green:0.5 blue:0.8 alpha:1.0];
         return;
     }
     
-    // Atualizar UI para modo conectado
-    [UIView animateWithDuration:0.3 animations:^{
-        self.backgroundColor = [UIColor colorWithRed:0.1 green:0.1 blue:0.1 alpha:0.85];
-    }];
+    // Expandir se estiver minimizado
+    if (self.windowState == FloatingWindowStateMinimized) {
+        [self setWindowState:FloatingWindowStateExpanded];
+    }
+    
+    // Atualizar ícone minimizado
+    [self updateMinimizedIconWithState];
 }
 
 - (void)stopPreview {
-    writeLog(@"[FloatingWindow] Parando preview");
+    if (!self.isPreviewActive) return;
     
-    // Verificar o webRTCManager
-    if (!self.webRTCManager) {
-        writeErrorLog(@"[FloatingWindow] stopPreview: WebRTCManager não inicializado");
-        return;
-    }
-    
-    // Tentar enviar mensagem bye
-    @try {
-        writeLog(@"[FloatingWindow] Enviando 'bye' via sendByeMessage");
-        [self.webRTCManager sendByeMessage];
-        
-        // Pequeno delay para garantir que a mensagem seja enviada antes de fechar
-        dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.5 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
-            // Agora sim parar o WebRTC
-            writeLog(@"[FloatingWindow] Chamando stopWebRTC após tentativa de envio de 'bye'");
-            [self.webRTCManager stopWebRTC:YES];
-        });
-    } @catch (NSException *exception) {
-        writeErrorLog(@"[FloatingWindow] Exceção ao enviar bye: %@", exception);
-        // Em caso de exceção, tentar diretamente stopWebRTC
-        [self.webRTCManager stopWebRTC:YES];
-    }
+    self.isPreviewActive = NO;
+    [self.toggleButton setTitle:@"Ativar Preview" forState:UIControlStateNormal];
+    self.toggleButton.backgroundColor = [UIColor greenColor]; // Verde quando desativado
     
     // Parar indicador de carregamento
     [self.loadingIndicator stopAnimating];
-    
-    // Atualizar status
     [self updateConnectionStatus:@"Desconectado"];
     
-    // Atualizar UI para modo desconectado
-    [UIView animateWithDuration:0.3 animations:^{
-        self.backgroundColor = [UIColor colorWithRed:0.1 green:0.1 blue:0.1 alpha:0.85];
-    }];
+    // Limpar dimensões
+    self.dimensionsLabel.text = @"";
+    
+    // Marcar como não recebendo frames
+    self.isReceivingFrames = NO;
+    
+    // Desconectar WebRTC
+    if (self.webRTCManager) {
+        @try {
+            // Enviar mensagem bye
+            [self.webRTCManager sendByeMessage];
+            
+            // Desativar após pequeno delay para garantir o envio da mensagem
+            dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.5 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
+                [self.webRTCManager stopWebRTC:YES];
+            });
+        } @catch (NSException *exception) {
+            writeErrorLog(@"[FloatingWindow] Exceção ao desativar WebRTC: %@", exception);
+            [self.webRTCManager stopWebRTC:YES];
+        }
+    }
+    
+    // Atualizar ícone minimizado
+    [self updateMinimizedIconWithState];
 }
 
 - (void)updateConnectionStatus:(NSString *)status {
     dispatch_async(dispatch_get_main_queue(), ^{
-        // Para status de recepção, mostrar resolução e FPS
-        if ([status containsString:@"Recebendo"] ||
-            [status containsString:@"Conectado"]) {
-            if (self.isReceivingFrames) {
-                if (self.lastFrameSize.width > 0 && self.lastFrameSize.height > 0) {
-                    NSString *dimensionString = [NSString stringWithFormat:@"%dx%d",
-                                                (int)self.lastFrameSize.width,
-                                                (int)self.lastFrameSize.height];
-                    
-                    if (self.currentFps > 0) {
-                        self.statusLabel.text = [NSString stringWithFormat:@"Recebendo %@ @ %dfps",
-                                               dimensionString, (int)self.currentFps];
-                    } else {
-                        self.statusLabel.text = [NSString stringWithFormat:@"Recebendo %@",
-                                               dimensionString];
-                    }
-                } else {
-                    self.statusLabel.text = @"Conectado - Recebendo stream";
-                }
-            } else {
-                self.statusLabel.text = status;
-            }
-        } else {
-            self.statusLabel.text = status;
-        }
+        self.statusLabel.text = status;
+        
+        // Atualizar estado visual (cor do ícone quando minimizado)
+        [self updateMinimizedIconWithState];
     });
 }
 
-#pragma mark - RTCVideoViewDelegate
+#pragma mark - State Management
 
-- (void)videoView:(RTCMTLVideoView *)videoView didChangeVideoSize:(CGSize)size {
-    writeLog(@"[FloatingWindow] Tamanho do vídeo alterado para: %@", NSStringFromCGSize(size));
-    self.lastFrameSize = size;
+- (void)setWindowState:(FloatingWindowState)windowState {
+    if (_windowState == windowState) return;
     
-    // Se estiver recebendo o primeiro frame válido, parar o indicador de carregamento
-    if (size.width > 0 && size.height > 0) {
-        dispatch_async(dispatch_get_main_queue(), ^{
-            [self.loadingIndicator stopAnimating];
-            
-            // Atualizar feedback visual para o usuário
-            [self updateConnectionStatus:[NSString stringWithFormat:@"Recebendo %dx%d", (int)size.width, (int)size.height]];
-            
-            // Se temos informação de FPS, vamos tentar usar
-            if (self.webRTCManager && [self.webRTCManager respondsToSelector:@selector(getEstimatedFps)]) {
-                self.currentFps = [self.webRTCManager getEstimatedFps];
-                // Forçar atualização do status para incluir FPS
-                [self updateConnectionStatus:[NSString stringWithFormat:@"Recebendo %dx%d", (int)size.width, (int)size.height]];
-            }
-        });
-    }
+    _windowState = windowState;
+    [self updateAppearanceForState:windowState];
 }
 
-#pragma mark - Window State Management
-
-- (void)minimizeButtonTapped {
-    // Alternar entre minimizado e normal
-    if (self.windowState == FloatingWindowStateMinimized) {
-        [self changeWindowState:FloatingWindowStateNormal animated:YES];
-    } else {
-        [self changeWindowState:FloatingWindowStateMinimized animated:YES];
-    }
-}
-
-- (void)changeWindowState:(FloatingWindowState)newState animated:(BOOL)animated {
-    // Salvar estado anterior para transição
-    FloatingWindowState oldState = self.windowState;
-    self.windowState = newState;
-    
-    if (animated) {
-        [UIView animateWithDuration:0.3
-                              delay:0
-             usingSpringWithDamping:0.7
-              initialSpringVelocity:0.5
-                            options:UIViewAnimationOptionCurveEaseInOut
-                         animations:^{
-            [self applyStateChanges:oldState toState:newState];
-        } completion:nil];
-    } else {
-        [self applyStateChanges:oldState toState:newState];
-    }
-    
-    // Atualizar controles baseado no novo estado
-    [self updateControlsForState:newState];
-    
-    // Reset timer para auto-ocultar controles
-    [self resetAutoHideTimer];
-}
-
-- (void)setWindowState:(FloatingWindowState)newState {
-    // Salvar estado anterior para transição
-    FloatingWindowState oldState = _windowState;
-    _windowState = newState;  // Use a variável de instância diretamente
-    
-    // Aplicar mudanças de estado imediatamente
-    [self applyStateChanges:oldState toState:newState];
-    
-    // Atualizar controles baseado no novo estado
-    [self updateControlsForState:newState];
-    
-    // Reset timer para auto-ocultar controles
-    [self resetAutoHideTimer];
-    
-    writeLog(@"[FloatingWindow] Estado da janela alterado para: %d", (int)newState);
-}
-
-- (void)updateMinimizedAppearance {
-    // Verificar se estamos no estado minimizado
-    if (self.windowState != FloatingWindowStateMinimized) {
-        return;
-    }
-    
-    // Verificar se o webRTCManager existe
-    if (!self.webRTCManager) {
-        return;
-    }
-    
-    // Definir a cor de fundo baseada no estado da conexão
-    if (self.isPreviewActive) {
-        // Verde quando conectado
-        self.backgroundColor = [UIColor colorWithRed:0.0 green:0.8 blue:0.0 alpha:0.8];
-    } else {
-        // Vermelho quando desconectado
-        self.backgroundColor = [UIColor colorWithRed:0.8 green:0.0 blue:0.0 alpha:0.8];
-    }
-    
-    // Verificar se já existe o ícone de câmera, se não, criar
-    UIImageView *cameraIcon = [self viewWithTag:9999];
-    if (!cameraIcon) {
-        // Criar ícone com símbolo de câmera
-        UIImage *image = [UIImage systemImageNamed:@"camera.fill"];
-        if (!image) {
-            // Fallback para iOS anterior ao 13
-            image = [UIImage imageNamed:@"camera"];
-        }
-        
-        cameraIcon = [[UIImageView alloc] initWithImage:image];
-        cameraIcon.tag = 9999;
-        cameraIcon.contentMode = UIViewContentModeScaleAspectFit;
-        cameraIcon.tintColor = [UIColor whiteColor];
-        [self addSubview:cameraIcon];
-    }
-    
-    // Centralizar e dimensionar o ícone
-    CGFloat iconSize = self.bounds.size.width * 0.6; // 60% do tamanho da bolinha
-    cameraIcon.frame = CGRectMake(
-        (self.bounds.size.width - iconSize) / 2,
-        (self.bounds.size.height - iconSize) / 2,
-        iconSize,
-        iconSize
-    );
-    cameraIcon.hidden = NO;
-}
-
-- (void)applyStateChanges:(FloatingWindowState)fromState toState:(FloatingWindowState)toState {
-    CGRect screenBounds = [UIScreen mainScreen].bounds;
-    
-    switch (toState) {
-        case FloatingWindowStateMinimized: {
-            // Salvar frame original ao minimizar
-            if (fromState != FloatingWindowStateMinimized) {
-                self.originalFrame = self.frame;
-            }
-            
-            // Tamanho para modo AssistiveTouch
-            CGFloat size = 50;  // Bolinha menor
-            
-            // Posicionar próximo à borda direita (padrão do AssistiveTouch)
-            CGFloat rightPadding = 20;
-            CGFloat middleY = screenBounds.size.height / 2;
-            
-            CGRect minimizedFrame = CGRectMake(
-                screenBounds.size.width - size - rightPadding,
-                middleY - size/2,
-                size,
-                size
-            );
-            
-            // Ajustar frame
-            self.frame = minimizedFrame;
-            self.layer.cornerRadius = size / 2;
-            
-            // Adicionar sombra sutil
-            self.layer.shadowColor = [UIColor blackColor].CGColor;
-            self.layer.shadowOffset = CGSizeMake(0, 3);
-            self.layer.shadowOpacity = 0.3;
-            self.layer.shadowRadius = 3;
-            
-            // Ajustar opacidade para ficar semitransparente como AssistiveTouch
-            self.alpha = 0.8;
-            
-            // Esconder todas as subviews
-            for (UIView *subview in self.contentView.subviews) {
-                subview.hidden = YES;
-            }
-            
-            // Cor vermelha por padrão (sem conexão)
-            self.backgroundColor = [UIColor colorWithRed:0.9 green:0.2 blue:0.2 alpha:0.8];
-            
-            // Criar ícone de câmera
-            [self createCameraIconForAssistiveMode];
-            
-            writeLog(@"[FloatingWindow] Aplicado estilo AssistiveTouch em modo minimizado");
-        }
-        break;
-            
-        case FloatingWindowStateNormal: {
-            // Voltar à opacidade normal
-            self.alpha = 1.0;
-            
-            // Restaurar para o tamanho original
-            if (fromState == FloatingWindowStateMinimized) {
-                // Remover ícone de câmera
-                UIView *cameraIcon = [self viewWithTag:9999];
-                if (cameraIcon) {
-                    [cameraIcon removeFromSuperview];
-                }
-                
-                // Restaurar frame original
-                self.frame = self.originalFrame;
-                
-                // Mostrar novamente todas as subviews
-                for (UIView *subview in self.contentView.subviews) {
-                    subview.hidden = NO;
-                }
-            } else {
-                // Tamanho padrão se vier de outros estados
-                CGFloat width = MIN(screenBounds.size.width * 0.7, 300);
-                CGFloat height = width * 1.5;
-                
-                CGRect normalFrame = CGRectMake(
-                    (screenBounds.size.width - width) / 2,
-                    (screenBounds.size.height - height) / 2,
-                    width,
-                    height
-                );
-                
-                self.frame = normalFrame;
-            }
-            
-            // Restaurar aparência
-            self.backgroundColor = [UIColor colorWithRed:0.1 green:0.1 blue:0.1 alpha:0.85];
-            self.layer.cornerRadius = 12;
-        }
-        break;
-            
-        case FloatingWindowStateExpanded: {
-            // Voltar à opacidade normal
-            self.alpha = 1.0;
-            
-            // Remover ícone de câmera
-            UIView *cameraIcon = [self viewWithTag:9999];
-            if (cameraIcon) {
-                [cameraIcon removeFromSuperview];
-            }
-            
-            // Tamanho expandido - ocupar mais espaço com controles visíveis
-            CGFloat padding = 40;
-            CGFloat width = MIN(screenBounds.size.width - padding * 2, 400);
-            CGFloat height = width * 1.4;
-            
-            CGRect expandedFrame = CGRectMake(
-                (screenBounds.size.width - width) / 2,
-                (screenBounds.size.height - height) / 2,
-                width,
-                height
-            );
-            
-            self.frame = expandedFrame;
-            self.layer.cornerRadius = 12;
-            
-            // Mostrar todas as subviews
-            for (UIView *subview in self.contentView.subviews) {
-                subview.hidden = NO;
-            }
-        }
-        break;
-            
-        case FloatingWindowStateFullscreen: {
-            // Voltar à opacidade normal
-            self.alpha = 1.0;
-            
-            // Remover ícone de câmera
-            UIView *cameraIcon = [self viewWithTag:9999];
-            if (cameraIcon) {
-                [cameraIcon removeFromSuperview];
-            }
-            
-            // Tela cheia - ocupa toda a tela com pequena borda
-            CGFloat padding = 20;
-            CGRect fullscreenFrame = CGRectInset(screenBounds, padding, padding);
-            
-            self.frame = fullscreenFrame;
-            self.layer.cornerRadius = 12;
-            
-            // Mostrar todas as subviews
-            for (UIView *subview in self.contentView.subviews) {
-                subview.hidden = NO;
-            }
-        }
-        break;
-    }
-}
-
-// Criar ícone de câmera para modo AssistiveTouch
-- (void)createCameraIconForAssistiveMode {
-    // Remover qualquer ícone existente
-    UIView *existingIcon = [self viewWithTag:9999];
-    if (existingIcon) {
-        [existingIcon removeFromSuperview];
-    }
-    
-    // Criar um container para o ícone da câmera
-    UIView *iconContainer = [[UIView alloc] init];
-    iconContainer.tag = 9999;
-    [self addSubview:iconContainer];
-    
-    // Centralizar o container
-    CGFloat size = self.bounds.size.width * 0.6; // 60% do tamanho da bolinha
-    iconContainer.frame = CGRectMake(
-        (self.bounds.size.width - size) / 2,
-        (self.bounds.size.height - size) / 2,
-        size,
-        size
-    );
-    
-    // Adicionar um desenho de câmera simples usando camadas
-    CAShapeLayer *cameraLayer = [CAShapeLayer layer];
-    cameraLayer.frame = iconContainer.bounds;
-    cameraLayer.fillColor = [UIColor whiteColor].CGColor;
-    
-    // Desenhar o corpo da câmera
-    UIBezierPath *path = [UIBezierPath bezierPath];
-    CGRect bodyRect = CGRectInset(iconContainer.bounds, size * 0.1, size * 0.2);
-    [path appendPath:[UIBezierPath bezierPathWithRoundedRect:bodyRect cornerRadius:3]];
-    
-    // Desenhar a lente
-    CGFloat lensSize = size * 0.4;
-    CGRect lensRect = CGRectMake(
-        (iconContainer.bounds.size.width - lensSize) / 2,
-        (iconContainer.bounds.size.height - lensSize) / 2,
-        lensSize,
-        lensSize
-    );
-    [path appendPath:[UIBezierPath bezierPathWithOvalInRect:lensRect]];
-    
-    // Desenhar o flash
-    CGRect flashRect = CGRectMake(
-        iconContainer.bounds.size.width * 0.7,
-        iconContainer.bounds.size.height * 0.2,
-        size * 0.15,
-        size * 0.1
-    );
-    [path appendPath:[UIBezierPath bezierPathWithRoundedRect:flashRect cornerRadius:2]];
-    
-    cameraLayer.path = path.CGPath;
-    [iconContainer.layer addSublayer:cameraLayer];
-}
-
-// Atualizar a cor da bolinha com base no estado de conexão
-- (void)updateAssistiveTouchColor {
-    // Verificar se estamos no estado minimizado
-    if (self.windowState != FloatingWindowStateMinimized) {
-        return;
-    }
-    
-    // Atualizar cor com base no estado da conexão
-    if (self.isPreviewActive) {
-        // Verde quando conectado (streaming)
-        self.backgroundColor = [UIColor colorWithRed:0.2 green:0.8 blue:0.2 alpha:0.8];
-        writeLog(@"[FloatingWindow] Atualizando cor para verde (conectado)");
-    } else {
-        // Vermelho quando desconectado
-        self.backgroundColor = [UIColor colorWithRed:0.9 green:0.2 blue:0.2 alpha:0.8];
-        writeLog(@"[FloatingWindow] Atualizando cor para vermelho (desconectado)");
-    }
-}
-
-- (void)updateControlsForState:(FloatingWindowState)state {
-    // Atualizar visibilidade e estilo dos controles baseado no estado
+- (void)updateAppearanceForState:(FloatingWindowState)state {
+    // Determinar e aplicar a aparência com base no estado
     switch (state) {
         case FloatingWindowStateMinimized:
-            // Em modo minimizado, esconder a maioria dos controles
-            [self hideControlsAnimated:NO];
+            [self animateToMinimizedState];
             break;
             
-        case FloatingWindowStateNormal:
         case FloatingWindowStateExpanded:
-            // Mostrar controles normais
-            [self showControlsAnimated:NO];
-            break;
-            
-        case FloatingWindowStateFullscreen:
-            // Mostrar controles extras no modo fullscreen
-            [self showControlsAnimated:NO];
+            [self animateToExpandedState];
             break;
     }
 }
 
-#pragma mark - UI Control Methods
-
-- (void)showControlsAnimated:(BOOL)animated {
-    if (self.windowState == FloatingWindowStateMinimized) {
-        return;
-    }
+- (void)animateToMinimizedState {
+    // Atualizar o ícone antes da animação
+    [self updateMinimizedIconWithState];
+    self.iconView.hidden = NO;
     
-    self.controlsVisible = YES;
-    [self invalidateAutoHideTimer];
-    
-    void (^showAnimations)(void) = ^{
-        self.minimizeButton.alpha = 1.0;
-        self.controlsStackView.alpha = 1.0;
-        self.statusLabel.alpha = 1.0;
-    };
-    
-    if (animated) {
-        [UIView animateWithDuration:0.3 animations:showAnimations];
-    } else {
-        showAnimations();
-    }
-    
-    [self resetAutoHideTimer];
-}
-
-- (void)hideControlsAnimated:(BOOL)animated {
-    self.controlsVisible = NO;
-    
-    void (^hideAnimations)(void) = ^{
-        self.minimizeButton.alpha = 0.0;
-        self.controlsStackView.alpha = 0.0;
+    // Animar para versão minimizada
+    [UIView animateWithDuration:0.3
+                          delay:0
+         usingSpringWithDamping:0.7
+          initialSpringVelocity:0.5
+                        options:UIViewAnimationOptionCurveEaseInOut
+                     animations:^{
+        // Aplicar frame minimizado
+        self.frame = self.minimizedFrame;
         
-        // Manter status parcialmente visível
-        self.statusLabel.alpha = 0.7;
-    };
+        // Ajustar aparência para AssistiveTouch
+        self.layer.cornerRadius = self.frame.size.width / 2;
+        
+        // Configurar transparência
+        self.alpha = 0.8;
+        
+        // Ocultar elementos da UI
+        self.topBarView.alpha = 0;
+        self.buttonContainer.alpha = 0;
+        self.videoView.alpha = 0;
+        
+        // Ajustar cor do fundo com base no estado
+        [self updateBackgroundColorForState];
+    } completion:^(BOOL finished) {
+        // Confirmar que elementos estão ocultos
+        self.topBarView.hidden = YES;
+        self.buttonContainer.hidden = YES;
+        self.videoView.hidden = YES;
+    }];
+}
+
+- (void)animateToExpandedState {
+    // Preparar para expandir
+    self.topBarView.hidden = NO;
+    self.buttonContainer.hidden = NO;
+    self.videoView.hidden = NO;
     
-    if (animated) {
-        [UIView animateWithDuration:0.3 animations:hideAnimations];
+    // Ocultar o ícone minimizado
+    self.iconView.hidden = YES;
+    
+    // Animar para versão expandida
+    [UIView animateWithDuration:0.3
+                          delay:0
+         usingSpringWithDamping:0.7
+          initialSpringVelocity:0.5
+                        options:UIViewAnimationOptionCurveEaseInOut
+                     animations:^{
+        // Aplicar frame expandido
+        self.frame = self.expandedFrame;
+        
+        // Ajustar aparência
+        self.layer.cornerRadius = 12;
+        
+        // Configurar transparência
+        self.alpha = 1.0;
+        
+        // Mostrar elementos da UI
+        self.topBarView.alpha = 1.0;
+        self.buttonContainer.alpha = 1.0;
+        self.videoView.alpha = 1.0;
+        
+        // Fundo escuro
+        self.backgroundColor = [UIColor colorWithRed:0.1 green:0.1 blue:0.1 alpha:0.9];
+    } completion:nil];
+}
+
+- (void)updateBackgroundColorForState {
+    // Atualizar a cor de fundo baseada no estado atual
+    if (self.windowState != FloatingWindowStateMinimized) return;
+    
+    if (self.isPreviewActive) {
+        if (self.isReceivingFrames) {
+            // Verde quando recebendo frames
+            self.backgroundColor = [UIColor colorWithRed:0.0 green:0.7 blue:0.0 alpha:0.9];
+        } else {
+            // Amarelo quando conectado mas sem receber
+            self.backgroundColor = [UIColor colorWithRed:0.7 green:0.7 blue:0.0 alpha:0.9];
+        }
     } else {
-        hideAnimations();
+        // Cinza quando desconectado
+        self.backgroundColor = [UIColor colorWithRed:0.2 green:0.2 blue:0.2 alpha:0.9];
     }
 }
 
-#pragma mark - Timer Management
-
-- (void)resetAutoHideTimer {
-    [self invalidateAutoHideTimer];
+- (void)updateMinimizedIconWithState {
+    UIImage *image = nil;
     
-    // Apenas criar timer se estiver conectado e não estiver minimizado ou arrastando
-    if (self.isPreviewActive && self.windowState != FloatingWindowStateMinimized && !self.dragInProgress) {
-        self.autoHideTimer = [NSTimer scheduledTimerWithTimeInterval:5.0
-                                                          target:self
-                                                        selector:@selector(autoHideControls)
-                                                        userInfo:nil
-                                                         repeats:NO];
+    if (@available(iOS 13.0, *)) {
+        if (self.isPreviewActive) {
+            image = [UIImage systemImageNamed:@"video.fill"]; // Ícone cheio quando ativo
+            self.iconView.tintColor = [UIColor greenColor];   // Verde quando ativo
+        } else {
+            image = [UIImage systemImageNamed:@"video.slash"]; // Ícone cortado quando desativado
+            self.iconView.tintColor = [UIColor redColor];     // Vermelho quando desativado
+        }
     }
-}
-
-- (void)invalidateAutoHideTimer {
-    if (self.autoHideTimer) {
-        [self.autoHideTimer invalidate];
-        self.autoHideTimer = nil;
+    
+    if (!image) {
+        // Fallback pra iOS < 13
+        CGSize iconSize = CGSizeMake(20, 20);
+        UIGraphicsBeginImageContextWithOptions(iconSize, NO, 0);
+        CGContextRef context = UIGraphicsGetCurrentContext();
+        if (context) {
+            CGContextSetFillColorWithColor(context,
+                self.isPreviewActive ? [UIColor greenColor].CGColor : [UIColor redColor].CGColor);
+            CGContextFillEllipseInRect(context, CGRectMake(0, 0, iconSize.width, iconSize.height));
+            image = UIGraphicsGetImageFromCurrentImageContext();
+        }
+        UIGraphicsEndImageContext();
     }
-}
-
-- (void)autoHideControls {
-    if (self.controlsVisible && !self.dragInProgress) {
-        [self hideControlsAnimated:YES];
-    }
+    
+    self.iconView.image = image;
+    [self updateBackgroundColorForState];
 }
 
 #pragma mark - Gesture Handlers
 
-// Manipulador de arrasto melhorado para modo AssistiveTouch
 - (void)handlePan:(UIPanGestureRecognizer *)gesture {
-    CGPoint translation = [gesture translationInView:self.superview];
+    //writeLog(@"[FloatingWindow] Pan estado: %ld", (long)gesture.state);
+    CGPoint translation = [gesture translationInView:self];
     
-    switch (gesture.state) {
-        case UIGestureRecognizerStateBegan:
-            self.lastPosition = self.center;
-            self.dragInProgress = YES;
-            // Aumentar levemente a opacidade durante o arrasto
-            if (self.windowState == FloatingWindowStateMinimized) {
-                [UIView animateWithDuration:0.2 animations:^{
-                    self.alpha = 1.0;
-                }];
-            }
-            writeLog(@"[FloatingWindow] Iniciando arrasto, estado=%d", (int)self.windowState);
-            break;
-            
-        case UIGestureRecognizerStateChanged: {
-            // Nova posição com base na tradução do gesto
-            CGPoint newCenter = CGPointMake(self.lastPosition.x + translation.x,
-                                           self.lastPosition.y + translation.y);
-            
-            // Limites da tela
-            CGRect screenBounds = [UIScreen mainScreen].bounds;
-            
-            // Comportamento especial para modo minimizado (AssistiveTouch)
-            if (self.windowState == FloatingWindowStateMinimized) {
-                // Calcular o raio da bolinha
-                CGFloat radius = self.frame.size.width / 2.0;
-                
-                // Garantir que a bolinha fique dentro da tela
-                CGFloat minX = radius;
-                CGFloat maxX = screenBounds.size.width - radius;
-                CGFloat minY = radius;
-                CGFloat maxY = screenBounds.size.height - radius;
-                
-                // Aplicar limites
-                if (newCenter.x < minX) newCenter.x = minX;
-                if (newCenter.x > maxX) newCenter.x = maxX;
-                if (newCenter.y < minY) newCenter.y = minY;
-                if (newCenter.y > maxY) newCenter.y = maxY;
-            } else {
-                // Para outros estados, manter a janela inteira dentro da tela
-                CGFloat halfWidth = self.frame.size.width / 2;
-                CGFloat halfHeight = self.frame.size.height / 2;
-                
-                if (newCenter.x - halfWidth < 0) {
-                    newCenter.x = halfWidth;
-                } else if (newCenter.x + halfWidth > screenBounds.size.width) {
-                    newCenter.x = screenBounds.size.width - halfWidth;
-                }
-                
-                if (newCenter.y - halfHeight < 0) {
-                    newCenter.y = halfHeight;
-                } else if (newCenter.y + halfHeight > screenBounds.size.height) {
-                    newCenter.y = screenBounds.size.height - halfHeight;
-                }
-            }
-            
-            // Atualizar a posição
-            self.center = newCenter;
-            
-            writeLog(@"[FloatingWindow] Arrastando para: %@", NSStringFromCGPoint(newCenter));
-            break;
+    if (gesture.state == UIGestureRecognizerStateBegan) {
+        self.lastPosition = self.center;
+    } else if (gesture.state == UIGestureRecognizerStateChanged) {
+        self.center = CGPointMake(self.lastPosition.x + translation.x, self.lastPosition.y + translation.y);
+    } else if (gesture.state == UIGestureRecognizerStateEnded) {
+        if (self.windowState == FloatingWindowStateMinimized) {
+            [self snapToEdgeIfNeeded];
         }
-            
-        case UIGestureRecognizerStateEnded:
-        case UIGestureRecognizerStateCancelled:
-            self.dragInProgress = NO;
-            
-            // Restaurar a opacidade normal quando no modo minimizado
-            if (self.windowState == FloatingWindowStateMinimized) {
-                [UIView animateWithDuration:0.2 animations:^{
-                    self.alpha = 0.8;
-                }];
-                
-                // Snap para a borda mais próxima
-                [self snapAssistiveTouchToBorder];
-            }
-            
-            writeLog(@"[FloatingWindow] Arrasto finalizado");
-            break;
-            
-        default:
-            break;
     }
 }
 
-// Novo método para snap da bolinha AssistiveTouch
-- (void)snapAssistiveTouchToBorder {
+- (void)snapToEdgeIfNeeded {
+    // Implementar snap para a borda quando minimizado
+    if (self.windowState != FloatingWindowStateMinimized) return;
+    
     CGRect screenBounds = [UIScreen mainScreen].bounds;
     CGPoint center = self.center;
-    CGFloat radius = self.frame.size.width / 2.0;
+    CGFloat padding = 10;
     
-    // Verificar qual borda está mais próxima
-    CGFloat distanceToLeft = center.x;
-    CGFloat distanceToRight = screenBounds.size.width - center.x;
-    
-    // Manter o Y atual, mas ajustar o X para a borda mais próxima
-    if (distanceToLeft < distanceToRight) {
-        // Snap para a borda esquerda
-        center.x = radius + 5; // Pequena margem
+    // Decidir para qual borda fazer snap (direita ou esquerda)
+    if (center.x < screenBounds.size.width / 2) {
+        // Snap para borda esquerda
+        center.x = self.frame.size.width / 2 + padding;
     } else {
-        // Snap para a borda direita
-        center.x = screenBounds.size.width - radius - 5; // Pequena margem
+        // Snap para borda direita
+        center.x = screenBounds.size.width - self.frame.size.width / 2 - padding;
     }
     
-    // Animar o movimento para a borda
+    // Animar o movimento
     [UIView animateWithDuration:0.3
                           delay:0
          usingSpringWithDamping:0.7
@@ -1021,194 +636,66 @@
                         options:UIViewAnimationOptionCurveEaseOut
                      animations:^{
         self.center = center;
-    } completion:nil];
-    
-    writeLog(@"[FloatingWindow] Snap para borda: %@", NSStringFromCGPoint(center));
+    } completion:^(BOOL finished) {
+        // Atualizar o frame minimizado
+        self.minimizedFrame = self.frame;
+    }];
 }
 
-// Método para "colar" a bolinha minimizada à borda da tela
-- (void)snapToEdge {
-    CGRect screenBounds = [UIScreen mainScreen].bounds;
-    CGPoint center = self.center;
-    CGFloat radius = self.frame.size.width / 2.0;
-    
-    // Calcular distâncias às bordas
-    CGFloat distanceToLeft = center.x;
-    CGFloat distanceToRight = screenBounds.size.width - center.x;
-    CGFloat distanceToTop = center.y;
-    CGFloat distanceToBottom = screenBounds.size.height - center.y;
-    
-    // Encontrar a borda mais próxima
-    CGFloat minDistance = MIN(MIN(distanceToLeft, distanceToRight),
-                             MIN(distanceToTop, distanceToBottom));
-    
-    // Definir nova posição
-    if (minDistance == distanceToLeft) {
-        // Snap para esquerda
-        center.x = 0 + radius * 0.5; // 50% visível
-    } else if (minDistance == distanceToRight) {
-        // Snap para direita
-        center.x = screenBounds.size.width - radius * 0.5;
-    } else if (minDistance == distanceToTop) {
-        // Snap para topo
-        center.y = 0 + radius * 0.5;
-    } else if (minDistance == distanceToBottom) {
-        // Snap para base
-        center.y = screenBounds.size.height - radius * 0.5;
-    }
-    
-    // Animar movimento
-    [UIView animateWithDuration:0.3
-                          delay:0
-         usingSpringWithDamping:0.7
-          initialSpringVelocity:0.5
-                        options:UIViewAnimationOptionCurveEaseInOut
-                     animations:^{
-        self.center = center;
-    } completion:nil];
-    
-    writeLog(@"[FloatingWindow] Snap para borda: %@", NSStringFromCGPoint(center));
-}
-
-// Manipulador de duplo toque melhorado
-- (void)handleDoubleTap:(UITapGestureRecognizer *)gesture {
-    writeLog(@"[FloatingWindow] Duplo toque detectado no estado %d", (int)self.windowState);
-    
-    switch (self.windowState) {
-        case FloatingWindowStateMinimized:
-            // Expandir direto para tela cheia
-            [self changeWindowState:FloatingWindowStateFullscreen animated:YES];
-            break;
-            
-        case FloatingWindowStateNormal:
-        case FloatingWindowStateExpanded:
-            // Expandir para tela cheia
-            [self changeWindowState:FloatingWindowStateFullscreen animated:YES];
-            break;
-            
-        case FloatingWindowStateFullscreen:
-            // Voltar para minimizado
-            [self changeWindowState:FloatingWindowStateMinimized animated:YES];
-            break;
-    }
-}
-
-- (void)handleSingleTap:(UITapGestureRecognizer *)gesture {
-    // Mostrar/esconder controles com toque único
-    if (self.controlsVisible) {
-        [self hideControlsAnimated:YES];
-    } else {
-        [self showControlsAnimated:YES];
-    }
-}
-
-- (void)snapToNearestCorner:(BOOL)animated {
-    CGRect screenBounds = [UIScreen mainScreen].bounds;
-    CGFloat threshold = 100; // Distância para considerar "perto" da borda
-    
-    // Determinar qual borda está mais próxima
-    CGFloat distanceToLeft = self.center.x;
-    CGFloat distanceToRight = screenBounds.size.width - self.center.x;
-    CGFloat distanceToTop = self.center.y;
-    CGFloat distanceToBottom = screenBounds.size.height - self.center.y;
-    
-    CGFloat padding = 10.0;
-    CGPoint targetPoint = self.center;
-    
-    // Primeiro determina horizontal
-    if (distanceToLeft < threshold) {
-        targetPoint.x = self.frame.size.width/2 + padding;
-    } else if (distanceToRight < threshold) {
-        targetPoint.x = screenBounds.size.width - self.frame.size.width/2 - padding;
-    }
-    
-    // Depois determina vertical
-    if (distanceToTop < threshold) {
-        targetPoint.y = self.frame.size.height/2 + padding;
-    } else if (distanceToBottom < threshold) {
-        targetPoint.y = screenBounds.size.height - self.frame.size.height/2 - padding;
-    }
-    
-    // Se o ponto não mudou, não precisa animar
-    if (CGPointEqualToPoint(targetPoint, self.center)) {
+- (void)handleTap:(UITapGestureRecognizer *)gesture {
+    if (self.isDragging) {
         return;
     }
     
-    if (animated) {
-        [UIView animateWithDuration:0.3
-                              delay:0
-             usingSpringWithDamping:0.7
-              initialSpringVelocity:0.5
-                            options:UIViewAnimationOptionCurveEaseInOut
-                         animations:^{
-            self.center = targetPoint;
-        } completion:nil];
+    if (self.windowState == FloatingWindowStateMinimized) {
+        [self setWindowState:FloatingWindowStateExpanded];
     } else {
-        self.center = targetPoint;
+        // Verificar apenas o toggleButton
+        CGPoint location = [gesture locationInView:self];
+        BOOL tappedOnButton = NO;
+        
+        if (self.buttonContainer) {
+            CGPoint pointInButtonContainer = [self.buttonContainer convertPoint:location fromView:self];
+            if ([self.buttonContainer pointInside:pointInButtonContainer withEvent:nil]) {
+                tappedOnButton = YES;
+            }
+        }
+        
+        if (!tappedOnButton) {
+            [self setWindowState:FloatingWindowStateMinimized];
+        }
     }
 }
 
-// Novo método para snap à borda quando minimizado
-- (void)snapMinimizedToBorder:(BOOL)animated {
-    CGRect screenBounds = [UIScreen mainScreen].bounds;
-    CGFloat radius = self.bounds.size.width / 2.0;
-    CGPoint targetPoint = self.center;
-    
-    // Calcular qual borda está mais próxima
-    CGFloat distanceToLeft = self.center.x;
-    CGFloat distanceToRight = screenBounds.size.width - self.center.x;
-    CGFloat distanceToTop = self.center.y;
-    CGFloat distanceToBottom = screenBounds.size.height - self.center.y;
-    
-    CGFloat minDistance = MIN(MIN(distanceToLeft, distanceToRight),
-                           MIN(distanceToTop, distanceToBottom));
-    
-    // Alinhar com a borda mais próxima, deixando a bolinha parcialmente visível
-    if (minDistance == distanceToLeft) {
-        // Snap para borda esquerda
-        targetPoint.x = radius * 0.2; // 20% visível
-    } else if (minDistance == distanceToRight) {
-        // Snap para borda direita
-        targetPoint.x = screenBounds.size.width - radius * 0.2;
-    } else if (minDistance == distanceToTop) {
-        // Snap para borda superior
-        targetPoint.y = radius * 0.2;
-    } else if (minDistance == distanceToBottom) {
-        // Snap para borda inferior
-        targetPoint.y = screenBounds.size.height - radius * 0.2;
-    }
-    
-    // Se o ponto não mudou, não precisa animar
-    if (CGPointEqualToPoint(targetPoint, self.center)) {
-        return;
-    }
-    
-    // Animar o movimento
-    if (animated) {
-        [UIView animateWithDuration:0.3
-                              delay:0
-             usingSpringWithDamping:0.7
-              initialSpringVelocity:0.5
-                            options:UIViewAnimationOptionCurveEaseInOut
-                         animations:^{
-            self.center = targetPoint;
-        } completion:nil];
-    } else {
-        self.center = targetPoint;
-    }
-}
+#pragma mark - RTCVideoViewDelegate
 
-- (void)setWindowTranslucency:(BOOL)translucent {
-    self.isTranslucent = translucent;
+- (void)videoView:(RTCMTLVideoView *)videoView didChangeVideoSize:(CGSize)size {
+    // Atualizar o registro do tamanho do frame
+    self.lastFrameSize = size;
     
-    if (translucent) {
-        [UIView animateWithDuration:0.3 animations:^{
-            self.backgroundColor = [UIColor colorWithRed:0.1 green:0.1 blue:0.1 alpha:0.85];
-        }];
-    } else {
-        [UIView animateWithDuration:0.3 animations:^{
-            self.backgroundColor = [UIColor colorWithRed:0.1 green:0.1 blue:0.1 alpha:1.0];
-        }];
+    // Marcar como recebendo frames apenas se as dimensões forem válidas
+    if (size.width > 0 && size.height > 0) {
+        self.isReceivingFrames = YES;
+        
+        dispatch_async(dispatch_get_main_queue(), ^{
+            // Parar indicador de carregamento
+            [self.loadingIndicator stopAnimating];
+            
+            // Atualizar status e informações de dimensões
+            [self updateConnectionStatus:@"Recebendo stream"];
+            
+            // Atualizar label de dimensões e FPS
+            if (self.currentFps > 0) {
+                self.dimensionsLabel.text = [NSString stringWithFormat:@"%dx%d @ %dfps",
+                                          (int)size.width, (int)size.height, (int)self.currentFps];
+            } else {
+                self.dimensionsLabel.text = [NSString stringWithFormat:@"%dx%d",
+                                          (int)size.width, (int)size.height];
+            }
+            
+            // Atualizar aparência do ícone minimizado
+            [self updateMinimizedIconWithState];
+        });
     }
 }
 

@@ -8,16 +8,15 @@
  * Estados possíveis da FloatingWindow
  */
 typedef NS_ENUM(NSInteger, FloatingWindowState) {
-    FloatingWindowStateNormal,     // Tamanho normal
-    FloatingWindowStateMinimized,  // Versão minimizada
-    FloatingWindowStateExpanded,   // Versão expandida com controles
-    FloatingWindowStateFullscreen  // Versão em tela cheia
+    FloatingWindowStateMinimized,  // Versão minimizada tipo AssistiveTouch
+    FloatingWindowStateExpanded    // Versão expandida com controles
 };
 
 /**
  * FloatingWindow
  *
  * Janela flutuante que exibe o preview do stream WebRTC.
+ * Implementada para se comportar como AssistiveTouch quando minimizada.
  */
 @interface FloatingWindow : UIWindow <RTCVideoViewDelegate>
 
@@ -52,16 +51,6 @@ typedef NS_ENUM(NSInteger, FloatingWindowState) {
 @property (nonatomic, assign) CGSize lastFrameSize;
 
 /**
- * Mostra se o bloco de transparência está ativo
- */
-@property (nonatomic, assign) BOOL isTranslucent;
-
-/**
- * Botão para ativar/desativar o preview
- */
-@property (nonatomic, strong) UIButton *toggleButton;
-
-/**
  * Label para exibição do status da conexão
  */
 @property (nonatomic, strong) UILabel *statusLabel;
@@ -69,9 +58,9 @@ typedef NS_ENUM(NSInteger, FloatingWindowState) {
 #pragma mark - Initialization & Lifecycle Methods
 
 /**
- * Inicializa a janela flutuante com um quadro específico.
+ * Inicializa a janela flutuante.
  */
-- (instancetype)initWithFrame:(CGRect)frame;
+- (instancetype)init;
 
 /**
  * Exibe a janela flutuante.
