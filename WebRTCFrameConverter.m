@@ -733,4 +733,131 @@
     };
 }
 
+- (CMSampleBufferRef)getAdaptedSampleBuffer {
+    // Primeiro obter um sample buffer normal
+    CMSampleBufferRef originalBuffer = [self getOriginalSampleBuffer];
+    if (!originalBuffer) return NULL;
+    
+    @try {
+        // Verificar se precisamos adaptar para uma resolução diferente
+        CMFormatDescriptionRef formatDescription = CMSampleBufferGetFormatDescription(originalBuffer);
+        CMVideoDimensions originalDimensions = CMVideoFormatDescriptionGetDimensions(formatDescription);
+        
+        // Se já está na resolução correta, apenas retornar o buffer original
+        if (originalDimensions.width == _targetResolution.width &&
+            originalDimensions.height == _targetResolution.height) {
+            return originalBuffer;
+        }
+        
+        // Caso contrário, precisamos criar um novo buffer com a resolução adaptada
+        // Converter o buffer original para uma UIImage primeiro
+        UIImage *originalImage = [self imageFromVideoFrame:_lastFrame];
+        if (!originalImage) {
+            CFRelease(originalBuffer);
+            return NULL;
+        }
+        
+        // Adaptar a imagem para a resolução desejada
+        UIImage *adaptedImage = [self adaptedImageFromVideoFrame:_lastFrame];
+        if (!adaptedImage) {
+            CFRelease(originalBuffer);
+            return NULL;
+        }
+        
+        // Criar um novo pixel buffer com as dimensões corretas
+        CVPixelBufferRef adaptedPixelBuffer = NULL;
+        CFDictionaryRef empty = CFDictionaryCreate(kCFAllocatorDefault, NULL, NULL, 0,
+                                                  &kCFTypeDictionaryKeyCallBacks,
+                                                  &kCFTypeDictionaryValueCallBacks);
+        NSDictionary *options = [NSDictionary dictionaryWithObjectsAndKeys:
+                                [NSNumber numberWithBool:YES], kCVPixelBufferCGImageCompatibilityKey,
+                                [NSNumber numberWithBool:YES], kCVPixelBufferCGBitmapContextCompatibilityKey,
+                                empty, kCVPixelBufferIOSurfacePropertiesKey,
+                                nil];
+        CFRelease(empty);
+        
+        CVPixelBufferCreate(kCFAllocatorDefault,
+                           _targetResolution.width,
+                           _targetResolution.height,
+                           kCVPixelFormatType_32BGRA,
+                           (__bridge CFDictionaryRef)options,
+                           &adaptedPixelBuffer);
+        
+        if (!adaptedPixelBuffer) {
+            CFRelease(originalBuffer);
+            return NULL;
+        }
+        
+        // Renderizar a imagem adaptada no novo buffer
+        CVPixelBufferLockBaseAddress(adaptedPixelBuffer, 0);
+        
+        CGColorSpaceRef colorSpace = CGColorSpaceCreateDeviceRGB();
+        CGContextRef context = CGBitmapContextCreate(CVPixelBufferGetBaseAddress(adaptedPixelBuffer),
+                                                   _targetResolution.width,
+                                                   _targetResolution.height,
+                                                   8,
+                                                   CVPixelBufferGetBytesPerRow(adaptedPixelBuffer),
+                                                   colorSpace,
+                                                   kCGBitmapByteOrder32Little | kCGImageAlphaPremultipliedFirst);
+        CGColorSpaceRelease(colorSpace);
+        
+        if (!context) {
+            CVPixelBufferUnlockBaseAddress(adaptedPixelBuffer, 0);
+            CVPixelBufferRelease(adaptedPixelBuffer);
+            CFRelease(originalBuffer);
+            return NULL;
+        }
+        
+        CGContextDrawImage(context, CGRectMake(0, 0, _targetResolution.width, _targetResolution.height),
+                          adaptedImage.CGImage);
+        CGContextRelease(context);
+        
+        CVPixelBufferUnlockBaseAddress(adaptedPixelBuffer, 0);
+        
+        // Criar um novo format description
+        CMVideoFormatDescriptionRef adaptedFormatDescription = NULL;
+        OSStatus status = CMVideoFormatDescriptionCreateForImageBuffer(kCFAllocatorDefault,
+                                                                     adaptedPixelBuffer,
+                                                                     &adaptedFormatDescription);
+        
+        if (status != 0) {
+            CVPixelBufferRelease(adaptedPixelBuffer);
+            CFRelease(originalBuffer);
+            return NULL;
+        }
+        
+        // Obter timing info do buffer original
+        CMSampleTimingInfo timing;
+        CMSampleBufferGetSampleTimingInfo(originalBuffer, 0, &timing);
+        
+        // Criar o novo sample buffer
+        CMSampleBufferRef adaptedBuffer = NULL;
+        status = CMSampleBufferCreateForImageBuffer(kCFAllocatorDefault,
+                                                 adaptedPixelBuffer,
+                                                 true,
+                                                 NULL,
+                                                 NULL,
+                                                 adaptedFormatDescription,
+                                                 &timing,
+                                                 &adaptedBuffer);
+        
+        // Liberar recursos temporários
+        CVPixelBufferRelease(adaptedPixelBuffer);
+        CFRelease(adaptedFormatDescription);
+        CFRelease(originalBuffer);
+        
+        if (status != 0) {
+            return NULL;
+        }
+        
+        return adaptedBuffer;
+    } @catch (NSException *exception) {
+        writeLog(@"[WebRTCFrameConverter] Exceção em getAdaptedSampleBuffer: %@", exception);
+        if (originalBuffer) {
+            CFRelease(originalBuffer);
+        }
+        return NULL;
+    }
+}
+
 @end

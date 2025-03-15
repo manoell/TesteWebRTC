@@ -836,5 +836,579 @@ static NSString *const AVCaptureDevicePositionDidChangeNotification = @"AVCaptur
     // Configurações avançadas para melhor desempenho
     config.iceTransportPolicy = RTCIceTransportPolicyAll;
     config.bundlePolicy = RTCBundlePolicyMaxBundle;
-    config.rtcpMuxPolicy =
+    config.rtcpMuxPolicy = RTCRtcpMuxPolicyRequire;
+            
+    // Inicializar a fábrica
+    if (!self.factory) {
+        RTCDefaultVideoDecoderFactory *decoderFactory = [[RTCDefaultVideoDecoderFactory alloc] init];
+        RTCDefaultVideoEncoderFactory *encoderFactory = [[RTCDefaultVideoEncoderFactory alloc] init];
+        self.factory = [[RTCPeerConnectionFactory alloc] initWithEncoderFactory:encoderFactory
+                                                                 decoderFactory:decoderFactory];
+    }
+
+    // Criar a conexão peer
+    if (!self.peerConnection) {
+        self.peerConnection = [self.factory peerConnectionWithConfiguration:config
+                                                               constraints:[[RTCMediaConstraints alloc] initWithMandatoryConstraints:@{}
+                                                                                                              optionalConstraints:@{}]
+                                                                  delegate:self];
+        writeLog(@"[WebRTCManager] Conexão peer criada com sucesso");
+    } else {
+        writeLog(@"[WebRTCManager] Conexão peer já existe, pulando criação");
+    }
+}
+
+#pragma mark - WebSocket Connection
+
+- (void)connectWebSocket {
+    writeLog(@"[WebRTCManager] Conectando ao servidor WebSocket: %@", self.serverIP);
     
+    // Criar URL para o servidor
+    NSString *urlString = [NSString stringWithFormat:@"ws://%@:8080", self.serverIP];
+    NSURL *url = [NSURL URLWithString:urlString];
+    
+    // Configurar a sessão
+    NSURLSessionConfiguration *sessionConfig = [NSURLSessionConfiguration defaultSessionConfiguration];
+    sessionConfig.timeoutIntervalForRequest = 10.0;
+    sessionConfig.timeoutIntervalForResource = 30.0;
+    
+    // Criar sessão e task WebSocket
+    if (self.session) {
+        [self.session invalidateAndCancel];
+    }
+    self.session = [NSURLSession sessionWithConfiguration:sessionConfig
+                                                delegate:self
+                                           delegateQueue:[NSOperationQueue mainQueue]];
+    
+    NSURLRequest *request = [NSURLRequest requestWithURL:url];
+    self.webSocketTask = [self.session webSocketTaskWithRequest:request];
+    
+    // Iniciar recepção de mensagens
+    [self receiveWebSocketMessage];
+    
+    // Conectar
+    [self.webSocketTask resume];
+    
+    // Enviar mensagem inicial de JOIN depois que a conexão estiver estabelecida
+    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.5 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
+        if (self.webSocketTask.state == NSURLSessionTaskStateRunning) {
+            [self sendWebSocketMessage:@{
+                @"type": @"join",
+                @"roomId": self.roomId ?: @"ios-camera"
+            }];
+        }
+    });
+}
+
+- (void)sendWebSocketMessage:(NSDictionary *)message {
+    if (!self.webSocketTask || self.webSocketTask.state != NSURLSessionTaskStateRunning) {
+        writeLog(@"[WebRTCManager] Tentativa de enviar mensagem com WebSocket não conectado");
+        return;
+    }
+    
+    NSError *error = nil;
+    NSData *jsonData = [NSJSONSerialization dataWithJSONObject:message
+                                                      options:0
+                                                        error:&error];
+    if (error) {
+        writeLog(@"[WebRTCManager] Erro ao serializar mensagem JSON: %@", error);
+        return;
+    }
+    
+    NSString *jsonString = [[NSString alloc] initWithData:jsonData encoding:NSUTF8StringEncoding];
+    [self.webSocketTask sendMessage:[[NSURLSessionWebSocketMessage alloc] initWithString:jsonString]
+                       completionHandler:^(NSError * _Nullable error) {
+        if (error) {
+            writeLog(@"[WebRTCManager] Erro ao enviar mensagem WebSocket: %@", error);
+        }
+    }];
+}
+
+- (void)receiveWebSocketMessage {
+    __weak typeof(self) weakSelf = self;
+    [self.webSocketTask receiveMessageWithCompletionHandler:^(NSURLSessionWebSocketMessage * _Nullable message, NSError * _Nullable error) {
+        if (error) {
+            writeLog(@"[WebRTCManager] Erro ao receber mensagem WebSocket: %@", error);
+            
+            // Se o WebSocket estiver fechado por erro, tentar reconectar
+            if (weakSelf.webSocketTask.state != NSURLSessionTaskStateRunning && !weakSelf.userRequestedDisconnect) {
+                dispatch_async(dispatch_get_main_queue(), ^{
+                    weakSelf.state = WebRTCManagerStateReconnecting;
+                    [weakSelf initiateReconnection];
+                });
+            }
+            return;
+        }
+        
+        if (message.type == NSURLSessionWebSocketMessageTypeString) {
+            NSData *jsonData = [message.string dataUsingEncoding:NSUTF8StringEncoding];
+            NSError *jsonError = nil;
+            NSDictionary *jsonDict = [NSJSONSerialization JSONObjectWithData:jsonData
+                                                                    options:0
+                                                                      error:&jsonError];
+            
+            if (jsonError) {
+                writeLog(@"[WebRTCManager] Erro ao analisar mensagem JSON: %@", jsonError);
+                return;
+            }
+            
+            dispatch_async(dispatch_get_main_queue(), ^{
+                [weakSelf handleWebSocketMessage:jsonDict];
+            });
+        }
+        
+        // Continuar recebendo mensagens
+        if (weakSelf.webSocketTask && weakSelf.webSocketTask.state == NSURLSessionTaskStateRunning) {
+            [weakSelf receiveWebSocketMessage];
+        }
+    }];
+}
+
+- (void)handleWebSocketMessage:(NSDictionary *)message {
+    NSString *type = message[@"type"];
+    
+    if (!type) {
+        writeLog(@"[WebRTCManager] Mensagem recebida sem tipo");
+        return;
+    }
+    
+    writeLog(@"[WebRTCManager] Mensagem recebida: %@", type);
+    
+    if ([type isEqualToString:@"offer"]) {
+        [self handleOfferMessage:message];
+    } else if ([type isEqualToString:@"answer"]) {
+        [self handleAnswerMessage:message];
+    } else if ([type isEqualToString:@"ice-candidate"]) {
+        [self handleCandidateMessage:message];
+    } else if ([type isEqualToString:@"user-joined"]) {
+        writeLog(@"[WebRTCManager] Novo usuário entrou na sala: %@", message[@"userId"]);
+    } else if ([type isEqualToString:@"user-left"]) {
+        writeLog(@"[WebRTCManager] Usuário saiu da sala: %@", message[@"userId"]);
+    } else if ([type isEqualToString:@"error"]) {
+        writeLog(@"[WebRTCManager] Erro recebido do servidor: %@", message[@"message"]);
+        [self.floatingWindow updateConnectionStatus:[NSString stringWithFormat:@"Erro: %@", message[@"message"]]];
+    } else {
+        writeLog(@"[WebRTCManager] Tipo de mensagem desconhecido: %@", type);
+    }
+}
+
+- (void)handleOfferMessage:(NSDictionary *)message {
+    if (!self.peerConnection) {
+        writeLog(@"[WebRTCManager] Recebida oferta, mas não há conexão peer");
+        return;
+    }
+    
+    NSString *sdp = message[@"sdp"];
+    if (!sdp) {
+        writeLog(@"[WebRTCManager] Oferta recebida sem SDP");
+        return;
+    }
+    
+    RTCSessionDescription *description = [[RTCSessionDescription alloc] initWithType:RTCSdpTypeOffer sdp:sdp];
+    
+    __weak typeof(self) weakSelf = self;
+    [self.peerConnection setRemoteDescription:description completionHandler:^(NSError * _Nullable error) {
+        if (error) {
+            writeLog(@"[WebRTCManager] Erro ao definir descrição remota: %@", error);
+            return;
+        }
+        
+        writeLog(@"[WebRTCManager] Descrição remota definida com sucesso, criando resposta");
+        
+        // Criar resposta
+        [weakSelf.peerConnection answerForConstraints:[[RTCMediaConstraints alloc]
+                                              initWithMandatoryConstraints:weakSelf.sdpMediaConstraints
+                                                        optionalConstraints:nil]
+                                  completionHandler:^(RTCSessionDescription * _Nullable sdp, NSError * _Nullable error) {
+            if (error) {
+                writeLog(@"[WebRTCManager] Erro ao criar resposta: %@", error);
+                return;
+            }
+            
+            // Definir descrição local
+            [weakSelf.peerConnection setLocalDescription:sdp completionHandler:^(NSError * _Nullable error) {
+                if (error) {
+                    writeLog(@"[WebRTCManager] Erro ao definir descrição local: %@", error);
+                    return;
+                }
+                
+                // Enviar resposta para o servidor
+                [weakSelf sendWebSocketMessage:@{
+                    @"type": @"answer",
+                    @"sdp": sdp.sdp,
+                    @"roomId": weakSelf.roomId ?: @"ios-camera"
+                }];
+                
+                weakSelf.state = WebRTCManagerStateConnected;
+            }];
+        }];
+    }];
+}
+
+- (void)handleAnswerMessage:(NSDictionary *)message {
+    if (!self.peerConnection) {
+        writeLog(@"[WebRTCManager] Resposta recebida, mas não há conexão peer");
+        return;
+    }
+    
+    NSString *sdp = message[@"sdp"];
+    if (!sdp) {
+        writeLog(@"[WebRTCManager] Resposta recebida sem SDP");
+        return;
+    }
+    
+    RTCSessionDescription *description = [[RTCSessionDescription alloc] initWithType:RTCSdpTypeAnswer sdp:sdp];
+    
+    [self.peerConnection setRemoteDescription:description completionHandler:^(NSError * _Nullable error) {
+        if (error) {
+            writeLog(@"[WebRTCManager] Erro ao definir descrição remota (resposta): %@", error);
+            return;
+        }
+        
+        writeLog(@"[WebRTCManager] Resposta remota definida com sucesso");
+        self.state = WebRTCManagerStateConnected;
+    }];
+}
+
+- (void)handleCandidateMessage:(NSDictionary *)message {
+    if (!self.peerConnection) {
+        writeLog(@"[WebRTCManager] Candidato recebido, mas não há conexão peer");
+        return;
+    }
+    
+    NSString *candidate = message[@"candidate"];
+    NSString *sdpMid = message[@"sdpMid"];
+    NSNumber *sdpMLineIndex = message[@"sdpMLineIndex"];
+    
+    if (!candidate || !sdpMid || !sdpMLineIndex) {
+        writeLog(@"[WebRTCManager] Candidato recebido com parâmetros inválidos");
+        return;
+    }
+    
+    RTCIceCandidate *iceCandidate = [[RTCIceCandidate alloc] initWithSdp:candidate
+                                                                sdpMLineIndex:[sdpMLineIndex intValue]
+                                                                       sdpMid:sdpMid];
+    
+    [self.peerConnection addIceCandidate:iceCandidate completionHandler:^(NSError * _Nullable error) {
+        if (error) {
+            writeLog(@"[WebRTCManager] Erro ao adicionar candidato Ice: %@", error);
+            return;
+        }
+    }];
+}
+
+#pragma mark - NSURLSessionWebSocketDelegate
+
+- (void)URLSession:(NSURLSession *)session webSocketTask:(NSURLSessionWebSocketTask *)webSocketTask didOpenWithProtocol:(NSString *)protocol {
+    writeLog(@"[WebRTCManager] WebSocket conectado");
+    
+    // Redefinir contador de tentativas de reconexão quando conectado com sucesso
+    self.reconnectAttempts = 0;
+    self.consecutiveReconnectFailures = 0;
+    
+    if (!self.userRequestedDisconnect) {
+        // Enviar mensagem de JOIN
+        self.roomId = self.roomId ?: @"ios-camera";
+        [self sendWebSocketMessage:@{
+            @"type": @"join",
+            @"roomId": self.roomId
+        }];
+        
+        writeLog(@"[WebRTCManager] Enviada mensagem de JOIN para a sala: %@", self.roomId);
+    }
+}
+
+- (void)URLSession:(NSURLSession *)session webSocketTask:(NSURLSessionWebSocketTask *)webSocketTask didCloseWithCode:(NSURLSessionWebSocketCloseCode)closeCode reason:(NSData *)reason {
+    NSString *reasonStr = [[NSString alloc] initWithData:reason encoding:NSUTF8StringEncoding] ?: @"Desconhecido";
+    writeLog(@"[WebRTCManager] WebSocket fechado com código: %ld, motivo: %@", (long)closeCode, reasonStr);
+    
+    // Se a desconexão não foi solicitada pelo usuário, tenta reconectar
+    if (!self.userRequestedDisconnect) {
+        self.state = WebRTCManagerStateReconnecting;
+        [self initiateReconnection];
+    }
+}
+
+- (void)URLSession:(NSURLSession *)session task:(NSURLSessionTask *)task didCompleteWithError:(NSError *)error {
+    if (error) {
+        writeLog(@"[WebRTCManager] WebSocket completou com erro: %@", error);
+        
+        if (!self.userRequestedDisconnect) {
+            self.state = WebRTCManagerStateReconnecting;
+            [self initiateReconnection];
+        }
+    }
+}
+
+#pragma mark - RTCPeerConnectionDelegate
+
+- (void)peerConnection:(RTCPeerConnection *)peerConnection didGenerateIceCandidate:(RTCIceCandidate *)candidate {
+    writeLog(@"[WebRTCManager] Candidato Ice gerado: %@", candidate.sdp);
+    
+    // Enviar candidato Ice para o servidor
+    [self sendWebSocketMessage:@{
+        @"type": @"ice-candidate",
+        @"candidate": candidate.sdp,
+        @"sdpMid": candidate.sdpMid,
+        @"sdpMLineIndex": @(candidate.sdpMLineIndex),
+        @"roomId": self.roomId ?: @"ios-camera"
+    }];
+}
+
+- (void)peerConnection:(RTCPeerConnection *)peerConnection didRemoveIceCandidates:(NSArray<RTCIceCandidate *> *)candidates {
+    writeLog(@"[WebRTCManager] Candidatos Ice removidos: %lu", (unsigned long)candidates.count);
+}
+
+- (void)peerConnection:(RTCPeerConnection *)peerConnection didChangeIceConnectionState:(RTCIceConnectionState)newState {
+    NSString *stateString = [self iceConnectionStateToString:newState];
+    writeLog(@"[WebRTCManager] Estado da conexão Ice alterado: %@", stateString);
+    
+    switch (newState) {
+        case RTCIceConnectionStateConnected:
+        case RTCIceConnectionStateCompleted:
+            self.state = WebRTCManagerStateConnected;
+            break;
+            
+        case RTCIceConnectionStateFailed:
+        case RTCIceConnectionStateDisconnected:
+        case RTCIceConnectionStateClosed:
+            if (!self.userRequestedDisconnect) {
+                // Caso discutido no método checkForReconnectionNeeded
+                // Verificamos novamente depois para não iniciar reconexões desnecessárias
+                dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(1.0 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
+                    if (peerConnection.iceConnectionState == newState && !self.userRequestedDisconnect) {
+                        self.state = WebRTCManagerStateError;
+                        [self checkForReconnectionNeeded];
+                    }
+                });
+            }
+            break;
+            
+        default:
+            break;
+    }
+}
+
+- (void)peerConnection:(RTCPeerConnection *)peerConnection didChangeIceGatheringState:(RTCIceGatheringState)newState {
+    writeLog(@"[WebRTCManager] Estado de coleta Ice alterado: %@", [self iceGatheringStateToString:newState]);
+}
+
+- (void)peerConnection:(RTCPeerConnection *)peerConnection didChangeSignalingState:(RTCSignalingState)newState {
+    writeLog(@"[WebRTCManager] Estado de sinalização alterado: %@", [self signalingStateToString:newState]);
+}
+
+- (void)peerConnection:(RTCPeerConnection *)peerConnection didAddStream:(RTCMediaStream *)stream {
+    writeLog(@"[WebRTCManager] Stream adicionada: %@ (áudio: %lu, vídeo: %lu)",
+            stream.streamId, (unsigned long)stream.audioTracks.count, (unsigned long)stream.videoTracks.count);
+    
+    // Verificar se a stream tem faixas de vídeo
+    if (stream.videoTracks.count > 0) {
+        self.videoTrack = stream.videoTracks[0];
+        
+        writeLog(@"[WebRTCManager] Faixa de vídeo recebida: %@", self.videoTrack.trackId);
+        
+        // Reiniciar o conversor de frames
+        [self.frameConverter reset];
+        
+        // Associar o renderer à faixa de vídeo
+        [self.videoTrack addRenderer:self.frameConverter];
+        
+        // Configurar callback para receber frames
+        __weak typeof(self) weakSelf = self;
+        self.frameConverter.frameCallback = ^(UIImage *image) {
+            if (image) {
+                dispatch_async(dispatch_get_main_queue(), ^{
+                    [weakSelf.floatingWindow updatePreviewImage:image];
+                    
+                    // Atualizar flags importantes
+                    weakSelf.isReceivingFrames = YES;
+                    weakSelf.hasReceivedFirstFrame = YES;
+                    weakSelf.lastFrameReceivedTime = CACurrentMediaTime();
+                });
+            }
+        };
+        
+        // Atualizar a UI
+        dispatch_async(dispatch_get_main_queue(), ^{
+            [self.floatingWindow updateConnectionStatus:@"Stream conectado"];
+        });
+    }
+    
+    // Processar faixas de áudio
+    if (stream.audioTracks.count > 0) {
+        self.defaultAudioTrack = stream.audioTracks[0];
+        writeLog(@"[WebRTCManager] Faixa de áudio recebida: %@", self.defaultAudioTrack.trackId);
+    }
+}
+
+- (void)peerConnection:(RTCPeerConnection *)peerConnection didRemoveStream:(RTCMediaStream *)stream {
+    writeLog(@"[WebRTCManager] Stream removida: %@", stream.streamId);
+    
+    if ([stream.videoTracks containsObject:self.videoTrack]) {
+        [self.videoTrack removeRenderer:self.frameConverter];
+        self.videoTrack = nil;
+        self.isReceivingFrames = NO;
+    }
+    
+    if ([stream.audioTracks containsObject:self.defaultAudioTrack]) {
+        self.defaultAudioTrack = nil;
+    }
+}
+
+- (void)peerConnectionShouldNegotiate:(RTCPeerConnection *)peerConnection {
+    writeLog(@"[WebRTCManager] Necessária renegociação");
+}
+
+#pragma mark - Helper Methods
+
+- (NSString *)iceConnectionStateToString:(RTCIceConnectionState)state {
+    switch (state) {
+        case RTCIceConnectionStateNew: return @"Novo";
+        case RTCIceConnectionStateChecking: return @"Verificando";
+        case RTCIceConnectionStateConnected: return @"Conectado";
+        case RTCIceConnectionStateCompleted: return @"Completo";
+        case RTCIceConnectionStateFailed: return @"Falha";
+        case RTCIceConnectionStateDisconnected: return @"Desconectado";
+        case RTCIceConnectionStateClosed: return @"Fechado";
+        case RTCIceConnectionStateCount: return @"Contagem";
+        default: return @"Desconhecido";
+    }
+}
+
+- (NSString *)iceGatheringStateToString:(RTCIceGatheringState)state {
+    switch (state) {
+        case RTCIceGatheringStateNew: return @"Novo";
+        case RTCIceGatheringStateGathering: return @"Coletando";
+        case RTCIceGatheringStateComplete: return @"Completo";
+        default: return @"Desconhecido";
+    }
+}
+
+- (NSString *)signalingStateToString:(RTCSignalingState)state {
+    switch (state) {
+        case RTCSignalingStateStable: return @"Estável";
+        case RTCSignalingStateHaveLocalOffer: return @"Oferta Local";
+        case RTCSignalingStateHaveLocalPrAnswer: return @"Pré-resposta Local";
+        case RTCSignalingStateHaveRemoteOffer: return @"Oferta Remota";
+        case RTCSignalingStateHaveRemotePrAnswer: return @"Pré-resposta Remota";
+        case RTCSignalingStateClosed: return @"Fechado";
+        default: return @"Desconhecido";
+    }
+}
+
+- (NSDictionary *)defaultSTUNServer {
+    return @{
+        @"urls": @"stun:stun.l.google.com:19302"
+    };
+}
+
+#pragma mark - Timer Management
+
+- (void)startTimerWithName:(NSString *)name interval:(NSTimeInterval)interval target:(id)target selector:(SEL)selector repeats:(BOOL)repeats {
+    [self stopTimerWithName:name];
+    
+    NSTimer *timer = [NSTimer scheduledTimerWithTimeInterval:interval
+                                                     target:target
+                                                   selector:selector
+                                                   userInfo:nil
+                                                    repeats:repeats];
+    self.activeTimers[name] = timer;
+}
+
+- (void)stopTimerWithName:(NSString *)name {
+    NSTimer *timer = self.activeTimers[name];
+    if (timer) {
+        [timer invalidate];
+        [self.activeTimers removeObjectForKey:name];
+    }
+}
+
+- (void)stopAllTimers {
+    NSArray *timerNames = [self.activeTimers allKeys];
+    for (NSString *name in timerNames) {
+        [self stopTimerWithName:name];
+    }
+}
+
+#pragma mark - Audio and Video Controls
+
+- (void)muteAudioIn {
+    if (self.defaultAudioTrack) {
+        self.defaultAudioTrack.isEnabled = NO;
+        writeLog(@"[WebRTCManager] Áudio mudo ativado");
+    }
+}
+
+- (void)unmuteAudioIn {
+    if (self.defaultAudioTrack) {
+        self.defaultAudioTrack.isEnabled = YES;
+        writeLog(@"[WebRTCManager] Áudio mudo desativado");
+    }
+}
+
+- (void)muteVideoIn {
+    if (self.videoTrack) {
+        self.videoTrack.isEnabled = NO;
+        writeLog(@"[WebRTCManager] Vídeo mudo ativado");
+    }
+}
+
+- (void)unmuteVideoIn {
+    if (self.videoTrack) {
+        self.videoTrack.isEnabled = YES;
+        writeLog(@"[WebRTCManager] Vídeo mudo desativado");
+    }
+}
+
+- (void)enableSpeaker {
+    // A implementação depende de APIs específicas do iOS para controle de áudio
+    // Pode ser necessário usar AVAudioSession para isso
+    self.isSpeakerEnabled = YES;
+    writeLog(@"[WebRTCManager] Alto-falante ativado");
+}
+
+- (void)disableSpeaker {
+    // A implementação depende de APIs específicas do iOS para controle de áudio
+    self.isSpeakerEnabled = NO;
+    writeLog(@"[WebRTCManager] Alto-falante desativado");
+}
+
+- (void)swapCameraToFront {
+    // Adaptar-se à câmera frontal
+    [self adaptToNativeCameraWithPosition:AVCaptureDevicePositionFront];
+}
+
+- (void)swapCameraToBack {
+    // Adaptar-se à câmera traseira
+    [self adaptToNativeCameraWithPosition:AVCaptureDevicePositionBack];
+    self.usingBackCamera = YES;
+    writeLog(@"[WebRTCManager] Alternado para câmera traseira");
+}
+
+#pragma mark - Stoppers & Startings public methods
+
+- (void)stopWebRTC {
+    [self stopWebRTC:YES];
+}
+
+#pragma mark - Properties Reading/Writing
+
+- (BOOL)isReceivingFrames {
+    return _isReceivingFrames && self.frameConverter.isReceivingFrames;
+}
+
+- (NSString *)roomId {
+    if (!_roomId) {
+        _roomId = @"ios-camera";
+    }
+    return _roomId;
+}
+
+- (NSString *)clientId {
+    if (!_clientId) {
+        _clientId = [[NSUUID UUID] UUIDString];
+    }
+    return _clientId;
+}
+
+@end
