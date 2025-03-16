@@ -1,6 +1,6 @@
 /**
  * Servidor WebRTC otimizado para transmissão em alta qualidade 4K/60fps
- * Com foco específico em compatibilidade com formatos iOS
+ * Com foco específico em compatibilidade com formatos iOS e estabilidade de conexão
  */
 
 const express = require('express');
@@ -11,13 +11,15 @@ const path = require('path');
 const { v4: uuidv4 } = require('uuid');
 const fs = require('fs');
 const os = require('os');
+const crypto = require('crypto');
 
 // Configurações
 const PORT = process.env.PORT || 8080;
 const LOGGING_ENABLED = true;
 const LOG_FILE = './server.log';
 const MAX_CONNECTIONS = 10; // Limitado a transmissor + receptor
-const KEEP_ALIVE_INTERVAL = 5000; // 5 segundo para detecção rápida de desconexões
+const KEEP_ALIVE_INTERVAL = 2000; // 2 segundos para detecção rápida de desconexões
+const DEAD_CONNECTION_TIMEOUT = 30000; // 30 segundos para timeout de conexão
 
 // Parâmetros de qualidade adaptativos
 const QUALITY_PRESETS = {
@@ -84,7 +86,24 @@ const server = http.createServer(app);
 const wss = new WebSocket.Server({ 
     server,
     // Aumentar o tamanho máximo dos payloads para suportar vídeo 4K
-    maxPayload: 64 * 1024 * 1024 // 64MB
+    maxPayload: 64 * 1024 * 1024, // 64MB
+    // Configurar timeout mais generoso para WebSockets
+    clientTracking: true,
+    perMessageDeflate: {
+        zlibDeflateOptions: {
+            chunkSize: 1024,
+            memLevel: 7,
+            level: 3
+        },
+        zlibInflateOptions: {
+            chunkSize: 10 * 1024
+        },
+        // Apenas compactar mensagens maiores que 10KB
+        threshold: 10 * 1024,
+        // Não desabilitar contexto entre mensagens
+        serverNoContextTakeover: false, 
+        clientNoContextTakeover: false
+    }
 });
 
 // Armazenar conexões
@@ -95,6 +114,8 @@ const clients = new Map();
 const lastPingSent = new Map(); // Mapear clientes para tempo do último ping
 const lastPongReceived = new Map(); // Mapear clientes para tempo do último pong
 const clientDeviceTypes = new Map(); // Armazenar tipo de dispositivo do cliente (iOS, web, etc)
+const deviceIdMapping = new Map(); // Mapear deviceId -> clientId para reconhecimento de dispositivos
+const clientReconnectCounts = new Map(); // Contar reconexões por cliente
 
 /**
  * Função para logging com timestamp
@@ -133,6 +154,144 @@ const log = (message, consoleOnly = false, isError = false) => {
 };
 
 /**
+ * Gera um fingerprint consistente para o mesmo dispositivo
+ * @param {WebSocket} ws - Conexão WebSocket
+ * @param {Object} request - Objeto de requisição HTTP
+ * @param {string} deviceId - ID fornecido pelo dispositivo (opcional)
+ * @returns {string} - Fingerprint do dispositivo
+ */
+function generateDeviceFingerprint(ws, request, deviceId) {
+    const userAgent = request.headers['user-agent'] || '';
+    const ip = request.socket.remoteAddress || '';
+    const forwarded = request.headers['x-forwarded-for'] || '';
+    
+    // Se temos um deviceId, usá-lo como parte principal do fingerprint
+    if (deviceId) {
+        return crypto.createHash('md5').update(`${deviceId}-${ip}`).digest('hex');
+    }
+    
+    // Se não, usar combinação de IP e User-Agent
+    return crypto.createHash('md5').update(`${userAgent}-${ip}-${forwarded}`).digest('hex');
+}
+
+/**
+ * Encontra um cliente existente pelo fingerprint ou deviceId
+ * @param {string} fingerprint - Fingerprint do dispositivo
+ * @param {string} deviceId - ID do dispositivo (opcional)
+ * @param {string} roomId - ID da sala (opcional)
+ * @returns {WebSocket} - Cliente encontrado ou null
+ */
+function findExistingClient(fingerprint, deviceId, roomId) {
+    // Verificar primeiro pelo deviceId, que é mais confiável
+    if (deviceId && deviceIdMapping.has(deviceId)) {
+        const clientId = deviceIdMapping.get(deviceId);
+        if (clients.has(clientId)) {
+            return clients.get(clientId);
+        }
+    }
+
+    // Se não encontrar por deviceId, procurar pelo fingerprint
+    for (const [id, client] of clients.entries()) {
+        if (client.deviceFingerprint === fingerprint) {
+            // Se roomId for fornecido, verificar se o cliente está na sala
+            if (roomId && rooms[roomId] && rooms[roomId].includes(client)) {
+                return client;
+            } else if (!roomId) {
+                return client;
+            }
+        }
+    }
+    
+    return null;
+}
+
+/**
+ * Remove clientes antigos do mesmo dispositivo
+ * @param {string} fingerprint - Fingerprint do dispositivo
+ * @param {string} deviceId - ID do dispositivo (opcional)
+ * @param {WebSocket} newClient - Novo cliente que substituirá os antigos
+ * @param {string} roomId - ID da sala (opcional)
+ * @returns {number} - Número de clientes removidos
+ */
+function removeOldClients(fingerprint, deviceId, newClient, roomId) {
+    let removedCount = 0;
+    
+    // Limpar mapeamento antigo de deviceId
+    if (deviceId) {
+        deviceIdMapping.set(deviceId, newClient.id);
+    }
+    
+    // Função para realmente remover o cliente
+    const removeClient = (client) => {
+        // Remover da sala específica
+        if (roomId && rooms[roomId]) {
+            const index = rooms[roomId].indexOf(client);
+            if (index !== -1) {
+                rooms[roomId].splice(index, 1);
+            }
+        }
+        
+        // Remover dos mapas de tracking
+        clients.delete(client.id);
+        lastPingSent.delete(client.id);
+        lastPongReceived.delete(client.id);
+        clientDeviceTypes.delete(client.id);
+        
+        // Notificar outros clientes na sala
+        if (roomId && rooms[roomId]) {
+            rooms[roomId].forEach(otherClient => {
+                if (otherClient !== newClient && otherClient.readyState === WebSocket.OPEN) {
+                    try {
+                        otherClient.send(JSON.stringify({
+                            type: 'user-left',
+                            userId: client.id,
+                            reason: 'reconnected'
+                        }));
+                    } catch (e) {
+                        log(`Erro ao notificar saída do cliente ${client.id}: ${e.message}`, false, true);
+                    }
+                }
+            });
+        }
+        
+        // Terminar a conexão
+        try {
+            client.terminate();
+            removedCount++;
+            log(`Cliente antigo removido: ${client.id} (deviceId: ${client.deviceId || 'N/A'})`);
+        } catch (e) {
+            log(`Erro ao terminar cliente antigo ${client.id}: ${e.message}`, false, true);
+        }
+    };
+    
+    // Verificar primeiro pelo deviceId
+    if (deviceId) {
+        for (const [id, client] of clients.entries()) {
+            // Não remover o cliente atual
+            if (client === newClient) continue;
+            
+            // Remover se tiver o mesmo deviceId
+            if (client.deviceId === deviceId) {
+                removeClient(client);
+            }
+        }
+    }
+    
+    // Verificar também pelo fingerprint para garantir
+    for (const [id, client] of clients.entries()) {
+        // Não remover o cliente atual
+        if (client === newClient) continue;
+        
+        // Remover se tiver o mesmo fingerprint
+        if (client.deviceFingerprint === fingerprint) {
+            removeClient(client);
+        }
+    }
+    
+    return removedCount;
+}
+
+/**
  * Limpar dados antigos de salas vazias
  */
 const cleanupEmptyRooms = () => {
@@ -140,17 +299,28 @@ const cleanupEmptyRooms = () => {
     let cleanedCount = 0;
     
     Object.keys(rooms).forEach(roomId => {
+        // Verificar se a sala existe e está vazia
         if (!rooms[roomId] || rooms[roomId].length === 0) {
             log(`Limpando sala vazia: ${roomId}`);
             delete rooms[roomId];
             delete roomData[roomId];
             delete roomStats[roomId];
             cleanedCount++;
+        } else {
+            // Verificar por clientes inativos na sala
+            rooms[roomId] = rooms[roomId].filter(client => {
+                const isActive = client.readyState === WebSocket.OPEN;
+                if (!isActive) {
+                    log(`Removendo cliente inativo ${client.id} da sala ${roomId}`);
+                    cleanedCount++;
+                }
+                return isActive;
+            });
         }
     });
     
     if (cleanedCount > 0) {
-        log(`Limpeza concluída em ${Date.now() - startTime}ms. ${cleanedCount} salas removidas.`);
+        log(`Limpeza concluída em ${Date.now() - startTime}ms. ${cleanedCount} itens removidos.`);
     }
 };
 
@@ -159,7 +329,6 @@ const cleanupEmptyRooms = () => {
  */
 const checkDeadConnections = () => {
     const now = Date.now();
-    const deadConnectionTimeout = 20000; // 20 segundos sem resposta = conexão morta
     
     // Verificar cada cliente
     wss.clients.forEach(ws => {
@@ -167,22 +336,59 @@ const checkDeadConnections = () => {
 
         const lastPing = lastPingSent.get(ws.id) || 0;
         const lastPong = lastPongReceived.get(ws.id) || 0;
+        const deviceType = clientDeviceTypes.get(ws.id) || 'unknown';
         
         // Se enviamos um ping e não recebemos pong dentro do timeout
-        if (lastPing > lastPong && (now - lastPing) > deadConnectionTimeout) {
-            log(`Cliente ${ws.id} não respondeu por ${(now - lastPing) / 1000}s. Terminando conexão.`);
-            try {
-                ws.terminate();
-            } catch (e) {
-                log(`Erro ao terminar conexão: ${e.message}`);//, false, true);
+        if (lastPing > lastPong && (now - lastPing) > DEAD_CONNECTION_TIMEOUT) {
+            // Para iOS, ser mais tolerante com timeout
+            const timeoutToUse = deviceType === 'ios' 
+                ? DEAD_CONNECTION_TIMEOUT * 1.5 // 50% mais tempo para iOS
+                : DEAD_CONNECTION_TIMEOUT;
+                
+            if ((now - lastPing) > timeoutToUse) {
+                log(`Cliente ${ws.id} (${deviceType}) não respondeu por ${(now - lastPing) / 1000}s. Terminando conexão.`);
+                
+                // Se o cliente já teve segunda chance, terminar conexão
+                if (ws.secondChance) {
+                    try {
+                        ws.terminate();
+                    } catch (e) {
+                        log(`Erro ao terminar conexão: ${e.message}`, false, true);
+                    }
+                } else {
+                    // Dar uma segunda chance
+                    ws.secondChance = true;
+                    log(`Marcando cliente ${ws.id} para verificação adicional antes de terminar`);
+                    
+                    // Enviar ping de emergência
+                    try {
+                        ws.ping();
+                        
+                        // Enviar também mensagem ping JSON (mais compatível com alguns clientes)
+                        if (ws.readyState === WebSocket.OPEN) {
+                            ws.send(JSON.stringify({
+                                type: 'ping',
+                                timestamp: now,
+                                emergency: true
+                            }));
+                            
+                            lastPingSent.set(ws.id, now);
+                        }
+                    } catch (e) {
+                        log(`Erro ao enviar ping de emergência: ${e.message}`, false, true);
+                    }
+                }
             }
+        } else if (lastPing > 0 && lastPong > lastPing) {
+            // Se recebemos resposta, limpar flag de segunda chance
+            ws.secondChance = false;
         }
     });
 };
 
-// Configurar intervalo para limpeza de dados antigos
-setInterval(cleanupEmptyRooms, 30000); // a cada 30 segundos
-setInterval(checkDeadConnections, 15000); // a cada 15 segundos
+// Configurar intervalos para limpeza de dados antigos
+const cleanupInterval = setInterval(cleanupEmptyRooms, 30000); // a cada 30 segundos
+const connectionCheckInterval = setInterval(checkDeadConnections, 15000); // a cada 15 segundos
 
 /**
  * Gera resumo de estatísticas para uma sala
@@ -202,8 +408,16 @@ const getRoomStats = (roomId) => {
             fps: 0,
             codec: "unknown",
             pixelFormat: "unknown",
-            h264Profile: "unknown"
+            h264Profile: "unknown",
+            activeClients: 0
         };
+    }
+    
+    // Atualizar contagem de clientes ativos
+    if (rooms[roomId]) {
+        roomStats[roomId].activeClients = rooms[roomId].filter(
+            client => client.readyState === WebSocket.OPEN
+        ).length;
     }
     
     return roomStats[roomId];
@@ -583,7 +797,6 @@ wss.on('connection', (ws, request) => {
     const clientId = uuidv4();
     ws.id = clientId;
     ws.isAlive = true;
-    clients.set(clientId, ws);
     
     // Detectar tipo de dispositivo
     const deviceType = detectClientDeviceType(ws, request);
@@ -593,7 +806,7 @@ wss.on('connection', (ws, request) => {
     
     // Inicializar tempos de ping/pong
     lastPingSent.set(clientId, 0);
-    lastPongReceived.set(clientId, 0);
+    lastPongReceived.set(clientId, Date.now()); // Inicializa com tempo atual para evitar timeout imediato
     
     let roomId = null;
     
@@ -601,12 +814,18 @@ wss.on('connection', (ws, request) => {
     ws.on('pong', () => {
         ws.isAlive = true;
         lastPongReceived.set(ws.id, Date.now());
+        
+        // Limpar flag de segunda chance
+        ws.secondChance = false;
     });
     
     // Tratamento de erros específico
     ws.on('error', (error) => {
-        log(`Erro WebSocket para cliente ${ws.id}: ${error.message}`);//, false, true);
+        log(`Erro WebSocket para cliente ${ws.id}: ${error.message}`, false, true);
     });
+    
+    // Armazenar o cliente no mapa global
+    clients.set(clientId, ws);
     
     // Processar mensagens
     ws.on('message', (message) => {
@@ -618,6 +837,35 @@ wss.on('connection', (ws, request) => {
             
             if (data.type === 'join') {
                 roomId = data.roomId || 'ios-camera';
+                
+                // Extrair informações do dispositivo para identificação
+                const deviceId = data.deviceId;
+                const isReconnect = data.reconnect === true;
+                
+                // Gerar fingerprint do dispositivo
+                const deviceFingerprint = generateDeviceFingerprint(ws, request, deviceId);
+                ws.deviceFingerprint = deviceFingerprint;
+                ws.deviceId = deviceId;
+                
+                // Verificar se o dispositivo já está na sala para prevenir conexões duplicadas
+                if (deviceId) {
+                    deviceIdMapping.set(deviceId, clientId);
+                }
+                
+                // Se for uma reconexão ou temos um fingerprint que coincide com cliente existente
+                const existingClient = findExistingClient(deviceFingerprint, deviceId, roomId);
+                if (existingClient && existingClient !== ws) {
+                    log(`Detectada reconexão de dispositivo - removendo cliente antigo: ${existingClient.id}`);
+                    
+                    // Incrementar contagem de reconexões
+                    const reconnectCount = (clientReconnectCounts.get(deviceFingerprint) || 0) + 1;
+                    clientReconnectCounts.set(deviceFingerprint, reconnectCount);
+                    
+                    // Remover cliente antigo
+                    removeOldClients(deviceFingerprint, deviceId, ws, roomId);
+                } else if (isReconnect) {
+                    log(`Cliente ${ws.id} indicou reconexão, mas não encontrado cliente antigo.`);
+                }
                 
                 // Garantir que a sala exista
                 if (!rooms[roomId]) {
@@ -639,7 +887,7 @@ wss.on('connection', (ws, request) => {
                         type: 'error',
                         message: `Sala cheia, máximo ${MAX_CONNECTIONS} conexões permitidas`
                     }));
-                    log(`Tentativa de conexão rejeitada - sala cheia: ${roomId}`);//, true);
+                    log(`Tentativa de conexão rejeitada - sala cheia: ${roomId}`, false, true);
                     return;
                 }
                 
@@ -651,24 +899,42 @@ wss.on('connection', (ws, request) => {
                 stats.connections++;
                 stats.peakConnections = Math.max(stats.peakConnections, rooms[roomId].length);
                 
-                const deviceType = clientDeviceTypes.get(ws.id) || 'unknown';
                 log(`Cliente ${ws.id} (${deviceType}) entrou na sala: ${roomId}, total na sala: ${rooms[roomId].length}`);
                 
                 // Notificar outros clientes
                 rooms[roomId].forEach(client => {
                     if (client !== ws && client.readyState === WebSocket.OPEN) {
-                        client.send(JSON.stringify({ 
+                        // Construir objeto de notificação
+                        const notification = { 
                             type: 'user-joined',
                             userId: ws.id,
                             deviceType: deviceType
-                        }));
+                        };
+                        
+                        // Se for reconexão, incluir essa informação
+                        if (isReconnect) {
+                            notification.isReconnect = true;
+                        }
+                        
+                        // Enviar notificação
+                        client.send(JSON.stringify(notification));
                     }
                 });
                 
                 // Enviar dados existentes (ofertas e candidatos ICE) - apenas o mais recente
                 if (roomData[roomId].offers.length > 0) {
                     const latestOffer = roomData[roomId].offers[roomData[roomId].offers.length - 1];
-                    ws.send(JSON.stringify(latestOffer));
+                    
+                    // Otimizar SDP para o dispositivo do cliente
+                    if (latestOffer.sdp) {
+                        // Criar cópia para não modificar a original
+                        const optimizedOffer = { ...latestOffer };
+                        optimizedOffer.sdp = optimizeSdpForDevice(latestOffer.sdp, deviceType);
+                        ws.send(JSON.stringify(optimizedOffer));
+                    } else {
+                        ws.send(JSON.stringify(latestOffer));
+                    }
+                    
                     log(`Enviando oferta existente para novo cliente ${ws.id}`);
                 }
                 
@@ -696,13 +962,13 @@ wss.on('connection', (ws, request) => {
             // Processar oferta SDP (otimizar para dispositivo específico)
             else if (data.type === 'offer' && roomId) {
                 const deviceType = clientDeviceTypes.get(ws.id) || 'web';
-                log(`Oferta SDP recebida de ${ws.id} (${deviceType}) na sala ${roomId} com comprimento ${data.sdp ? data.sdp.length : 0}`);//, true);
+                log(`Oferta SDP recebida de ${ws.id} (${deviceType}) na sala ${roomId} com comprimento ${data.sdp ? data.sdp.length : 0}`);
                 
                 // Analisar qualidade da oferta para log
                 let quality = null;
                 if (data.sdp) {
                     quality = analyzeSdpQuality(data.sdp);
-                    log(`Qualidade da oferta: video=${quality.hasVideo}, audio=${quality.hasAudio}, codec=${quality.hasH264 ? 'H264' : (quality.hasVP9 ? 'VP9' : (quality.hasVP8 ? 'VP8' : 'unknown'))}, resolução=${quality.resolution}, fps=${quality.fps}, bitrate=${quality.bitrateKbps}, formato=${quality.pixelFormat}`);//, true);
+                    log(`Qualidade da oferta: video=${quality.hasVideo}, audio=${quality.hasAudio}, codec=${quality.hasH264 ? 'H264' : (quality.hasVP9 ? 'VP9' : (quality.hasVP8 ? 'VP8' : 'unknown'))}, resolução=${quality.resolution}, fps=${quality.fps}, bitrate=${quality.bitrateKbps}, formato=${quality.pixelFormat}`);
                     
                     // Atualizar estatísticas da sala
                     const stats = getRoomStats(roomId);
@@ -720,7 +986,7 @@ wss.on('connection', (ws, request) => {
                     
                     // Se houverem dispositivos iOS na sala, otimizar especificamente para iOS
                     if (hasIOSClients) {
-                        log(`Otimizando SDP para compatibilidade com iOS na sala ${roomId}`);//, true);
+                        log(`Otimizando SDP para compatibilidade com iOS na sala ${roomId}`);
                         data.sdp = optimizeSdpForDevice(data.sdp, 'ios', quality);
                     } else {
                         // Se não houver dispositivos iOS, otimizar para alta qualidade em geral
@@ -769,11 +1035,11 @@ wss.on('connection', (ws, request) => {
                 // Analisar qualidade da resposta
                 if (data.sdp) {
                     const quality = analyzeSdpQuality(data.sdp);
-                    log(`Qualidade da resposta: video=${quality.hasVideo}, audio=${quality.hasAudio}, codec=${quality.hasH264 ? 'H264' : (quality.hasVP9 ? 'VP9' : (quality.hasVP8 ? 'VP8' : 'unknown'))}, resolução=${quality.resolution}, fps=${quality.fps}, pixelFormat=${quality.pixelFormat}`);//, true);
+                    log(`Qualidade da resposta: video=${quality.hasVideo}, audio=${quality.hasAudio}, codec=${quality.hasH264 ? 'H264' : (quality.hasVP9 ? 'VP9' : (quality.hasVP8 ? 'VP8' : 'unknown'))}, resolução=${quality.resolution}, fps=${quality.fps}, pixelFormat=${quality.pixelFormat}`);
                     
                     // Se for uma resposta de um dispositivo iOS, registrar os formatos para otimização futura
                     if (deviceType === 'ios') {
-                        log(`Resposta recebida de dispositivo iOS com formato de pixel: ${quality.pixelFormat}, profile H264: ${quality.h264Profile}`);//, true);
+                        log(`Resposta recebida de dispositivo iOS com formato de pixel: ${quality.pixelFormat}, profile H264: ${quality.h264Profile}`);
                     }
                 }
                 
@@ -848,13 +1114,34 @@ wss.on('connection', (ws, request) => {
                 updateRoomActivity(roomId);
             }
             // Processar ping
-            else if (data.type === 'ping' && roomId) {
+            else if (data.type === 'ping') {
                 // Responder com pong imediatamente 
                 ws.send(JSON.stringify({
                     type: 'pong',
                     timestamp: Date.now()
                 }));
-                updateRoomActivity(roomId);
+                
+                // Atualizar última atividade
+                lastPongReceived.set(ws.id, Date.now());
+                ws.isAlive = true;
+                ws.secondChance = false;
+                
+                // Atualizar atividade da sala apenas se houver uma
+                if (roomId) {
+                    updateRoomActivity(roomId);
+                }
+            }
+            // Processar pong
+            else if (data.type === 'pong') {
+                // Registrar recebimento de pong
+                lastPongReceived.set(ws.id, Date.now());
+                ws.isAlive = true;
+                ws.secondChance = false;
+                
+                // Atualizar atividade da sala se houver uma
+                if (roomId) {
+                    updateRoomActivity(roomId);
+                }
             }
             // Processar mensagens de capacidade (recurso específico para iOS)
             else if (data.type === 'ios-capabilities' && roomId) {
@@ -892,15 +1179,15 @@ wss.on('connection', (ws, request) => {
                 updateRoomActivity(roomId, message.length);
             }
         } catch (e) {
-            log(`Erro ao processar mensagem WebSocket: ${e.message}`);//, false, true);
-            log(`Mensagem problemática: ${message.toString().substring(0, 100)}...`);//, false, true);
+            log(`Erro ao processar mensagem WebSocket: ${e.message}`, false, true);
+            log(`Mensagem problemática: ${message.toString().substring(0, 100)}...`, false, true);
             try {
                 ws.send(JSON.stringify({
                     type: 'error', 
                     message: 'Invalid message format'
                 }));
             } catch (sendError) {
-                log(`Erro ao enviar mensagem de erro: ${sendError.message}`);//, false, true);
+                log(`Erro ao enviar mensagem de erro: ${sendError.message}`, false, true);
             }
         }
     });
@@ -909,14 +1196,26 @@ wss.on('connection', (ws, request) => {
     ws.on('close', () => {
         log(`Conexão com cliente ${ws.id} fechada`);
         
-        clients.delete(clientId);
-        clientDeviceTypes.delete(clientId);
-        lastPingSent.delete(clientId);
-        lastPongReceived.delete(clientId);
+        clients.delete(ws.id);
+        clientDeviceTypes.delete(ws.id);
+        lastPingSent.delete(ws.id);
+        lastPongReceived.delete(ws.id);
+        
+        // Remover deviceId->clientId mapping apenas se for para este cliente
+        if (ws.deviceId) {
+            const mappedClientId = deviceIdMapping.get(ws.deviceId);
+            if (mappedClientId === ws.id) {
+                deviceIdMapping.delete(ws.deviceId);
+            }
+        }
         
         if (roomId && rooms[roomId]) {
             // Remover cliente da sala
-            rooms[roomId] = rooms[roomId].filter(client => client !== ws);
+            const index = rooms[roomId].indexOf(ws);
+            if (index !== -1) {
+                rooms[roomId].splice(index, 1);
+            }
+            
             log(`Cliente ${ws.id} saiu da sala: ${roomId}, restantes: ${rooms[roomId].length}`);
             
             // Atualizar estatísticas
@@ -942,51 +1241,47 @@ wss.on('connection', (ws, request) => {
     });
 });
 
-// Configurar ping periódico para manter conexões vivas - intervalo ajustado para melhor equilíbrio
+// Configurar ping periódico para manter conexões vivas
 const pingInterval = setInterval(() => {
     const now = Date.now();
     wss.clients.forEach(ws => {
         if (!ws.id) return; // Ignorar conexões sem ID
         
-        // Verificar conexões inativas com base nas respostas de pong
+        // Verificar se o cliente está inativo há muito tempo
         const lastPong = lastPongReceived.get(ws.id) || 0;
-        if (now - lastPong > 20000 && lastPingSent.get(ws.id) > 0) { // 20 segundos sem resposta após ping enviado
-            log(`Cliente ${ws.id} não respondeu por mais de 20s. Marcando como inativo.`);
-            ws.isAlive = false;
-        }
+        const inactiveTime = now - lastPong;
         
-        // Não termine a conexão imediatamente, dê mais chances
-        if (ws.isAlive === false) {
-            if (ws.secondChance === true) {
-                log(`Terminando conexão inativa com ${ws.id} após segunda chance`);
-                return ws.terminate();
-            } else {
-                log(`Conexão marcada como inativa: ${ws.id}, aguardando mais um ciclo`);
-                // Damos uma segunda chance antes de terminar
-                ws.secondChance = true;
-            }
-        } else {
-            // Resetar a segunda chance se a conexão está ativa
-            ws.secondChance = false;
-        }
-
-        ws.isAlive = false;
-        ws.ping(() => {});
+        // Definir intervalo de ping com base no tipo de dispositivo
+        const deviceType = clientDeviceTypes.get(ws.id) || 'unknown';
+        const pingIntervalForDevice = deviceType === 'ios' ? KEEP_ALIVE_INTERVAL * 1.5 : KEEP_ALIVE_INTERVAL;
         
-        // Enviar ping como mensagem JSON para melhorar compatibilidade
-        if (ws.readyState === WebSocket.OPEN) {
+        // Enviar ping apenas se o último foi há pelo menos o intervalo definido
+        const lastPing = lastPingSent.get(ws.id) || 0;
+        const timeSinceLastPing = now - lastPing;
+        
+        if (timeSinceLastPing >= pingIntervalForDevice) {
+            // Enviar ping via WebSocket nativo
             try {
-                ws.send(JSON.stringify({
-                    type: 'ping',
-                    timestamp: now,
-                    keepAlive: true
-                }));
-                
-                // Registrar o tempo do ping
-                lastPingSent.set(ws.id, now);
-                log(`Ping enviado para ${ws.id}`);//, true); // Log verbose
+                ws.ping();
             } catch (e) {
-                log(`Erro ao enviar ping para ${ws.id}: ${e.message}`);//, false, true);
+                log(`Erro ao enviar ping WebSocket para ${ws.id}: ${e.message}`, false, true);
+            }
+            
+            // Enviar também ping como mensagem JSON (mais compatível)
+            if (ws.readyState === WebSocket.OPEN) {
+                try {
+                    ws.send(JSON.stringify({
+                        type: 'ping',
+                        timestamp: now,
+                        keepAlive: true
+                    }));
+                    
+                    // Registrar o tempo do ping
+                    lastPingSent.set(ws.id, now);
+                    log(`Ping enviado para ${ws.id}`, true); // Log verbose
+                } catch (e) {
+                    log(`Erro ao enviar ping JSON para ${ws.id}: ${e.message}`, false, true);
+                }
             }
         }
     });
@@ -995,6 +1290,10 @@ const pingInterval = setInterval(() => {
 // Limpar intervalo quando o servidor é fechado
 wss.on('close', () => {
     clearInterval(pingInterval);
+    clearInterval(cleanupInterval);
+    clearInterval(connectionCheckInterval);
+    
+    log('Servidor WebRTC encerrado');
 });
 
 // Rota padrão para o cliente WebRTC
@@ -1021,6 +1320,7 @@ app.get('/info', (req, res) => {
         const stats = roomStats[roomId];
         roomsInfo[roomId] = {
             connections: stats.connections,
+            activeClients: stats.activeClients,
             messagesExchanged: stats.messagesExchanged,
             resolution: stats.resolution,
             fps: stats.fps,
@@ -1032,9 +1332,22 @@ app.get('/info', (req, res) => {
         };
     });
     
+    // Contagem de clientes por tipo
+    const deviceCounts = {
+        ios: 0,
+        android: 0,
+        web: 0,
+        unknown: 0
+    };
+    
+    clientDeviceTypes.forEach(type => {
+        deviceCounts[type] = (deviceCounts[type] || 0) + 1;
+    });
+    
     res.json({
         clients: wss.clients.size,
         rooms: Object.keys(rooms).length,
+        deviceTypes: deviceCounts,
         roomsInfo: roomsInfo,
         uptime: process.uptime(),
         startTime: new Date(Date.now() - process.uptime() * 1000).toISOString()
@@ -1058,9 +1371,13 @@ app.get('/room/:roomId/info', (req, res) => {
         deviceCounts[deviceType] = (deviceCounts[deviceType] || 0) + 1;
     });
     
+    // Calcular clientes ativos (apenas conexões abertas)
+    const activeClients = rooms[roomId].filter(client => client.readyState === WebSocket.OPEN).length;
+    
     res.json({
         id: roomId,
         clients: rooms[roomId].length,
+        activeClients: activeClients,
         deviceTypes: deviceCounts,
         connections: stats.connections,
         messagesExchanged: stats.messagesExchanged,
