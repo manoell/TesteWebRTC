@@ -1,285 +1,263 @@
-# WebRTC Camera Preview Tweak
+# WebRTC Camera Feed Replacement System
 
 ## Visão Geral do Projeto
 
-Este projeto implementa um sistema avançado de recepção WebRTC em alta qualidade para iOS, otimizado para visualização e futura substituição de feed de câmera. O sistema consiste em um servidor Node.js e um tweak para iOS jailbroken que trabalham em conjunto para fornecer streaming de vídeo em 4K a 60fps com mínima latência em redes locais.
+Este projeto implementa um sistema WebRTC otimizado para substituir transparentemente o feed da câmera nativa do iOS. O sistema consiste em um servidor de sinalização WebRTC, uma interface web para transmissão, e um tweak iOS que primeiro exibe o stream em uma janela flutuante (para testes) e posteriormente substitui diretamente o feed da câmera nativa.
 
-### Objetivos Principais
+A meta final é uma substituição completamente transparente, onde qualquer aplicativo que use a câmera nativa (fotos, vídeos, apps de terceiros) receberá o stream WebRTC como se fosse o feed original da câmera, sem necessidade de modificações adicionais.
 
-- Receber e processar streams WebRTC em alta qualidade (até 4K/60fps)
-- Oferecer preview em janela flutuante interativa com múltiplos gestos e estados
-- Adaptar automaticamente à resolução e FPS da câmera nativa do iOS
-- Fornecer diagnóstico avançado e monitoramento de performance em tempo real
-- Preparar estrutura para futura substituição do feed da câmera
-- Otimizar para baixa latência e alta performance em redes locais
+## Estado Atual do Código
 
-## Componentes Principais
+| Arquivo | Descrição | Estado Atual |
+|---------|-----------|--------|
+| `server.js` | Servidor de sinalização WebRTC | Funcional, necessita otimização para formatos iOS |
+| `index.html` | Interface web de transmissão | Funcional, necessita configurações de codecs iOS |
+| `Tweak.xm` | Ponto de entrada do tweak | Funcional, necessita reorganização |
+| `FloatingWindow.h/m` | Interface de preview | Funcional |
+| `WebRTCManager.h/m` | Gerenciamento de conexão | Funcional, necessita otimização |
+| `WebRTCFrameConverter.h/m` | Processamento de frames | Funcional, necessita compatibilidade com formatos iOS |
+| `logger.h/m` | Sistema de logging | Funcional, bem implementado |
+| `implemetacaoSubstituicao.txt` | Referência para substituição | Não implementado, apenas referência |
 
-### 1. Servidor WebRTC
+## Requisitos de Compatibilidade Identificados
 
-Um servidor Node.js que funciona como ponto central de sinalização e roteamento de streams WebRTC.
+Com base em análise de diagnóstico da câmera iOS, identificamos os seguintes requisitos críticos para a substituição transparente:
 
-**Características:**
-- Otimizado para redes locais com baixa latência
-- Suporte nativo para streaming em 4K/60fps
-- Compatibilidade direta com formatos preferidos do iOS
-- Sistema de sinalização WebSocket simplificado
-- Projetado para apenas duas conexões simultâneas (transmissor e receptor)
-- Configuração mínima necessária para operação
+### 1. Formatos de Pixel
+A câmera iOS utiliza principalmente três formatos:
+- `420f` (YUV 4:2:0 full-range) - **Formato principal e prioritário**
+- `420v` (YUV 4:2:0 video-range)
+- `BGRA` (32-bit BGRA)
 
-### 2. Cliente iOS (Tweak)
+### 2. Resoluções
+- Câmera traseira: 4032x3024 (12MP)
+- Preview de câmera: 1334x750
+- Renderização final: Adaptada para dimensões da tela (ex: 375x667)
 
-Um tweak para dispositivos iOS jailbroken que exibe uma janela flutuante com o preview do stream WebRTC recebido.
+### 3. Classes Principais de iOS para Hook
+- `AVCaptureSession`: Controla toda a sessão de captura
+- `AVCaptureVideoDataOutput`: Gerencia saída de vídeo e delegates
+- `AVCaptureConnection`: Gerencia orientação e espelhamento
 
-**Características:**
-- Janela flutuante interativa com controles de conexão
-- Sistema de gestos intuitivos (arrastar, pinçar, toques)
-- Auto-adaptação para diferentes estados (normal, minimizado, expandido, tela cheia)
-- Recepção otimizada de streams WebRTC
-- Auto-reconexão em caso de falhas de rede
-- Sistema avançado de manipulação de frames
-- Adaptação automática com base nas dimensões da câmera iOS
-- Estatísticas de performance em tempo real
-- Sistema de diagnóstico integrado
-- Preparado para futura substituição do feed da câmera
+### 4. Métodos Críticos para Interceptação
+- `AVCaptureSession startRunning`
+- `AVCaptureVideoDataOutput setSampleBufferDelegate:`
+- `AVCaptureConnection setVideoOrientation:`
+- `AVCaptureConnection setVideoMirrored:`
 
-## Arquitetura Técnica
+## Plano de Reorganização e Otimização
 
-### Servidor
+Antes de implementar a substituição, é necessário reorganizar e otimizar o código existente:
 
-**Tecnologias:** Node.js, Express, WebSocket, WebRTC
+### 1. Otimização do Servidor WebRTC
+- **Configuração de codec nativo iOS:**
+  - Configurar transmissor para usar H.264 com perfil compatível com iOS
+  - Implementar sinalização otimizada para formatos YUV 4:2:0
+  - Priorizar transmissão diretamente em formato `420f` quando possível
 
-**Módulos principais:**
-- `server.js` - Ponto de entrada e gerenciamento de WebSocket
-- `webrtc-signaling.js` - Lógica de sinalização WebRTC
-- `stream-manager.js` - Gerenciamento de streams e configurações
+- **Adaptação de resolução no servidor:**
+  - Permitir configurações de resolução específicas para iOS
+  - Implementar escalonamento inteligente baseado em capacidade de rede
 
-### Cliente iOS
+### 2. Reorganização do WebRTCFrameConverter
+- **Suporte nativo a formatos iOS:**
+  - Implementar processamento eficiente para `420f` (YUV 4:2:0 full-range)
+  - Minimizar conversões entre formatos
+  - Utilizar aceleração de hardware para conversões necessárias
 
-**Componentes principais:**
-- `FloatingWindow` - Interface de usuário interativa com múltiplos gestos e estados
-- `WebRTCManager` - Gerenciamento de conexão WebRTC e sinalização
-- `WebRTCFrameConverter` - Processamento e adaptação de frames
-- `WebRTCDiagnostics` - Sistema de diagnóstico e monitoramento de performance
-- `logger` - Sistema avançado de logging com níveis e rotação de arquivos
-- `CameraHook` (futura implementação) - Substituição do feed da câmera
+- **Adaptação inteligente de resolução:**
+  - Criar sistema que detecta resolução da câmera ativa
+  - Adaptar dinâmica e eficientemente para qualquer resolução
 
-## Fluxo de Funcionamento
+### 3. Refatoração do WebRTCManager
+- **Otimização de desempenho:**
+  - Melhorar gerenciamento de memória e recursos
+  - Implementar reconexão inteligente
+  - Otimizar processamento de sinalização
 
-1. O Servidor WebRTC é iniciado em um computador na rede local
-2. Um transmissor (navegador ou aplicativo) conecta-se ao servidor e inicia streaming em alta qualidade
-3. O tweak iOS exibe uma janela flutuante no dispositivo
-4. Ao clicar em "Ativar Preview", o tweak conecta-se ao servidor WebRTC
-5. O tweak recebe o stream e exibe o preview na janela flutuante
-6. O usuário pode interagir com a janela usando gestos:
-   - Arrastar para mover
-   - Duplo toque para alternar entre estados
-   - Pinçar para redimensionar
-   - Toque único para mostrar/ocultar controles
-   - Toque longo para menu de configurações
-7. O sistema de diagnóstico monitora continuamente a performance
-8. Para encerrar, o usuário clica em "Desativar Preview"
+- **Preparação para integração final:**
+  - Implementar API clara para obtenção de frames
+  - Criar sistema de callback para eventos de câmera
+  - Estruturar para interação transparente com subsistema de câmera
 
-## Otimizações Específicas
+### 4. Reformulação da Interface de Preview (FloatingWindow)
+- **Separação de responsabilidades:**
+  - Isolar UI de preview da lógica de gerenciamento
+  - Implementar sistema de estados mais robusto
+  
+- **Interface para debugging:**
+  - Adicionar estatísticas avançadas de desempenho
+  - Criar visualização de diagnóstico para formatos de pixel
+  - Implementar controles para testes de injeção de feed
 
-### Otimização para Rede Local
-- Desativação de ICE candidates externos (TURN/STUN)
-- Parâmetros de WebRTC otimizados para baixa latência
-- Keep-alive com intervalos reduzidos para detecção rápida de problemas
+## Arquitetura para Substituição Direta da Câmera
 
-### Processamento de Vídeo
-- Formatos de pixel nativos do iOS para minimizar conversões
-- Aceleração de hardware para processamento de frames
-- Pipeline otimizado para reduzir cópias de buffer
-- Adaptação automática das dimensões do vídeo
+Para substituir diretamente o feed da câmera, permitindo funcionamento transparente com todos os apps, implementaremos:
 
-### Interface do Usuário
-- Gestos intuitivos para controle da janela flutuante
-- Feedback visual e tátil para melhor experiência
-- Auto-ocultação de controles para visualização limpa
-- Diferentes estados para adaptação ao contexto de uso
-- Animações suaves para transições entre estados
+### 1. Hook Primário em AVCaptureSession
+Este é o ponto mais fundamental para interceptação, permitindo substituir o feed no nível mais básico:
+```objective-c
+%hook AVCaptureSession
 
-### Diagnóstico e Monitoramento
-- Sistema de logging com múltiplos níveis de detalhe
-- Monitoramento em tempo real de métricas de performance
-- Detecção automática de problemas e recomendações
-- Relatórios detalhados para análise e depuração
-- Estatísticas de rede e vídeo para avaliação de qualidade
+- (void)startRunning {
+    // Configurar injeção de feed antes da execução original
+    %orig;
+    // Ativar substituição após inicialização original
+}
 
-### Conexão e Estabilidade
-- Sistema robusto de reconexão automática
-- Máquina de estados clara para gerenciamento de conexão
-- Gerenciamento centralizado de temporizadores
-- Tratamento apropriado de desconexões manuais vs. falhas
+%end
+```
 
-### Preparação para Substituição de Câmera
-- Detecção automática de dimensões e FPS da câmera nativa
-- Sistema de adaptação para ajustar streams ao formato nativo
-- Compatibilidade com formatos de buffer do iOS
-- Otimização para performance em tempo real
+### 2. Gerenciamento de Delegates e Outputs
+Para garantir que o feed substituto seja entregue a todos os delegates:
+```objective-c
+%hook AVCaptureVideoDataOutput
 
-## Requisitos Técnicos
+- (void)setSampleBufferDelegate:(id<AVCaptureVideoDataOutputSampleBufferDelegate>)delegate queue:(dispatch_queue_t)queue {
+    // Registrar o delegate original
+    // Configurar interceptação de frames
+    %orig;
+}
 
-### Servidor
+%end
+```
+
+### 3. Sistema de Injeção de Frames Adaptativo
+```objective-c
+- (void)captureOutput:(AVCaptureOutput *)output didOutputSampleBuffer:(CMSampleBufferRef)originalBuffer fromConnection:(AVCaptureConnection *)connection {
+    // Se substituição ativa, substituir buffer com feed WebRTC
+    // Se não, passar buffer original
+    
+    // Adaptar formato, resolução e orientação
+    // Encaminhar para delegate original
+}
+```
+
+### 4. Gerenciamento de Propriedades de Vídeo
+```objective-c
+%hook AVCaptureConnection
+
+- (void)setVideoOrientation:(AVCaptureVideoOrientation)orientation {
+    %orig;
+    // Atualizar orientação do feed substituto para manter sincronização
+}
+
+- (void)setVideoMirrored:(BOOL)mirrored {
+    %orig;
+    // Atualizar espelhamento do feed substituto
+}
+
+%end
+```
+
+## Próximos Passos Técnicos
+
+### Fase 1: Otimização de Transmissão
+1. **Configurar servidor para transmitir em formato nativo iOS:**
+   - Implementar sinalização otimizada para formato `420f`
+   - Configurar codec H.264 com perfil adequado ao iOS
+   - Implementar negociação de resolução e framerate
+
+2. **Otimizar página de transmissão:**
+   - Permitir seleção de formato específico para iOS
+   - Implementar controles avançados de qualidade
+   - Desenvolver estatísticas detalhadas em tempo real
+
+### Fase 2: Reorganização do Código Existente
+1. **Refatorar WebRTCFrameConverter:**
+   - Implementar suporte direto a formatos iOS
+   - Otimizar pipeline de processamento para minimizar latência
+   - Criar sistema eficiente de adaptação de resolução
+
+2. **Reescrever WebRTCManager:**
+   - Separar lógica de conexão da lógica de processamento
+   - Implementar padrão de delegate mais eficiente
+   - Otimizar gerenciamento de recursos
+
+3. **Aprimorar FloatingWindow:**
+   - Melhorar feedback visual de estatísticas
+   - Implementar diagnóstico de formatos e qualidade
+   - Aperfeiçoar tratamento de eventos e gestos
+
+### Fase 3: Implementação do Subsistema de Substituição
+1. **Criar Framework de Substituição:**
+   - Desenvolver APIs para injeção de frames
+   - Implementar mecanismo de interceptação de delegates
+   - Criar sistema para adaptação dinâmica às condições da câmera
+
+2. **Implementar Hooks de Sistemas:**
+   - Criar hooks precisos para classes AVCapture
+   - Implementar intercepção de eventos da câmera
+   - Desenvolver sistema transparente de passagem ou substituição
+
+3. **Desenvolver Sistema de Diagnóstico:**
+   - Criar logs detalhados específicos para substituição
+   - Implementar detecção de problemas em tempo real
+   - Desenvolver ferramentas visuais de debugging
+
+## Configuração do Ambiente
+
+### Requisitos do Servidor
 - Node.js 14.0+
-- Pacotes: express, ws, http, cors, uuid
-- Rede WiFi local estável
-- Capacidade de processar vídeo 4K/60fps
+- Dependências: express, ws, http, cors, uuid
+- Configuração de rede: porta 8080 acessível na rede local
 
-### Cliente iOS
-- Dispositivo iOS jailbroken (iOS 14.0+)
-- Theos (ambiente de desenvolvimento para tweaks)
-- Dependências: WebRTC framework, AVFoundation
+### Requisitos do Cliente iOS
+- iOS 14.0+ jailbroken
+- Theos instalado para compilação
+- CocoaPods para gerenciamento de dependências
+- WebRTC framework instalado
 
-## Instalação e Configuração
+### Compilação e Instalação
+```bash
+# Instalar dependências
+pod install
 
-### Servidor
-1. Instalar Node.js 14.0 ou superior
-2. Clonar o repositório
-3. Executar `npm install` na pasta `server` para instalar dependências
-4. Iniciar o servidor com `node server.js`
-5. O servidor exibirá o IP e porta para conexão
+# Compilar tweak
+make package
 
-### Cliente iOS (Tweak)
-1. Configurar ambiente Theos no macOS
-2. Instalar CocoaPods e executar `pod install` para obter o framework WebRTC
-3. Compilar o tweak usando `make package` no diretório do projeto
-4. Instalar o pacote .deb gerado no dispositivo iOS jailbroken
-5. O tweak será iniciado automaticamente com o SpringBoard
-
-## Uso
-
-### Transmissor
-1. Abra a página HTML do transmissor no navegador
-2. Selecione a qualidade desejada (recomendado 4K/60fps para máxima qualidade)
-3. Clique em "Iniciar Transmissão"
-
-### Receptor (iOS)
-1. A janela flutuante aparecerá automaticamente na tela
-2. Clique no botão "Ativar Preview" para iniciar a recepção
-3. Use gestos para interagir com a janela:
-   - Arraste para mover
-   - Toque duplo para alternar entre normal/minimizado/expandido/tela cheia
-   - Pinçe para redimensionar
-   - Toque único para mostrar/ocultar controles
-   - Toque longo para mostrar menu de opções
-4. Observe as informações de status e estatísticas para verificar a qualidade da conexão
-5. Para encerrar, clique em "Desativar Preview"
-
-## Diagnóstico e Monitoramento
-
-A interface do tweak fornece informações em tempo real sobre:
-- Estado da conexão WebRTC
-- Qualidade do stream (resolução, FPS)
-- Estatísticas de rede (latência, perda de pacotes)
-- Alertas sobre problemas detectados
-- Logs detalhados em `/var/tmp/testeWebRTC.log`
-
-### Níveis de Log
-- 0 = Sem logging
-- 1 = Apenas erros críticos
-- 2 = Erros
-- 3 = Avisos e erros (padrão)
-- 4 = Informações, avisos e erros
-- 5 = Verbose (todos os logs)
-
-## Métricas de Desempenho
-
-O tweak foi testado em diversos dispositivos para garantir compatibilidade e performance:
-
-| Dispositivo | iOS | Resolução | FPS | Latência Média | Uso de CPU | Uso de RAM |
-|-------------|-----|-----------|-----|----------------|------------|------------|
-| iPhone X    | 14.4| 4K        | 60  | ~120ms         | 15%        | 85MB       |
-| iPhone 8    | 14.2| 1080p     | 60  | ~150ms         | 22%        | 78MB       |
-| iPad Pro    | 14.5| 4K        | 60  | ~100ms         | 12%        | 90MB       |
-
-*Nota: Valores são médias aproximadas em rede WiFi 5GHz com servidor local.*
-
-## Notas de Versão Recente
-
-### Melhorias na Versão Atual
-- Otimização do sistema de recepção de frames para maior estabilidade
-- Correção de memory leaks e ciclos de retenção para melhor gestão de memória
-- Aprimoramento do sistema de log para diagnóstico mais preciso
-- Implementação robusta de estados da janela flutuante para experiência de usuário aprimorada
-
-## Limitações Atuais
-- Funciona apenas em rede local WiFi para garantir latência mínima
-- Requer dispositivo iOS jailbroken
-- Suporta apenas uma conexão de visualização por vez
-- A substituição do feed da câmera é uma funcionalidade futura
-
-## Resolução de Problemas
-
-### Problemas de Conexão
-- Verifique se o servidor está acessível na rede local
-- Garanta que as portas necessárias (8080) estão abertas no firewall
-- Verifique os logs do servidor para mensagens de erro
-- Certifique-se de que o IP do servidor está configurado corretamente no tweak
-- Verifique o registro de log para mensagens de erro específicas: `cat /var/tmp/testeWebRTC.log`
-
-### Problemas de Qualidade
-- Reduza a resolução ou FPS se a rede não suportar 4K/60fps
-- Verifique se há interferência na rede WiFi
-- Consulte o relatório de diagnóstico para identificar gargalos
-- Em redes mais congestionadas, reduza o framerate para 30fps para maior estabilidade
-
-### Crashes do Tweak
-- Verifique os logs em `/var/tmp/testeWebRTC.log`
-- Reinicie o SpringBoard para reiniciar o tweak
-- Verifique se o framework WebRTC está instalado corretamente
-- Use o modo translúcido para menor impacto no CPU durante a visualização
-
-### Problemas de Compilação
-- Certifique-se de ter o CocoaPods instalado e configurado corretamente
-- Verifique se o WebRTC framework foi instalado via `pod install`
-- Se ocorrerem erros de ciclos de retenção, utilize referências fracas (`__weak typeof(self)`)
-- Para erros com structs, crie uma nova instância completa em vez de modificar campos individuais
-- Adicione implementações para todos os métodos declarados nos arquivos .h
-
-## Desenvolvimento Futuro
-- Implementação completa da substituição do feed da câmera
-- Suporte para mais opções de qualidade/desempenho
-- Interface de configuração aprimorada
-- Possibilidade de gravação do stream recebido
-- Suporte a múltiplas fontes de vídeo
-
-## Estrutura de Arquivos
-
-```
-WebRTCTweak/
-├── server/
-│   ├── server.js                # Servidor WebRTC principal
-│   ├── package.json             # Dependências do servidor
-│   └── index.html               # Interface do transmissor
-├── tweak/
-│   ├── Tweak.xm                 # Ponto de entrada do tweak
-│   ├── FloatingWindow.h         # Definição da janela flutuante
-│   ├── FloatingWindow.m         # Implementação da janela flutuante
-│   ├── WebRTCManager.h          # Gerenciador de conexão WebRTC
-│   ├── WebRTCManager.m          # Implementação do gerenciador
-│   ├── WebRTCFrameConverter.h   # Conversor de frames WebRTC
-│   ├── WebRTCFrameConverter.m   # Implementação do conversor
-│   ├── WebRTCDiagnostics.h      # Sistema de diagnóstico
-│   ├── WebRTCDiagnostics.m      # Implementação do diagnóstico
-│   ├── logger.h                 # Sistema de logging
-│   ├── logger.m                 # Implementação do logging
-│   ├── Makefile                 # Configuração de compilação
-│   ├── control                  # Metadados do pacote
-│   └── Podfile                  # Dependências CocoaPods
-└── README.md                    # Documentação do projeto
+# Instalar no dispositivo
+make install THEOS_DEVICE_IP=<ip_do_dispositivo>
 ```
 
-## Notas de Performance
+## Uso Atual (Fase de Preview)
 
-Para obter o melhor desempenho possível:
-- Use rede WiFi 5GHz ou superior
-- Minimize a distância entre servidor e dispositivo iOS
-- Reduza o tráfego de rede durante o uso
-- Considere o uso de conexão Ethernet no lado do servidor
-- Minimize outros processos no dispositivo iOS durante o uso
+### Iniciar Servidor
+```bash
+node server.js
+```
+
+### Transmitir Vídeo
+1. Acesse `http://<ip_do_servidor>:8080` em um navegador
+2. Selecione a qualidade e a fonte de vídeo
+3. Inicie a transmissão
+
+### Visualizar no dispositivo iOS
+1. A janela flutuante aparecerá no iOS
+2. Toque em "Ativar Preview" para visualizar o stream
+3. Use gestos para mover e interagir com a janela
+
+## Dicas de Desenvolvimento e Testes
+
+### Logging e Diagnóstico
+- Configure o nível de log em `Tweak.xm`:
+  ```objective-c
+  setLogLevel(5); // Nível máximo para desenvolvimento
+  ```
+- Consulte logs em `/var/tmp/testeWebRTC.log`
+
+### Métricas de Performance
+Para monitorar o desempenho durante o desenvolvimento:
+- Latência: ideal < 100ms para experiência realista
+- Uso de CPU: manter abaixo de 20% para estabilidade
+- Uso de memória: evitar crescimento contínuo
+
+### Testes de Compatibilidade
+Testar com vários aplicativos que utilizam a câmera:
+- Câmera nativa do iOS (fotos e vídeos)
+- FaceTime e chamadas de vídeo
+- Apps populares de terceiros (Instagram, Snapchat, etc.)
 
 ---
 
-Este projeto é otimizado para desempenho, estabilidade e qualidade visual, priorizando o funcionamento perfeito em redes locais e a compatibilidade com o sistema de câmera do iOS para uma futura implementação de substituição de feed.
+Este projeto visa criar um sistema completo que permite substituir o feed da câmera nativa do iOS no nível mais fundamental possível, de modo que qualquer aplicativo que utilize AVFoundation receba o stream WebRTC como se fosse a câmera original, sem necessidade de modificações adicionais. A reorganização e otimização do código atual são essenciais antes da implementação desta substituição.
