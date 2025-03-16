@@ -101,8 +101,7 @@
 - (void)startWebRTC {
     @try {
         // Verificar se já está conectado ou conectando
-        if (_state == WebRTCManagerStateConnected ||
-            _state == WebRTCManagerStateConnecting) {
+        if (self.state == WebRTCManagerStateConnected || self.state == WebRTCManagerStateConnecting) {
             writeLog(@"[WebRTCManager] Já está conectado ou conectando, ignorando chamada");
             return;
         }
@@ -454,8 +453,8 @@
         _keepAliveTimer = nil;
     }
     
-    // Cria novo timer para enviar mensagens keep-alive a cada 15 segundos
-    _keepAliveTimer = [NSTimer scheduledTimerWithTimeInterval:15.0
+    // Cria novo timer para enviar mensagens keep-alive a cada 5 segundos
+    _keepAliveTimer = [NSTimer scheduledTimerWithTimeInterval:5.0
                                                        target:self
                                                      selector:@selector(sendKeepAlive)
                                                      userInfo:nil
@@ -607,6 +606,12 @@
         writeLog(@"[WebRTCManager] Novo usuário entrou na sala: %@", message[@"userId"]);
     } else if ([type isEqualToString:@"user-left"]) {
         writeLog(@"[WebRTCManager] Usuário saiu da sala: %@", message[@"userId"]);
+    } else if ([type isEqualToString:@"pong"]) {
+        // Apenas registra como verbose, não como INFO
+        writeVerboseLog(@"[WebRTCManager] Pong recebido do servidor");
+    } else if ([type isEqualToString:@"room-info"]) {
+        // Processa informações da sala
+        writeVerboseLog(@"[WebRTCManager] Informações da sala recebidas: %@", message[@"clients"]);
     } else if ([type isEqualToString:@"error"]) {
         writeLog(@"[WebRTCManager] Erro recebido do servidor: %@", message[@"message"]);
         [self.floatingWindow updateConnectionStatus:[NSString stringWithFormat:@"Erro: %@", message[@"message"]]];

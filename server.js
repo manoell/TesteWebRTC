@@ -16,9 +16,17 @@ const os = require('os');
 const PORT = process.env.PORT || 8080;
 const LOGGING_ENABLED = true;
 const LOG_FILE = './server.log';
-const MAX_CONNECTIONS = 20; // Limitado a transmissor + receptor
-const KEEP_ALIVE_INTERVAL = 2000; // 2 segundos para detecção rápida de desconexões
-const HIGH_QUALITY_BITRATE = 20000; // 20Mbps para 4K
+const MAX_CONNECTIONS = 10; // Limitado a transmissor + receptor
+const KEEP_ALIVE_INTERVAL = 1000; // 1 segundo para detecção rápida de desconexões
+const HIGH_QUALITY_BITRATE = 12000; // 12Mbps para 4K (equilibrado desempenho/qualidade)
+
+// Parâmetros de qualidade adaptativos
+const QUALITY_PRESETS = {
+    '2160p': 12000, // 4K: 12Mbps
+    '1440p': 8000,  // QHD: 8Mbps
+    '1080p': 5000,  // Full HD: 5Mbps
+    '720p': 2500    // HD: 2.5Mbps
+};
 
 // Inicializar aplicativo Express
 const app = express();
@@ -34,7 +42,7 @@ const server = http.createServer(app);
 const wss = new WebSocket.Server({ 
     server,
     // Aumentar o tamanho máximo dos payloads para suportar vídeo 4K
-    maxPayload: 128 * 1024 * 1024 // 128MB para maior segurança com 4K
+    maxPayload: 64 * 1024 * 1024 // 64MB
 });
 
 // Armazenar conexões
@@ -42,6 +50,8 @@ const rooms = {};
 const roomData = {};
 const roomStats = {};
 const clients = new Map();
+const lastPingSent = new Map(); // Mapear clientes para tempo do último ping
+const lastPongReceived = new Map(); // Mapear clientes para tempo do último pong
 
 /**
  * Função para logging com timestamp
@@ -61,8 +71,8 @@ const log = (message, consoleOnly = false, isError = false) => {
     const seconds = String(now.getSeconds()).padStart(2, '0');
     const milliseconds = String(now.getMilliseconds()).padStart(3, '0');
     
-    const timestamp = `${day}/${month}/${year} - ${hours}:${minutes}:${seconds}.${milliseconds}`;
-    const logMessage = `[${timestamp}] ${message}`;
+    const timestamp = `[${day}/${month}/${year} - ${hours}:${minutes}:${seconds}.${milliseconds}]`;
+    const logMessage = `${timestamp} ${message}`;
     
     if (isError) {
         console.error(logMessage);
@@ -101,8 +111,33 @@ const cleanupEmptyRooms = () => {
     }
 };
 
-// Configurar intervalo para limpeza de dados antigos (a cada 30 segundos)
-setInterval(cleanupEmptyRooms, 30000);
+/**
+ * Verifica e remove conexões que não respondem
+ */
+const checkDeadConnections = () => {
+    const now = Date.now();
+    const deadConnectionTimeout = 10000; // 10 segundos sem resposta = conexão morta
+    
+    // Verificar cada cliente
+    wss.clients.forEach(ws => {
+        const lastPing = lastPingSent.get(ws.id) || 0;
+        const lastPong = lastPongReceived.get(ws.id) || 0;
+        
+        // Se enviamos um ping e não recebemos pong dentro do timeout
+        if (lastPing > lastPong && (now - lastPing) > deadConnectionTimeout) {
+            log(`Cliente ${ws.id} não respondeu por ${(now - lastPing) / 1000}s. Terminando conexão.`);
+            try {
+                ws.terminate();
+            } catch (e) {
+                log(`Erro ao terminar conexão: ${e.message}`, false, true);
+            }
+        }
+    });
+};
+
+// Configurar intervalo para limpeza de dados antigos
+setInterval(cleanupEmptyRooms, 30000); // a cada 30 segundos
+setInterval(checkDeadConnections, 15000); // a cada 15 segundos
 
 /**
  * Gera resumo de estatísticas para uma sala
@@ -147,6 +182,23 @@ const updateRoomActivity = (roomId, messageSize = 0) => {
 };
 
 /**
+ * Obtém o bitrate ideal com base na resolução
+ * @param {string} resolution - Resolução do vídeo (ex: "1080p")
+ * @returns {number} - Bitrate em kbps
+ */
+const getOptimalBitrate = (resolution) => {
+    if (!resolution) return HIGH_QUALITY_BITRATE;
+    
+    for (const [key, value] of Object.entries(QUALITY_PRESETS)) {
+        if (resolution.includes(key)) {
+            return value;
+        }
+    }
+    
+    return HIGH_QUALITY_BITRATE; // Default
+};
+
+/**
  * Analisa a qualidade da oferta SDP para logging
  * @param {string} sdp - String SDP
  * @returns {object} - Informações sobre a qualidade
@@ -183,6 +235,7 @@ const analyzeSdpQuality = (sdp) => {
     const bitrateMatch = sdp.match(/b=AS:([0-9]+)/i);
     if (bitrateMatch && bitrateMatch.length >= 2) {
         result.bitrateKbps = `${bitrateMatch[1]}kbps`;
+        result.bitrate = parseInt(bitrateMatch[1]);
     }
     
     // Procurar profile de H264 level
@@ -199,9 +252,10 @@ const analyzeSdpQuality = (sdp) => {
 /**
  * Melhora SDP para otimizar para alta qualidade sem causar conflitos de payload
  * @param {string} sdp - SDP original
+ * @param {string} resolution - Resolução do vídeo (opcional)
  * @returns {string} - SDP otimizado
  */
-const enhanceSdpForHighQuality = (sdp) => {
+const enhanceSdpForHighQuality = (sdp, resolution = null) => {
     if (!sdp.includes('m=video')) return sdp;
     
     const lines = sdp.split('\n');
@@ -209,6 +263,9 @@ const enhanceSdpForHighQuality = (sdp) => {
     let inVideoSection = false;
     let videoSectionModified = false;
     let videoLineIndex = -1;
+    
+    // Determinar o bitrate apropriado com base na resolução
+    const bitrate = getOptimalBitrate(resolution);
     
     // Primeiro, vamos encontrar a linha 'm=video' e analisar
     for (let i = 0; i < lines.length; i++) {
@@ -241,17 +298,33 @@ const enhanceSdpForHighQuality = (sdp) => {
             
             // Verificar se já existe uma linha b=AS
             let hasAS = false;
+            let existingBitrate = 0;
             for (let j = i + 1; j < lines.length && !lines[j].startsWith('m='); j++) {
                 if (lines[j].startsWith('b=AS:')) {
                     hasAS = true;
+                    existingBitrate = parseInt(lines[j].substring(5));
                     break;
                 }
             }
             
-            // Adicionar linha de bitrate alto para 4K apenas se não existir
+            // Adicionar linha de bitrate alto para vídeo apenas se não existir ou se for menor que o desejado
             if (!hasAS) {
-                newLines.push(`b=AS:${HIGH_QUALITY_BITRATE}`);
+                newLines.push(`b=AS:${bitrate}`);
                 videoSectionModified = true;
+            } else if (existingBitrate < bitrate) {
+                // Se o bitrate existente for menor, substituiremos mais tarde
+                videoSectionModified = true;
+            }
+            continue;
+        }
+        
+        // Se encontramos a linha b=AS: na seção de vídeo e queremos modificá-la
+        if (inVideoSection && line.startsWith('b=AS:') && videoSectionModified) {
+            const existingBitrate = parseInt(line.substring(5));
+            if (existingBitrate < bitrate) {
+                newLines.push(`b=AS:${bitrate}`);
+            } else {
+                newLines.push(line);
             }
             continue;
         }
@@ -265,19 +338,20 @@ const enhanceSdpForHighQuality = (sdp) => {
 
 // Manipular conexões WebSocket
 wss.on('connection', (ws) => {
-    log('Nova conexão WebSocket estabelecida');
-    
     // Identificar cliente
     const clientId = uuidv4();
     ws.id = clientId;
     ws.isAlive = true;
     clients.set(clientId, ws);
     
+    log(`Nova conexão WebSocket estabelecida: ${clientId}`);
+    
     let roomId = null;
     
-    // Ping para manter conexão viva - intervalo reduzido para rede local
+    // Configurar event handlers para ping/pong
     ws.on('pong', () => {
         ws.isAlive = true;
+        lastPongReceived.set(ws.id, Date.now());
     });
     
     // Tratamento de erros específico
@@ -303,11 +377,18 @@ wss.on('connection', (ws) => {
                     log(`Nova sala criada: ${roomId}`);
                 }
                 
+                // Verificar se o cliente já está na sala para evitar duplicação
+                const existingClientIndex = rooms[roomId].findIndex(client => client.id === ws.id);
+                if (existingClientIndex >= 0) {
+                    log(`Cliente ${ws.id} já está na sala ${roomId}, ignorando join duplicado`);
+                    return;
+                }
+                
                 // Limitar número de conexões por sala
                 if (rooms[roomId].length >= MAX_CONNECTIONS) {
                     ws.send(JSON.stringify({
                         type: 'error',
-                        message: 'Room is full, maximum 2 connections allowed'
+                        message: `Sala cheia, máximo ${MAX_CONNECTIONS} conexões permitidas`
                     }));
                     log(`Tentativa de conexão rejeitada - sala cheia: ${roomId}`, true);
                     return;
@@ -333,18 +414,20 @@ wss.on('connection', (ws) => {
                     }
                 });
                 
-                // Enviar dados existentes (ofertas e candidatos ICE)
+                // Enviar dados existentes (ofertas e candidatos ICE) - apenas o mais recente
                 if (roomData[roomId].offers.length > 0) {
                     const latestOffer = roomData[roomId].offers[roomData[roomId].offers.length - 1];
                     ws.send(JSON.stringify(latestOffer));
                     log(`Enviando oferta existente para novo cliente ${ws.id}`);
                 }
                 
+                // Enviar apenas os últimos 10 candidatos ICE para reduzir tráfego
                 if (roomData[roomId].iceCandidates.length > 0) {
-                    roomData[roomId].iceCandidates.forEach(candidate => {
+                    const recentCandidates = roomData[roomId].iceCandidates.slice(-10);
+                    recentCandidates.forEach(candidate => {
                         ws.send(JSON.stringify(candidate));
                     });
-                    log(`Enviando ${roomData[roomId].iceCandidates.length} candidatos ICE para novo cliente ${ws.id}`);
+                    log(`Enviando ${recentCandidates.length} candidatos ICE para novo cliente ${ws.id}`);
                 }
                 
                 // Enviar estatísticas da sala
@@ -359,8 +442,9 @@ wss.on('connection', (ws) => {
                 log(`Oferta SDP recebida de ${ws.id} na sala ${roomId} com comprimento ${data.sdp ? data.sdp.length : 0}`, true);
                 
                 // Analisar qualidade da oferta para log
+                let quality = null;
                 if (data.sdp) {
-                    const quality = analyzeSdpQuality(data.sdp);
+                    quality = analyzeSdpQuality(data.sdp);
                     log(`Qualidade da oferta: video=${quality.hasVideo}, audio=${quality.hasAudio}, codec=${quality.hasH264 ? 'H264' : (quality.hasVP9 ? 'VP9' : (quality.hasVP8 ? 'VP8' : 'unknown'))}, resolução=${quality.resolution}, fps=${quality.fps}, bitrate=${quality.bitrateKbps}`, true);
                     
                     // Atualizar estatísticas da sala
@@ -369,8 +453,8 @@ wss.on('connection', (ws) => {
                     stats.fps = quality.fps;
                     stats.codec = quality.hasH264 ? 'H264' : (quality.hasVP9 ? 'VP9' : (quality.hasVP8 ? 'VP8' : 'unknown'));
                     
-                    // Otimizar SDP para alta qualidade
-                    data.sdp = enhanceSdpForHighQuality(data.sdp);
+                    // Otimizar SDP para alta qualidade, adaptando com base na resolução
+                    data.sdp = enhanceSdpForHighQuality(data.sdp, quality.resolution);
                 }
                 
                 // Armazenar oferta
@@ -379,8 +463,8 @@ wss.on('connection', (ws) => {
                 roomData[roomId].offers.push(data);
                 
                 // Limitar número de ofertas armazenadas
-                if (roomData[roomId].offers.length > 10) {
-                    roomData[roomId].offers = roomData[roomId].offers.slice(-10);
+                if (roomData[roomId].offers.length > 5) {
+                    roomData[roomId].offers = roomData[roomId].offers.slice(-5);
                 }
                 
                 // Encaminhar oferta para outros clientes
@@ -408,8 +492,8 @@ wss.on('connection', (ws) => {
                 roomData[roomId].answers.push(data);
                 
                 // Limitar número de respostas armazenadas
-                if (roomData[roomId].answers.length > 10) {
-                    roomData[roomId].answers = roomData[roomId].answers.slice(-10);
+                if (roomData[roomId].answers.length > 5) {
+                    roomData[roomId].answers = roomData[roomId].answers.slice(-5);
                 }
                 
                 // Encaminhar resposta para outros clientes
@@ -439,8 +523,8 @@ wss.on('connection', (ws) => {
                     roomData[roomId].iceCandidates.push(data);
                     
                     // Limitar número de candidatos armazenados
-                    if (roomData[roomId].iceCandidates.length > 50) {
-                        roomData[roomId].iceCandidates = roomData[roomId].iceCandidates.slice(-50);
+                    if (roomData[roomId].iceCandidates.length > 30) {
+                        roomData[roomId].iceCandidates = roomData[roomId].iceCandidates.slice(-30);
                     }
                     
                     // Encaminhar candidato para outros clientes
@@ -467,6 +551,15 @@ wss.on('connection', (ws) => {
                     }
                 });
                 
+                updateRoomActivity(roomId);
+            }
+            // Processar ping
+            else if (data.type === 'ping' && roomId) {
+                // Responder com pong imediatamente 
+                ws.send(JSON.stringify({
+                    type: 'pong',
+                    timestamp: Date.now()
+                }));
                 updateRoomActivity(roomId);
             }
             // Processar outras mensagens para a sala
@@ -497,6 +590,8 @@ wss.on('connection', (ws) => {
         log(`Conexão com cliente ${ws.id} fechada`);
         
         clients.delete(clientId);
+        lastPingSent.delete(clientId);
+        lastPongReceived.delete(clientId);
         
         if (roomId && rooms[roomId]) {
             // Remover cliente da sala
@@ -525,8 +620,7 @@ wss.on('connection', (ws) => {
     });
 });
 
-// Configurar ping periódico para manter conexões vivas
-// Intervalo reduzido para detecção rápida de desconexões
+// Configurar ping periódico para manter conexões vivas - intervalo reduzido para detecção rápida
 const pingInterval = setInterval(() => {
     wss.clients.forEach(ws => {
         if (ws.isAlive === false) {
@@ -536,6 +630,21 @@ const pingInterval = setInterval(() => {
         
         ws.isAlive = false;
         ws.ping(() => {});
+        
+        // Enviar ping como mensagem JSON para melhorar compatibilidade
+        if (ws.readyState === WebSocket.OPEN) {
+            try {
+                ws.send(JSON.stringify({
+                    type: 'ping',
+                    timestamp: Date.now()
+                }));
+                
+                // Registrar o tempo do ping
+                lastPingSent.set(ws.id, Date.now());
+            } catch (e) {
+                log(`Erro ao enviar ping para ${ws.id}: ${e.message}`, false, true);
+            }
+        }
     });
 }, KEEP_ALIVE_INTERVAL);
 
