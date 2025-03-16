@@ -434,6 +434,12 @@
         return;
     }
     
+    // Verificar se já está ativo para evitar conexões duplicadas
+    if (self.isPreviewActive) {
+        writeLog(@"[FloatingWindow] Preview já está ativo, ignorando solicitação duplicada");
+        return;
+    }
+    
     self.isPreviewActive = YES;
     [self.toggleButton setTitle:@"Desativar Preview" forState:UIControlStateNormal];
     self.toggleButton.backgroundColor = [UIColor redColor]; // Vermelho quando ativo

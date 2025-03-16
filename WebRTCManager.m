@@ -365,8 +365,16 @@ NSString *const kCameraChangeNotification = @"AVCaptureDeviceSubjectAreaDidChang
         self.userRequestedDisconnect = YES;
     }
     
-    // Só limpar recursos se houver uma conexão peer ativa
-    if (self.peerConnection || self.videoTrack || self.webSocketTask) {
+    // Enviar bye primeiro antes de limpar conexões
+    if (self.webSocketTask && self.webSocketTask.state == NSURLSessionTaskStateRunning) {
+        [self sendByeMessage];
+        
+        // Esperar um pouco para ter certeza que a mensagem bye será enviada
+        dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.5 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
+            [self cleanupResources];
+        });
+    } else {
+        // Se não houver conexão ativa, limpar recursos imediatamente
         [self cleanupResources];
     }
     
@@ -593,12 +601,15 @@ NSString *const kCameraChangeNotification = @"AVCaptureDeviceSubjectAreaDidChang
         _keepAliveTimer = nil;
     }
     
-    // Cria novo timer para enviar mensagens keep-alive a cada 5 segundos
-    _keepAliveTimer = [NSTimer scheduledTimerWithTimeInterval:5.0
+    // Cria novo timer para enviar mensagens keep-alive a cada 3 segundos (era 5)
+    _keepAliveTimer = [NSTimer scheduledTimerWithTimeInterval:3.0
                                                        target:self
                                                      selector:@selector(sendKeepAlive)
                                                      userInfo:nil
                                                       repeats:YES];
+    
+    // Executar imediatamente uma vez para estabelecer keep-alive
+    [self sendKeepAlive];
 }
 
 - (void)sendKeepAlive {
@@ -755,6 +766,14 @@ NSString *const kCameraChangeNotification = @"AVCaptureDeviceSubjectAreaDidChang
         }
     } else if ([type isEqualToString:@"user-left"]) {
         writeLog(@"[WebRTCManager] Usuário saiu da sala: %@", message[@"userId"]);
+    } else if ([type isEqualToString:@"ping"]) {
+        // Responder imediatamente com uma mensagem pong
+        [self sendWebSocketMessage:@{
+            @"type": @"pong",
+            @"timestamp": @([[NSDate date] timeIntervalSince1970] * 1000),
+            @"roomId": self.roomId ?: @"ios-camera"
+        }];
+        writeVerboseLog(@"[WebRTCManager] Respondeu ao ping com pong");
     } else if ([type isEqualToString:@"pong"]) {
         // Resposta ao ping - atualizar timestamp de última resposta
         writeVerboseLog(@"[WebRTCManager] Pong recebido do servidor");

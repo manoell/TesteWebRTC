@@ -17,7 +17,7 @@ const PORT = process.env.PORT || 8080;
 const LOGGING_ENABLED = true;
 const LOG_FILE = './server.log';
 const MAX_CONNECTIONS = 10; // Limitado a transmissor + receptor
-const KEEP_ALIVE_INTERVAL = 1000; // 1 segundo para detecção rápida de desconexões
+const KEEP_ALIVE_INTERVAL = 5000; // 5 segundo para detecção rápida de desconexões
 
 // Parâmetros de qualidade adaptativos
 const QUALITY_PRESETS = {
@@ -174,7 +174,7 @@ const checkDeadConnections = () => {
             try {
                 ws.terminate();
             } catch (e) {
-                log(`Erro ao terminar conexão: ${e.message}`, false, true);
+                log(`Erro ao terminar conexão: ${e.message}`);//, false, true);
             }
         }
     });
@@ -605,7 +605,7 @@ wss.on('connection', (ws, request) => {
     
     // Tratamento de erros específico
     ws.on('error', (error) => {
-        log(`Erro WebSocket para cliente ${ws.id}: ${error.message}`, false, true);
+        log(`Erro WebSocket para cliente ${ws.id}: ${error.message}`);//, false, true);
     });
     
     // Processar mensagens
@@ -639,7 +639,7 @@ wss.on('connection', (ws, request) => {
                         type: 'error',
                         message: `Sala cheia, máximo ${MAX_CONNECTIONS} conexões permitidas`
                     }));
-                    log(`Tentativa de conexão rejeitada - sala cheia: ${roomId}`, true);
+                    log(`Tentativa de conexão rejeitada - sala cheia: ${roomId}`);//, true);
                     return;
                 }
                 
@@ -696,13 +696,13 @@ wss.on('connection', (ws, request) => {
             // Processar oferta SDP (otimizar para dispositivo específico)
             else if (data.type === 'offer' && roomId) {
                 const deviceType = clientDeviceTypes.get(ws.id) || 'web';
-                log(`Oferta SDP recebida de ${ws.id} (${deviceType}) na sala ${roomId} com comprimento ${data.sdp ? data.sdp.length : 0}`, true);
+                log(`Oferta SDP recebida de ${ws.id} (${deviceType}) na sala ${roomId} com comprimento ${data.sdp ? data.sdp.length : 0}`);//, true);
                 
                 // Analisar qualidade da oferta para log
                 let quality = null;
                 if (data.sdp) {
                     quality = analyzeSdpQuality(data.sdp);
-                    log(`Qualidade da oferta: video=${quality.hasVideo}, audio=${quality.hasAudio}, codec=${quality.hasH264 ? 'H264' : (quality.hasVP9 ? 'VP9' : (quality.hasVP8 ? 'VP8' : 'unknown'))}, resolução=${quality.resolution}, fps=${quality.fps}, bitrate=${quality.bitrateKbps}, formato=${quality.pixelFormat}`, true);
+                    log(`Qualidade da oferta: video=${quality.hasVideo}, audio=${quality.hasAudio}, codec=${quality.hasH264 ? 'H264' : (quality.hasVP9 ? 'VP9' : (quality.hasVP8 ? 'VP8' : 'unknown'))}, resolução=${quality.resolution}, fps=${quality.fps}, bitrate=${quality.bitrateKbps}, formato=${quality.pixelFormat}`);//, true);
                     
                     // Atualizar estatísticas da sala
                     const stats = getRoomStats(roomId);
@@ -720,7 +720,7 @@ wss.on('connection', (ws, request) => {
                     
                     // Se houverem dispositivos iOS na sala, otimizar especificamente para iOS
                     if (hasIOSClients) {
-                        log(`Otimizando SDP para compatibilidade com iOS na sala ${roomId}`, true);
+                        log(`Otimizando SDP para compatibilidade com iOS na sala ${roomId}`);//, true);
                         data.sdp = optimizeSdpForDevice(data.sdp, 'ios', quality);
                     } else {
                         // Se não houver dispositivos iOS, otimizar para alta qualidade em geral
@@ -769,11 +769,11 @@ wss.on('connection', (ws, request) => {
                 // Analisar qualidade da resposta
                 if (data.sdp) {
                     const quality = analyzeSdpQuality(data.sdp);
-                    log(`Qualidade da resposta: video=${quality.hasVideo}, audio=${quality.hasAudio}, codec=${quality.hasH264 ? 'H264' : (quality.hasVP9 ? 'VP9' : (quality.hasVP8 ? 'VP8' : 'unknown'))}, resolução=${quality.resolution}, fps=${quality.fps}, pixelFormat=${quality.pixelFormat}`, true);
+                    log(`Qualidade da resposta: video=${quality.hasVideo}, audio=${quality.hasAudio}, codec=${quality.hasH264 ? 'H264' : (quality.hasVP9 ? 'VP9' : (quality.hasVP8 ? 'VP8' : 'unknown'))}, resolução=${quality.resolution}, fps=${quality.fps}, pixelFormat=${quality.pixelFormat}`);//, true);
                     
                     // Se for uma resposta de um dispositivo iOS, registrar os formatos para otimização futura
                     if (deviceType === 'ios') {
-                        log(`Resposta recebida de dispositivo iOS com formato de pixel: ${quality.pixelFormat}, profile H264: ${quality.h264Profile}`, true);
+                        log(`Resposta recebida de dispositivo iOS com formato de pixel: ${quality.pixelFormat}, profile H264: ${quality.h264Profile}`);//, true);
                     }
                 }
                 
@@ -880,7 +880,7 @@ wss.on('connection', (ws, request) => {
             }
             // Processar outras mensagens para a sala
             else if (roomId) {
-                log(`Mensagem tipo "${data.type}" recebida de ${ws.id}`, true);
+                log(`Mensagem tipo "${data.type}" recebida de ${ws.id}`);
                 
                 // Encaminhar mensagem para outros clientes na sala
                 rooms[roomId].forEach(client => {
@@ -892,15 +892,15 @@ wss.on('connection', (ws, request) => {
                 updateRoomActivity(roomId, message.length);
             }
         } catch (e) {
-            log(`Erro ao processar mensagem WebSocket: ${e.message}`, false, true);
-            log(`Mensagem problemática: ${message.toString().substring(0, 100)}...`, false, true);
+            log(`Erro ao processar mensagem WebSocket: ${e.message}`);//, false, true);
+            log(`Mensagem problemática: ${message.toString().substring(0, 100)}...`);//, false, true);
             try {
                 ws.send(JSON.stringify({
                     type: 'error', 
                     message: 'Invalid message format'
                 }));
             } catch (sendError) {
-                log(`Erro ao enviar mensagem de erro: ${sendError.message}`, false, true);
+                log(`Erro ao enviar mensagem de erro: ${sendError.message}`);//, false, true);
             }
         }
     });
@@ -942,10 +942,18 @@ wss.on('connection', (ws, request) => {
     });
 });
 
-// Configurar ping periódico para manter conexões vivas - intervalo reduzido para detecção rápida
+// Configurar ping periódico para manter conexões vivas - intervalo ajustado para melhor equilíbrio
 const pingInterval = setInterval(() => {
+    const now = Date.now();
     wss.clients.forEach(ws => {
         if (!ws.id) return; // Ignorar conexões sem ID
+        
+        // Verificar conexões inativas com base nas respostas de pong
+        const lastPong = lastPongReceived.get(ws.id) || 0;
+        if (now - lastPong > 20000 && lastPingSent.get(ws.id) > 0) { // 20 segundos sem resposta após ping enviado
+            log(`Cliente ${ws.id} não respondeu por mais de 20s. Marcando como inativo.`);
+            ws.isAlive = false;
+        }
         
         // Não termine a conexão imediatamente, dê mais chances
         if (ws.isAlive === false) {
@@ -970,15 +978,15 @@ const pingInterval = setInterval(() => {
             try {
                 ws.send(JSON.stringify({
                     type: 'ping',
-                    timestamp: Date.now(),
+                    timestamp: now,
                     keepAlive: true
                 }));
                 
                 // Registrar o tempo do ping
-                lastPingSent.set(ws.id, Date.now());
-                log(`Ping enviado para ${ws.id}`, true); // Log verbose
+                lastPingSent.set(ws.id, now);
+                log(`Ping enviado para ${ws.id}`);//, true); // Log verbose
             } catch (e) {
-                log(`Erro ao enviar ping para ${ws.id}: ${e.message}`, false, true);
+                log(`Erro ao enviar ping para ${ws.id}: ${e.message}`);//, false, true);
             }
         }
     });
