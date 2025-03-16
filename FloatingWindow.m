@@ -24,6 +24,13 @@
 @property (nonatomic, assign) CGRect minimizedFrame;
 @property (nonatomic, assign) BOOL isDragging;
 
+// Novas propriedades para informações de formato
+@property (nonatomic, strong) UIView *formatInfoContainer;
+@property (nonatomic, strong) UILabel *processingModeLabel;
+@property (nonatomic, strong) NSTimer *periodicUpdateTimer;
+@property (nonatomic, strong) NSString *currentPixelFormat;
+@property (nonatomic, strong) NSString *currentProcessingMode;
+
 @end
 
 @implementation FloatingWindow
@@ -87,6 +94,8 @@
         self.isPreviewActive = NO;
         self.isReceivingFrames = NO;
         self.currentFps = 0;
+        self.currentPixelFormat = @"Desconhecido";
+        self.currentProcessingMode = @"Aguardando";
         
         // Configurar UI
         [self setupUI];
@@ -118,6 +127,7 @@
     // Configurar componentes da UI
     [self setupVideoView];
     [self setupTopBar];
+    [self setupFormatInfoSection]; // Nova seção para informações de formato
     [self setupBottomControls];
     [self setupLoadingIndicator];
     [self setupGradients];
@@ -151,7 +161,7 @@
         [self.topBarView.topAnchor constraintEqualToAnchor:self.contentView.topAnchor],
         [self.topBarView.leadingAnchor constraintEqualToAnchor:self.contentView.leadingAnchor],
         [self.topBarView.trailingAnchor constraintEqualToAnchor:self.contentView.trailingAnchor],
-        [self.topBarView.heightAnchor constraintEqualToConstant:50],
+        [self.topBarView.heightAnchor constraintEqualToConstant:60], // Aumentado para acomodar mais informações
     ]];
     
     // Label para status da conexão
@@ -185,6 +195,56 @@
         [self.dimensionsLabel.centerXAnchor constraintEqualToAnchor:self.topBarView.centerXAnchor],
         [self.dimensionsLabel.widthAnchor constraintLessThanOrEqualToAnchor:self.topBarView.widthAnchor constant:-20],
     ]];
+}
+
+// Novo método para configurar a seção de informações de formato
+- (void)setupFormatInfoSection {
+    // Container para informações de formato
+    self.formatInfoContainer = [[UIView alloc] init];
+    self.formatInfoContainer.translatesAutoresizingMaskIntoConstraints = NO;
+    self.formatInfoContainer.backgroundColor = [UIColor colorWithRed:0.1 green:0.1 blue:0.2 alpha:0.7];
+    self.formatInfoContainer.layer.cornerRadius = 8;
+    [self.contentView addSubview:self.formatInfoContainer];
+    
+    [NSLayoutConstraint activateConstraints:@[
+        [self.formatInfoContainer.topAnchor constraintEqualToAnchor:self.topBarView.bottomAnchor constant:8],
+        [self.formatInfoContainer.leadingAnchor constraintEqualToAnchor:self.contentView.leadingAnchor constant:10],
+        [self.formatInfoContainer.trailingAnchor constraintEqualToAnchor:self.contentView.trailingAnchor constant:-10],
+        [self.formatInfoContainer.heightAnchor constraintEqualToConstant:40] // Altura para acomodar duas linhas de texto
+    ]];
+    
+    // Label para informações de formato de pixel
+    self.formatInfoLabel = [[UILabel alloc] init];
+    self.formatInfoLabel.translatesAutoresizingMaskIntoConstraints = NO;
+    self.formatInfoLabel.text = @"Formato: Aguardando stream...";
+    self.formatInfoLabel.textColor = [UIColor whiteColor];
+    self.formatInfoLabel.textAlignment = NSTextAlignmentCenter;
+    self.formatInfoLabel.font = [UIFont systemFontOfSize:12 weight:UIFontWeightMedium];
+    [self.formatInfoContainer addSubview:self.formatInfoLabel];
+    
+    [NSLayoutConstraint activateConstraints:@[
+        [self.formatInfoLabel.topAnchor constraintEqualToAnchor:self.formatInfoContainer.topAnchor constant:5],
+        [self.formatInfoLabel.leadingAnchor constraintEqualToAnchor:self.formatInfoContainer.leadingAnchor constant:8],
+        [self.formatInfoLabel.trailingAnchor constraintEqualToAnchor:self.formatInfoContainer.trailingAnchor constant:-8],
+    ]];
+    
+    // Label para mostrar modo de processamento (hardware/software)
+    self.processingModeLabel = [[UILabel alloc] init];
+    self.processingModeLabel.translatesAutoresizingMaskIntoConstraints = NO;
+    self.processingModeLabel.text = @"Processamento: Aguardando dados...";
+    self.processingModeLabel.textColor = [UIColor colorWithWhite:0.9 alpha:1.0];
+    self.processingModeLabel.textAlignment = NSTextAlignmentCenter;
+    self.processingModeLabel.font = [UIFont systemFontOfSize:11 weight:UIFontWeightRegular];
+    [self.formatInfoContainer addSubview:self.processingModeLabel];
+    
+    [NSLayoutConstraint activateConstraints:@[
+        [self.processingModeLabel.topAnchor constraintEqualToAnchor:self.formatInfoLabel.bottomAnchor constant:2],
+        [self.processingModeLabel.leadingAnchor constraintEqualToAnchor:self.formatInfoContainer.leadingAnchor constant:8],
+        [self.processingModeLabel.trailingAnchor constraintEqualToAnchor:self.formatInfoContainer.trailingAnchor constant:-8],
+    ]];
+    
+    // Inicialmente esconde o container até que tenhamos informações para mostrar
+    self.formatInfoContainer.alpha = 0;
 }
 
 - (void)setupBottomControls {
@@ -402,6 +462,9 @@
         [self setWindowState:FloatingWindowStateExpanded];
     }
     
+    // Iniciar atualizações periódicas
+    [self startPeriodicUpdates];
+    
     // Atualizar ícone minimizado
     [self updateMinimizedIconWithState];
 }
@@ -413,12 +476,20 @@
     [self.toggleButton setTitle:@"Ativar Preview" forState:UIControlStateNormal];
     self.toggleButton.backgroundColor = [UIColor greenColor]; // Verde quando desativado
     
+    // Parar atualizações periódicas
+    [self stopPeriodicUpdates];
+    
     // Parar indicador de carregamento
     [self.loadingIndicator stopAnimating];
     [self updateConnectionStatus:@"Desconectado"];
     
     // Limpar dimensões
     self.dimensionsLabel.text = @"";
+    
+    // Esconder container de informações de formato
+    [UIView animateWithDuration:0.3 animations:^{
+        self.formatInfoContainer.alpha = 0;
+    }];
     
     // Marcar como não recebendo frames
     self.isReceivingFrames = NO;
@@ -452,6 +523,123 @@
     });
 }
 
+#pragma mark - Format Information Methods
+
+// Implementação do método para atualizar informações de formato
+- (void)updateFormatInfo:(NSString *)formatInfo {
+    if (!formatInfo) {
+        return;
+    }
+    
+    self.currentPixelFormat = formatInfo;
+    
+    dispatch_async(dispatch_get_main_queue(), ^{
+        // Mostrar o container se estiver oculto
+        if (self.formatInfoContainer.alpha < 1.0) {
+            [UIView animateWithDuration:0.3 animations:^{
+                self.formatInfoContainer.alpha = 1.0;
+            }];
+        }
+        
+        // Atualizar o texto da label
+        self.formatInfoLabel.text = [NSString stringWithFormat:@"Formato: %@", formatInfo];
+        
+        // Colorir a label de acordo com o formato para destaque visual
+        if ([formatInfo containsString:@"420f"]) {
+            // Verde para o formato preferido
+            self.formatInfoLabel.textColor = [UIColor colorWithRed:0.2 green:0.9 blue:0.3 alpha:1.0];
+        } else if ([formatInfo containsString:@"420v"]) {
+            // Amarelo para formato alternativo
+            self.formatInfoLabel.textColor = [UIColor colorWithRed:0.9 green:0.9 blue:0.2 alpha:1.0];
+        } else if ([formatInfo containsString:@"BGRA"]) {
+            // Azul para BGRA
+            self.formatInfoLabel.textColor = [UIColor colorWithRed:0.3 green:0.7 blue:1.0 alpha:1.0];
+        } else {
+            // Branco para outros formatos
+            self.formatInfoLabel.textColor = [UIColor whiteColor];
+        }
+    });
+}
+
+// Implementação do método para atualizar modo de processamento
+- (void)updateProcessingMode:(NSString *)processingMode {
+    if (!processingMode) {
+        return;
+    }
+    
+    self.currentProcessingMode = processingMode;
+    
+    dispatch_async(dispatch_get_main_queue(), ^{
+        // Atualizar o texto da label
+        self.processingModeLabel.text = [NSString stringWithFormat:@"Processamento: %@", processingMode];
+        
+        // Colorir a label de acordo com o modo de processamento
+        if ([processingMode containsString:@"hardware"]) {
+            // Verde para hardware (melhor performance)
+            self.processingModeLabel.textColor = [UIColor colorWithRed:0.2 green:0.9 blue:0.3 alpha:1.0];
+        } else if ([processingMode containsString:@"software"]) {
+            // Amarelo para software (performance reduzida)
+            self.processingModeLabel.textColor = [UIColor colorWithRed:0.9 green:0.9 blue:0.2 alpha:1.0];
+        } else {
+            // Branco para outros modos
+            self.processingModeLabel.textColor = [UIColor colorWithWhite:0.9 alpha:1.0];
+        }
+    });
+}
+
+- (void)updateIconWithFormatInfo {
+    // Atualizar ícone minimizado para refletir o formato de pixel atual
+    UIImageView *formatBadge = (UIImageView *)[self viewWithTag:1001];
+    
+    // Se estamos minimizados, ativos e recebendo frames, mostrar o indicador de formato
+    if (self.windowState == FloatingWindowStateMinimized && self.isPreviewActive && self.isReceivingFrames) {
+        // Criar a badge se não existir
+        if (!formatBadge) {
+            formatBadge = [[UIImageView alloc] init];
+            formatBadge.translatesAutoresizingMaskIntoConstraints = NO;
+            formatBadge.tag = 1001;
+            formatBadge.layer.cornerRadius = 6;
+            formatBadge.clipsToBounds = YES;
+            formatBadge.layer.borderWidth = 1.0;
+            formatBadge.layer.borderColor = [UIColor whiteColor].CGColor;
+            [self addSubview:formatBadge];
+            
+            // Posicionar no canto inferior direito do ícone
+            [NSLayoutConstraint activateConstraints:@[
+                [formatBadge.widthAnchor constraintEqualToConstant:12],
+                [formatBadge.heightAnchor constraintEqualToConstant:12],
+                [formatBadge.trailingAnchor constraintEqualToAnchor:self.trailingAnchor constant:-6],
+                [formatBadge.bottomAnchor constraintEqualToAnchor:self.bottomAnchor constant:-6]
+            ]];
+        }
+        
+        // Definir cor da badge baseada no formato
+        if ([self.currentPixelFormat containsString:@"420f"]) {
+            // Verde para o formato preferido
+            formatBadge.backgroundColor = [UIColor colorWithRed:0.0 green:0.8 blue:0.0 alpha:1.0];
+        } else if ([self.currentPixelFormat containsString:@"420v"]) {
+            // Amarelo para formato alternativo
+            formatBadge.backgroundColor = [UIColor colorWithRed:0.8 green:0.8 blue:0.0 alpha:1.0];
+        } else if ([self.currentPixelFormat containsString:@"BGRA"]) {
+            // Azul para BGRA
+            formatBadge.backgroundColor = [UIColor colorWithRed:0.0 green:0.3 blue:0.8 alpha:1.0];
+        } else {
+            // Cinza para outros formatos
+            formatBadge.backgroundColor = [UIColor lightGrayColor];
+        }
+        
+        formatBadge.hidden = NO;
+    } else {
+        // Esconder a badge quando não for relevante
+        if (formatBadge) {
+            formatBadge.hidden = YES;
+        }
+    }
+    
+    // Atualizar também o ícone baseado no estado atual
+    [self updateMinimizedIconWithState];
+}
+
 #pragma mark - State Management
 
 - (void)setWindowState:(FloatingWindowState)windowState {
@@ -459,6 +647,13 @@
     
     _windowState = windowState;
     [self updateAppearanceForState:windowState];
+    
+    // Iniciar atualizações periódicas se expandido e ativo
+    if (windowState == FloatingWindowStateExpanded && self.isPreviewActive) {
+        [self startPeriodicUpdates];
+    } else {
+        [self stopPeriodicUpdates];
+    }
 }
 
 - (void)updateAppearanceForState:(FloatingWindowState)state {
@@ -499,6 +694,7 @@
         self.topBarView.alpha = 0;
         self.buttonContainer.alpha = 0;
         self.videoView.alpha = 0;
+        self.formatInfoContainer.alpha = 0; // Ocultar também o container de informações
         
         // Ajustar cor do fundo com base no estado
         [self updateBackgroundColorForState];
@@ -507,6 +703,7 @@
         self.topBarView.hidden = YES;
         self.buttonContainer.hidden = YES;
         self.videoView.hidden = YES;
+        self.formatInfoContainer.hidden = YES;
     }];
 }
 
@@ -515,6 +712,7 @@
     self.topBarView.hidden = NO;
     self.buttonContainer.hidden = NO;
     self.videoView.hidden = NO;
+    self.formatInfoContainer.hidden = NO; // Mostrar container de informações se relevante
     
     // Ocultar o ícone minimizado
     self.iconView.hidden = YES;
@@ -539,6 +737,11 @@
         self.topBarView.alpha = 1.0;
         self.buttonContainer.alpha = 1.0;
         self.videoView.alpha = 1.0;
+        
+        // Mostrar informações de formato apenas se estiver recebendo frames
+        if (self.isPreviewActive && self.isReceivingFrames) {
+            self.formatInfoContainer.alpha = 1.0;
+        }
         
         // Fundo escuro
         self.backgroundColor = [UIColor colorWithRed:0.1 green:0.1 blue:0.1 alpha:0.9];
@@ -597,7 +800,6 @@
 #pragma mark - Gesture Handlers
 
 - (void)handlePan:(UIPanGestureRecognizer *)gesture {
-    //writeLog(@"[FloatingWindow] Pan estado: %ld", (long)gesture.state);
     CGPoint translation = [gesture translationInView:self];
     
     if (gesture.state == UIGestureRecognizerStateBegan) {
@@ -706,9 +908,89 @@
                 dimensionsLabel.text = infoText;
             }
             
-            // Atualizar aparência do ícone minimizado
-            [self updateMinimizedIconWithState];
+            // Obter e atualizar informações de formato do WebRTCManager
+            if (self.webRTCManager && self.webRTCManager.frameConverter) {
+                // Obter formato de pixel
+                IOSPixelFormat pixelFormat = self.webRTCManager.frameConverter.detectedPixelFormat;
+                NSString *formatString = [WebRTCFrameConverter stringFromPixelFormat:pixelFormat];
+                [self updateFormatInfo:formatString];
+                
+                // Obter modo de processamento
+                NSString *processingMode = self.webRTCManager.frameConverter.processingMode;
+                [self updateProcessingMode:processingMode];
+            }
+            
+            // Atualizar aparência do ícone minimizado e badge de formato
+            [self updateIconWithFormatInfo];
         });
+    }
+}
+
+#pragma mark - Periodic Updates
+
+/**
+ * Iniciar atualizações periódicas de estatísticas
+ */
+- (void)startPeriodicUpdates {
+    if (self.periodicUpdateTimer) {
+        [self.periodicUpdateTimer invalidate];
+    }
+    
+    self.periodicUpdateTimer = [NSTimer scheduledTimerWithTimeInterval:2.0
+                                                               target:self
+                                                             selector:@selector(updatePeriodicStats)
+                                                             userInfo:nil
+                                                              repeats:YES];
+}
+
+/**
+ * Parar atualizações periódicas
+ */
+- (void)stopPeriodicUpdates {
+    if (self.periodicUpdateTimer) {
+        [self.periodicUpdateTimer invalidate];
+        self.periodicUpdateTimer = nil;
+    }
+}
+
+/**
+ * Método chamado periodicamente para atualizar estatísticas
+ */
+- (void)updatePeriodicStats {
+    if (!self.isPreviewActive || !self.isReceivingFrames) {
+        return;
+    }
+    
+    // Atualizar FPS a partir do WebRTCManager
+    if (self.webRTCManager) {
+        float estimatedFps = [self.webRTCManager getEstimatedFps];
+        if (estimatedFps > 0) {
+            self.currentFps = estimatedFps;
+            
+            // Atualizar label de dimensões com FPS
+            if (self.dimensionsLabel) {
+                NSString *infoText = [NSString stringWithFormat:@"%dx%d @ %.0ffps",
+                                   (int)self.lastFrameSize.width,
+                                   (int)self.lastFrameSize.height,
+                                   self.currentFps];
+                self.dimensionsLabel.text = infoText;
+            }
+        }
+        
+        // Verificar se o formato ou modo de processamento mudou
+        if (self.webRTCManager.frameConverter) {
+            IOSPixelFormat pixelFormat = self.webRTCManager.frameConverter.detectedPixelFormat;
+            NSString *formatString = [WebRTCFrameConverter stringFromPixelFormat:pixelFormat];
+            
+            if (![formatString isEqualToString:self.currentPixelFormat]) {
+                [self updateFormatInfo:formatString];
+            }
+            
+            NSString *processingMode = self.webRTCManager.frameConverter.processingMode;
+            if (![processingMode isEqualToString:self.currentProcessingMode]) {
+                [self updateProcessingMode:processingMode];
+            }
+        }
     }
 }
 
