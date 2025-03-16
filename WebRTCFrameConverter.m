@@ -60,7 +60,7 @@
         _ciContext = [CIContext contextWithOptions:options];
         
         _colorSpace = CGColorSpaceCreateDeviceRGB();
-        _yuvColorSpace = CGColorSpaceCreateDeviceYUV(); // Para processamento YUV
+        _yuvColorSpace = CGColorSpaceCreateDeviceRGB(); // Usando RGB em vez de YUV // Para processamento YUV
         _processingQueue = dispatch_queue_create("com.webrtc.frameprocessing",
                                                DISPATCH_QUEUE_CONCURRENT);
         
@@ -277,7 +277,9 @@
     formatStr[3] = format & 0xFF;
     formatStr[4] = 0;
     
-    return (const char *)formatStr;
+    static char result[5];
+    memcpy(result, formatStr, 5);
+    return result;
 }
 
 #pragma mark - RTCVideoRenderer
@@ -863,7 +865,13 @@
         // Verificar se temos um buffer em cache com o formato correto
         if (_cachedSampleBuffer && _cachedSampleBufferHash == _lastFrameHash && _cachedSampleBufferFormat == cvFormat) {
             // Se já tivermos um buffer em cache para este frame e formato, retornar uma cópia do cache
-            return CMSampleBufferCreateCopy(kCFAllocatorDefault, _cachedSampleBuffer, NULL);
+            CMSampleBufferRef outputBuffer = NULL;
+            OSStatus status = CMSampleBufferCreateCopy(kCFAllocatorDefault, _cachedSampleBuffer, &outputBuffer);
+            if (status != noErr) {
+                writeErrorLog(@"[WebRTCFrameConverter] Erro ao criar cópia do CMSampleBuffer: %d", (int)status);
+                return NULL;
+            }
+            return outputBuffer;
         }
         
         // Caso contrário, criar um novo buffer
@@ -877,14 +885,19 @@
             }
             
             // Armazenar uma cópia para cache
-            CMSampleBufferCreateCopy(kCFAllocatorDefault, sampleBuffer, &_cachedSampleBuffer);
-            _cachedSampleBufferHash = _lastFrameHash;
-            _cachedSampleBufferFormat = cvFormat;
+            OSStatus status = CMSampleBufferCreateCopy(kCFAllocatorDefault, sampleBuffer, &_cachedSampleBuffer);
+            if (status != noErr) {
+                writeErrorLog(@"[WebRTCFrameConverter] Erro ao criar cópia para cache: %d", (int)status);
+                // Ainda podemos retornar o buffer original mesmo se o cache falhar
+            } else {
+                _cachedSampleBufferHash = _lastFrameHash;
+                _cachedSampleBufferFormat = cvFormat;
+            }
         }
         
         return sampleBuffer;
     } @catch (NSException *exception) {
-        writeLog(@"[WebRTCFrameConverter] Exceção em getLatestSampleBufferWithFormat: %@", exception);
+        writeErrorLog(@"[WebRTCFrameConverter] Exceção em getLatestSampleBufferWithFormat: %@", exception);
         return NULL;
     }
 }

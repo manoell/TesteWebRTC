@@ -756,8 +756,18 @@ NSString *const kCameraChangeNotification = @"AVCaptureDeviceSubjectAreaDidChang
     } else if ([type isEqualToString:@"user-left"]) {
         writeLog(@"[WebRTCManager] Usuário saiu da sala: %@", message[@"userId"]);
     } else if ([type isEqualToString:@"pong"]) {
-        // Apenas registra como verbose, não como INFO
+        // Resposta ao ping - atualizar timestamp de última resposta
         writeVerboseLog(@"[WebRTCManager] Pong recebido do servidor");
+        
+        // Resetar contador de reconexão quando recebemos pong (confirma conexão ativa)
+        self.reconnectionAttempts = 0;
+        
+        // Se estiver tentando reconectar, mas recebeu pong, significa que a conexão está ok
+        if (self.isReconnecting) {
+            self.isReconnecting = NO;
+            self.state = WebRTCManagerStateConnected;
+            writeLog(@"[WebRTCManager] Conexão confirmada via pong durante reconexão");
+        }
     } else if ([type isEqualToString:@"room-info"]) {
         // Processa informações da sala
         writeVerboseLog(@"[WebRTCManager] Informações da sala recebidas: %@", message[@"clients"]);
@@ -804,12 +814,12 @@ NSString *const kCameraChangeNotification = @"AVCaptureDeviceSubjectAreaDidChang
     [self logSdpDetails:sdp type:@"Offer"];
     
     // Verificar se o transmissor está enviando informações de compatibilidade
-    BOOL hasIOSOptimization = NO;
+    //BOOL hasIOSOptimization = NO;
     if (message[@"offerInfo"]) {
         NSDictionary *offerInfo = message[@"offerInfo"];
         BOOL optimizedForIOS = [offerInfo[@"optimizedForIOS"] boolValue];
         if (optimizedForIOS) {
-            hasIOSOptimization = YES;
+            //hasIOSOptimization = YES;
             writeLog(@"[WebRTCManager] Oferta tem otimizações específicas para iOS");
         }
     }

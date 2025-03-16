@@ -5,7 +5,7 @@ include $(THEOS)/makefiles/common.mk
 
 TWEAK_NAME = CameraPreviewTweak
 
-CameraPreviewTweak_FILES = Tweak.xm FloatingWindow.m WebRTCManager.m logger.m
+CameraPreviewTweak_FILES = Tweak.xm FloatingWindow.m WebRTCManager.m WebRTCFrameConverter.m logger.m
 CameraPreviewTweak_FRAMEWORKS = UIKit AVFoundation QuartzCore CoreImage CoreVideo CoreAudio AudioToolbox
 CameraPreviewTweak_LIBRARIES = substrate
 CameraPreviewTweak_CFLAGS = -fobjc-arc -F./Pods/GoogleWebRTC/Frameworks/frameworks -I./Pods/GoogleWebRTC/Frameworks/frameworks/WebRTC.framework/Headers

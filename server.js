@@ -159,7 +159,7 @@ const cleanupEmptyRooms = () => {
  */
 const checkDeadConnections = () => {
     const now = Date.now();
-    const deadConnectionTimeout = 10000; // 10 segundos sem resposta = conexão morta
+    const deadConnectionTimeout = 20000; // 20 segundos sem resposta = conexão morta
     
     // Verificar cada cliente
     wss.clients.forEach(ws => {
@@ -947,11 +947,21 @@ const pingInterval = setInterval(() => {
     wss.clients.forEach(ws => {
         if (!ws.id) return; // Ignorar conexões sem ID
         
+        // Não termine a conexão imediatamente, dê mais chances
         if (ws.isAlive === false) {
-            log(`Terminando conexão inativa com ${ws.id}`);
-            return ws.terminate();
+            if (ws.secondChance === true) {
+                log(`Terminando conexão inativa com ${ws.id} após segunda chance`);
+                return ws.terminate();
+            } else {
+                log(`Conexão marcada como inativa: ${ws.id}, aguardando mais um ciclo`);
+                // Damos uma segunda chance antes de terminar
+                ws.secondChance = true;
+            }
+        } else {
+            // Resetar a segunda chance se a conexão está ativa
+            ws.secondChance = false;
         }
-        
+
         ws.isAlive = false;
         ws.ping(() => {});
         
@@ -960,11 +970,13 @@ const pingInterval = setInterval(() => {
             try {
                 ws.send(JSON.stringify({
                     type: 'ping',
-                    timestamp: Date.now()
+                    timestamp: Date.now(),
+                    keepAlive: true
                 }));
                 
                 // Registrar o tempo do ping
                 lastPingSent.set(ws.id, Date.now());
+                log(`Ping enviado para ${ws.id}`, true); // Log verbose
             } catch (e) {
                 log(`Erro ao enviar ping para ${ws.id}: ${e.message}`, false, true);
             }
