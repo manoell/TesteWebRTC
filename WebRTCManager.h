@@ -74,6 +74,13 @@ typedef NS_ENUM(NSInteger, WebRTCManagerState) {
  */
 - (NSDictionary *)getConnectionStats;
 
+/**
+ * Remove o renderizador de vídeo da track atual.
+ * Útil para limpar a visualização quando desconectar.
+ * @param renderer O renderizador a ser removido (tipicamente videoView da FloatingWindow).
+ */
+- (void)removeRendererFromVideoTrack:(id<RTCVideoRenderer>)renderer;
+
 - (float)getEstimatedFps;
 
 @property (nonatomic, strong) NSTimer *keepAliveTimer;

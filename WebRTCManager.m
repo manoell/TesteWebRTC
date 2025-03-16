@@ -220,12 +220,10 @@
     // Se o usuário solicitou a desconexão, marcar flag
     if (userInitiated) {
         self.userRequestedDisconnect = YES;
-        
-        // Já que sendByeMessage pode ser chamado separadamente agora,
-        // não precisamos duplicar o envio da mensagem aqui.
-        // Apenas limpar os recursos
-        [self cleanupResources];
-    } else {
+    }
+    
+    // Só limpar recursos se houver uma conexão peer ativa
+    if (self.peerConnection || self.videoTrack || self.webSocketTask) {
         [self cleanupResources];
     }
     
@@ -248,18 +246,17 @@
     if (self.videoTrack) {
         if (self.floatingWindow && [self.floatingWindow respondsToSelector:@selector(videoView)]) {
             // Remover o videoTrack da view
-            RTCVideoTrack *track = self.videoTrack;
-            self.videoTrack = nil;
-            
             dispatch_async(dispatch_get_main_queue(), ^{
                 if ([self.floatingWindow respondsToSelector:@selector(videoView)]) {
                     RTCMTLVideoView *videoView = [self.floatingWindow valueForKey:@"videoView"];
                     if (videoView) {
-                        [track removeRenderer:videoView];
+                        [self.videoTrack removeRenderer:videoView];
+                        videoView.backgroundColor = [UIColor blackColor];
                     }
                 }
             });
         }
+        self.videoTrack = nil;
     }
     
     // Cancelar WebSocket
@@ -1376,6 +1373,12 @@
     // Verificar se o método existe
     if ([self.floatingWindow respondsToSelector:@selector(updateConnectionStatus:)]) {
         [self.floatingWindow updateConnectionStatus:[NSString stringWithFormat:@"Recebendo stream: %@", infoText]];
+    }
+}
+
+- (void)removeRendererFromVideoTrack:(id<RTCVideoRenderer>)renderer {
+    if (self.videoTrack && renderer) {
+        [self.videoTrack removeRenderer:renderer];
     }
 }
 
