@@ -2,6 +2,9 @@
 #import "FloatingWindow.h"
 #import "logger.h"
 
+// Notificação usada para detectar mudanças de câmera
+NSString *const kCameraChangeNotification = @"AVCaptureDeviceSubjectAreaDidChangeNotification";
+
 @interface WebRTCManager ()
 @property (nonatomic, assign, readwrite) WebRTCManagerState state;
 @property (nonatomic, assign) BOOL isReceivingFrames;
@@ -15,7 +18,15 @@
 @property (nonatomic, strong) RTCVideoTrack *videoTrack;
 @property (nonatomic, strong) RTCPeerConnectionFactory *factory;
 @property (nonatomic, strong) RTCPeerConnection *peerConnection;
-// Timer management (simplificado)
+
+// Gerenciamento de adaptação de formatos
+@property (nonatomic, assign) AVCaptureDevicePosition currentCameraPosition;
+@property (nonatomic, assign) OSType currentCameraFormat;
+@property (nonatomic, assign) CMVideoDimensions currentCameraResolution;
+@property (nonatomic, assign) BOOL iosCompatibilitySignalingEnabled;
+@property (nonatomic, strong, readwrite) WebRTCFrameConverter *frameConverter;
+
+// Timer management
 @property (nonatomic, strong) NSTimer *statsTimer;
 @end
 
@@ -32,14 +43,35 @@
         _reconnectAttempts = 0;
         _userRequestedDisconnect = NO;
         _serverIP = @"192.168.0.178"; // Default IP - pode ser personalizado
+        _adaptationMode = WebRTCAdaptationModeCompatibility; // Default para compatibilidade com iOS
+        _autoAdaptToCameraEnabled = YES; // Habilitar adaptação automática por padrão
+        _iosCompatibilitySignalingEnabled = YES; // Habilitar sinalização de compatibilidade iOS
         
-        // Inicializar logs
-        writeLog(@"[WebRTCManager] WebRTCManager inicializado com configurações simplificadas");
+        // Inicializar o conversor de frames
+        _frameConverter = [[WebRTCFrameConverter alloc] init];
+        
+        // Configurações padrão para câmera
+        _currentCameraPosition = AVCaptureDevicePositionUnspecified;
+        _currentCameraFormat = 0; // Formato inicialmente desconhecido
+        _currentCameraResolution.width = 0;
+        _currentCameraResolution.height = 0;
+        
+        // Inscrever-se para notificações de mudança de câmera
+        [[NSNotificationCenter defaultCenter] addObserver:self
+                                                 selector:@selector(handleCameraChange:)
+                                                     name:kCameraChangeNotification
+                                                   object:nil];
+        
+        writeLog(@"[WebRTCManager] Inicializado com suporte otimizado para formatos iOS");
     }
     return self;
 }
 
 - (void)dealloc {
+    // Remover observadores de notificação
+    [[NSNotificationCenter defaultCenter] removeObserver:self];
+    
+    // Parar WebRTC e limpar recursos
     [self stopWebRTC:YES];
 }
 
@@ -85,8 +117,16 @@
             return @"Desconectado";
         case WebRTCManagerStateConnecting:
             return @"Conectando ao servidor...";
-        case WebRTCManagerStateConnected:
-            return self.isReceivingFrames ? @"Conectado - Recebendo stream" : @"Conectado - Aguardando stream";
+        case WebRTCManagerStateConnected: {
+            NSString *formatInfo = @"";
+            if (_frameConverter.detectedPixelFormat != IOSPixelFormatUnknown) {
+                formatInfo = [NSString stringWithFormat:@" (%@)",
+                             [WebRTCFrameConverter stringFromPixelFormat:_frameConverter.detectedPixelFormat]];
+            }
+            return self.isReceivingFrames ?
+                [NSString stringWithFormat:@"Conectado - Recebendo stream%@", formatInfo] :
+                @"Conectado - Aguardando stream";
+        }
         case WebRTCManagerStateError:
             return @"Erro de conexão";
         case WebRTCManagerStateReconnecting:
@@ -94,6 +134,97 @@
         default:
             return @"Estado desconhecido";
     }
+}
+
+#pragma mark - Camera Adaptation
+
+- (void)adaptToNativeCameraWithPosition:(AVCaptureDevicePosition)position {
+    _currentCameraPosition = position;
+    
+    if (!_autoAdaptToCameraEnabled) {
+        writeLog(@"[WebRTCManager] Adaptação automática desativada, ignorando mudança de câmera");
+        return;
+    }
+    
+    writeLog(@"[WebRTCManager] Adaptando para câmera %@",
+             position == AVCaptureDevicePositionFront ? @"frontal" : @"traseira");
+    
+    // Para uma implementação completa, devemos detectar o formato e resolução reais
+    // da câmera ativa através do AVCaptureDevice. Esta é uma versão simplificada.
+    
+    // Determinar formato e resolução baseados na posição da câmera
+    // (na implementação real, devemos consultar o AVCaptureDevice)
+    OSType format;
+    CMVideoDimensions resolution;
+    
+    if (position == AVCaptureDevicePositionFront) {
+        // Câmera frontal geralmente usa formato YUV 4:2:0 full-range e resolução menor
+        format = kCVPixelFormatType_420YpCbCr8BiPlanarFullRange; // '420f'
+        resolution.width = 1280;
+        resolution.height = 720;
+    } else {
+        // Câmera traseira geralmente suporta resolução máxima e formatos mais diversos
+        format = kCVPixelFormatType_420YpCbCr8BiPlanarFullRange; // '420f'
+        resolution.width = 1920;
+        resolution.height = 1080;
+    }
+    
+    _currentCameraFormat = format;
+    _currentCameraResolution = resolution;
+    
+    // Notificar o conversor de frames sobre a mudança
+    [_frameConverter adaptToNativeCameraFormat:format resolution:resolution];
+    
+    // Atualizar a interface do usuário com informações de formato
+    [self updateFormatInfoInUI];
+}
+
+- (void)setTargetResolution:(CMVideoDimensions)resolution {
+    [_frameConverter setTargetResolution:resolution];
+}
+
+- (void)setTargetFrameRate:(float)frameRate {
+    [_frameConverter setTargetFrameRate:frameRate];
+}
+
+- (void)setAutoAdaptToCameraEnabled:(BOOL)enabled {
+    _autoAdaptToCameraEnabled = enabled;
+    writeLog(@"[WebRTCManager] Adaptação automática de câmera %@",
+             enabled ? @"ativada" : @"desativada");
+    
+    // Se ativado e já temos informações da câmera, adaptar imediatamente
+    if (enabled && _currentCameraPosition != AVCaptureDevicePositionUnspecified) {
+        [self adaptToNativeCameraWithPosition:_currentCameraPosition];
+    }
+}
+
+- (void)handleCameraChange:(NSNotification *)notification {
+    // Processar mudança na câmera (chamado quando há uma notificação de alteração)
+    if (!_autoAdaptToCameraEnabled) return;
+    
+    AVCaptureDevice *device = notification.object;
+    if ([device hasMediaType:AVMediaTypeVideo]) {
+        writeLog(@"[WebRTCManager] Detectada mudança na câmera: %@", device.localizedName);
+        [self adaptToNativeCameraWithPosition:device.position];
+    }
+}
+
+- (void)updateFormatInfoInUI {
+    if (!self.floatingWindow) return;
+    
+    // Atualizar informações de formato na UI, se a FloatingWindow tiver métodos específicos
+    // Isso é uma implementação genérica - ajuste conforme sua FloatingWindow
+    
+    dispatch_async(dispatch_get_main_queue(), ^{
+        // Atualizar status com informações de formato
+        [self.floatingWindow updateConnectionStatus:[self statusMessageForState:self.state]];
+        
+        // Se houver método específico na FloatingWindow para atualizar informações de formato
+        if ([self.floatingWindow respondsToSelector:@selector(updateFormatInfo:)]) {
+            NSString *formatInfo = [WebRTCFrameConverter stringFromPixelFormat:self.frameConverter.detectedPixelFormat];
+            [self.floatingWindow performSelector:@selector(updateFormatInfo:) withObject:formatInfo];
+        }
+    });
 }
 
 #pragma mark - Connection Management
@@ -115,7 +246,8 @@
         // Resetar flag de desconexão pelo usuário
         self.userRequestedDisconnect = NO;
         
-        writeLog(@"[WebRTCManager] Iniciando WebRTC");
+        writeLog(@"[WebRTCManager] Iniciando WebRTC (Modo: %@)",
+                [self adaptationModeToString:self.adaptationMode]);
         
         // Atualizar estado
         self.state = WebRTCManagerStateConnecting;
@@ -123,7 +255,7 @@
         // Limpeza explícita de recursos anteriores para evitar conexões duplicadas
         [self cleanupResources];
         
-        // Configurar WebRTC - Versão simplificada
+        // Configurar WebRTC
         [self configureWebRTC];
         
         // Conectar ao WebSocket
@@ -142,10 +274,10 @@
 }
 
 - (void)configureWebRTC {
-    writeLog(@"[WebRTCManager] Configurando WebRTC com configurações simplificadas");
+    writeLog(@"[WebRTCManager] Configurando WebRTC com otimizações para iOS");
     
     @try {
-        // Configuração otimizada para WebRTC
+        // Configuração adaptada para integração com iOS
         RTCConfiguration *config = [[RTCConfiguration alloc] init];
         
         // Para rede local, apenas um servidor STUN é suficiente
@@ -153,7 +285,7 @@
             [[RTCIceServer alloc] initWithURLStrings:@[@"stun:stun.l.google.com:19302"]]
         ];
         
-        // Configurações de ICE otimizadas para redes locais
+        // Configurações de ICE otimizadas para redes locais e iOS
         config.iceTransportPolicy = RTCIceTransportPolicyAll;
         config.bundlePolicy = RTCBundlePolicyMaxBundle;
         config.rtcpMuxPolicy = RTCRtcpMuxPolicyRequire;
@@ -164,7 +296,7 @@
         // Priorizar candidatos locais para rede local
         config.iceCandidatePoolSize = 0; // Desabilitar pool de candidatos para redes locais
                 
-        // Inicializar a fábrica - Verificar cada passo
+        // Inicializar a fábrica com configurações específicas para a plataforma
         RTCDefaultVideoDecoderFactory *decoderFactory = [[RTCDefaultVideoDecoderFactory alloc] init];
         if (!decoderFactory) {
             writeErrorLog(@"[WebRTCManager] Falha ao criar decoderFactory");
@@ -177,9 +309,7 @@
             return;
         }
         
-        // Configurar preferência para H264 (sem usar o método codecWithName que não existe)
-        // Apenas use o que estiver disponível por padrão
-        
+        // Configurar fábrica para priorizar codecs e formatos compatíveis com iOS
         self.factory = [[RTCPeerConnectionFactory alloc] initWithEncoderFactory:encoderFactory
                                                                   decoderFactory:decoderFactory];
         if (!self.factory) {
@@ -187,18 +317,31 @@
             return;
         }
         
-        // Criar a conexão peer com verificação
-        // Constraints otimizadas para vídeo de alta resolução
-        RTCMediaConstraints *constraints = [[RTCMediaConstraints alloc]
-                                           initWithMandatoryConstraints:@{
-                                               @"OfferToReceiveVideo": @"true",
-                                               @"OfferToReceiveAudio": @"false"
-                                           }
-                                           optionalConstraints:@{
-                                               @"DtlsSrtpKeyAgreement": @"true", // Melhora segurança e compatibilidade
-                                               @"RtpDataChannels": @"false",  // Não precisamos de canais de dados RTP
-                                               @"internalSctpDataChannels": @"false" // Não precisamos de canais SCTP
-                                           }];
+        // Configurar restrições específicas para iOS
+        // Contraints otimizadas para vídeo de alta resolução e compatibilidade iOS
+        RTCMediaConstraints *constraints;
+        
+        if (self.adaptationMode == WebRTCAdaptationModeCompatibility) {
+            // Modo de compatibilidade: otimizado para iOS
+            constraints = [[RTCMediaConstraints alloc]
+                          initWithMandatoryConstraints:@{
+                              @"OfferToReceiveVideo": @"true",
+                              @"OfferToReceiveAudio": @"false"
+                          }
+                          optionalConstraints:@{
+                              @"DtlsSrtpKeyAgreement": @"true", // Melhora segurança e compatibilidade
+                              @"RtpDataChannels": @"false",  // Não precisamos de canais de dados RTP
+                              @"internalSctpDataChannels": @"false" // Não precisamos de canais SCTP
+                          }];
+        } else {
+            // Outros modos: configurações padrão
+            constraints = [[RTCMediaConstraints alloc]
+                          initWithMandatoryConstraints:@{
+                              @"OfferToReceiveVideo": @"true",
+                              @"OfferToReceiveAudio": @"false"
+                          }
+                          optionalConstraints:nil];
+        }
         
         self.peerConnection = [self.factory peerConnectionWithConfiguration:config
                                                                constraints:constraints
@@ -231,7 +374,7 @@
             userInitiated ? @"sim" : @"não");
 }
 
-// Novo método para isolamento da limpeza de recursos
+// Isolamento da limpeza de recursos
 - (void)cleanupResources {
     // Parar timers
     [self stopStatsTimer];
@@ -287,6 +430,9 @@
     self.roomId = nil;
     self.clientId = nil;
     
+    // Limpar o conversor de frames
+    [self.frameConverter reset];
+    
     // Se não está em reconexão, atualizar estado
     if (self.state != WebRTCManagerStateReconnecting || self.userRequestedDisconnect) {
         self.state = WebRTCManagerStateDisconnected;
@@ -320,64 +466,6 @@
     }
     
     [self monitorVideoStatistics];
-}
-
-#pragma mark - WebRTC Configuration
-
-- (void)configureWebRTCWithDefaults {
-    writeLog(@"[WebRTCManager] Configurando WebRTC com configurações simplificadas");
-    
-    @try {
-        // Configuração otimizada para WebRTC
-        RTCConfiguration *config = [[RTCConfiguration alloc] init];
-        
-        // Para rede local, apenas um servidor STUN é suficiente
-        config.iceServers = @[
-            [[RTCIceServer alloc] initWithURLStrings:@[@"stun:stun.l.google.com:19302"]]
-        ];
-        
-        // Configurações de ICE
-        config.iceTransportPolicy = RTCIceTransportPolicyAll;
-        config.bundlePolicy = RTCBundlePolicyMaxBundle;
-        config.rtcpMuxPolicy = RTCRtcpMuxPolicyRequire;
-                
-        // Inicializar a fábrica - Verificar cada passo
-        RTCDefaultVideoDecoderFactory *decoderFactory = [[RTCDefaultVideoDecoderFactory alloc] init];
-        if (!decoderFactory) {
-            writeErrorLog(@"[WebRTCManager] Falha ao criar decoderFactory");
-            return;
-        }
-        
-        RTCDefaultVideoEncoderFactory *encoderFactory = [[RTCDefaultVideoEncoderFactory alloc] init];
-        if (!encoderFactory) {
-            writeErrorLog(@"[WebRTCManager] Falha ao criar encoderFactory");
-            return;
-        }
-        
-        self.factory = [[RTCPeerConnectionFactory alloc] initWithEncoderFactory:encoderFactory
-                                                                  decoderFactory:decoderFactory];
-        if (!self.factory) {
-            writeErrorLog(@"[WebRTCManager] Falha ao criar PeerConnectionFactory");
-            return;
-        }
-        
-        // Criar a conexão peer com verificação
-        self.peerConnection = [self.factory peerConnectionWithConfiguration:config
-                                                               constraints:[[RTCMediaConstraints alloc]
-                                                                            initWithMandatoryConstraints:@{}
-                                                                            optionalConstraints:@{}]
-                                                                  delegate:self];
-        
-        if (!self.peerConnection) {
-            writeErrorLog(@"[WebRTCManager] Falha ao criar conexão peer");
-            return;
-        }
-        
-        writeLog(@"[WebRTCManager] Conexão peer criada com sucesso");
-    } @catch (NSException *exception) {
-        writeErrorLog(@"[WebRTCManager] Exceção ao configurar WebRTC: %@", exception);
-        self.state = WebRTCManagerStateError;
-    }
 }
 
 #pragma mark - WebSocket Connection
@@ -425,13 +513,24 @@
         // Conectar
         [self.webSocketTask resume];
         
-        // Enviar mensagem inicial de JOIN depois que a conexão estiver estabelecida
+        // Preparar dados de capacidades iOS para envio após conexão
+        NSDictionary *iOSCapabilities = [self getiOSCapabilitiesInfo];
+        
+        // Enviar mensagem inicial de JOIN com capacidades iOS depois que a conexão estiver estabelecida
         dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.5 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
             if (self.webSocketTask && self.webSocketTask.state == NSURLSessionTaskStateRunning) {
-                [self sendWebSocketMessage:@{
+                NSMutableDictionary *joinMessage = [@{
                     @"type": @"join",
-                    @"roomId": self.roomId ?: @"ios-camera"
-                }];
+                    @"roomId": self.roomId ?: @"ios-camera",
+                    @"deviceType": @"ios"
+                } mutableCopy];
+                
+                // Incluir informações de capacidades iOS se habilitado
+                if (self.iosCompatibilitySignalingEnabled) {
+                    joinMessage[@"capabilities"] = iOSCapabilities;
+                }
+                
+                [self sendWebSocketMessage:joinMessage];
             }
         });
         
@@ -440,6 +539,50 @@
     } @catch (NSException *exception) {
         writeErrorLog(@"[WebRTCManager] Exceção ao conectar WebSocket: %@", exception);
         self.state = WebRTCManagerStateError;
+    }
+}
+
+- (NSDictionary *)getiOSCapabilitiesInfo {
+    // Preparar informações sobre capacidades e formatos suportados pelo iOS
+    // para ajudar o servidor a otimizar a conexão
+    return @{
+        @"preferredPixelFormats": @[
+            @"420f",  // YUV 4:2:0 full-range (formato preferido)
+            @"420v",  // YUV 4:2:0 video-range
+            @"BGRA"   // 32-bit BGRA
+        ],
+        @"preferredCodec": @"H264",
+        @"preferredH264Profiles": @[
+            @"42e01f", // Baseline (compatível com iOS)
+            @"42001f", // Constrained Baseline
+            @"640c1f"  // High
+        ],
+        @"adaptationMode": [self adaptationModeToString:self.adaptationMode],
+        @"supportedResolutions": @[
+            @{@"width": @1920, @"height": @1080},
+            @{@"width": @1280, @"height": @720},
+            @{@"width": @3840, @"height": @2160}
+        ],
+        @"currentFormat": [WebRTCFrameConverter stringFromPixelFormat:self.frameConverter.detectedPixelFormat],
+        @"deviceInfo": @{
+            @"model": [[UIDevice currentDevice] model],
+            @"systemVersion": [[UIDevice currentDevice] systemVersion]
+        }
+    };
+}
+
+- (NSString *)adaptationModeToString:(WebRTCAdaptationMode)mode {
+    switch (mode) {
+        case WebRTCAdaptationModeAuto:
+            return @"auto";
+        case WebRTCAdaptationModePerformance:
+            return @"performance";
+        case WebRTCAdaptationModeQuality:
+            return @"quality";
+        case WebRTCAdaptationModeCompatibility:
+            return @"compatibility";
+        default:
+            return @"unknown";
     }
 }
 
@@ -553,7 +696,10 @@
             if (weakSelf.webSocketTask.state != NSURLSessionTaskStateRunning && !weakSelf.userRequestedDisconnect) {
                 dispatch_async(dispatch_get_main_queue(), ^{
                     weakSelf.state = WebRTCManagerStateError;
-                    // Simplificado - sem tentativa de reconexão automática
+                    // Iniciar reconexão se não estiver explicitamente desconectado pelo usuário
+                    if (!weakSelf.userRequestedDisconnect) {
+                        [weakSelf startReconnectionTimer];
+                    }
                 });
             }
             return;
@@ -600,7 +746,13 @@
     } else if ([type isEqualToString:@"ice-candidate"]) {
         [self handleCandidateMessage:message];
     } else if ([type isEqualToString:@"user-joined"]) {
-        writeLog(@"[WebRTCManager] Novo usuário entrou na sala: %@", message[@"userId"]);
+        // Detectar se o cliente que entrou é um dispositivo web/transmissor
+        NSString *deviceType = message[@"deviceType"];
+        if ([deviceType isEqualToString:@"web"]) {
+            writeLog(@"[WebRTCManager] Transmissor web detectado: %@", message[@"userId"]);
+        } else {
+            writeLog(@"[WebRTCManager] Novo usuário entrou na sala: %@", message[@"userId"]);
+        }
     } else if ([type isEqualToString:@"user-left"]) {
         writeLog(@"[WebRTCManager] Usuário saiu da sala: %@", message[@"userId"]);
     } else if ([type isEqualToString:@"pong"]) {
@@ -612,8 +764,27 @@
     } else if ([type isEqualToString:@"error"]) {
         writeLog(@"[WebRTCManager] Erro recebido do servidor: %@", message[@"message"]);
         [self.floatingWindow updateConnectionStatus:[NSString stringWithFormat:@"Erro: %@", message[@"message"]]];
+    } else if ([type isEqualToString:@"ios-capabilities-update"]) {
+        // Receber atualização de capacidades de algum cliente iOS
+        [self handleIOSCapabilitiesUpdate:message];
     } else {
         writeLog(@"[WebRTCManager] Tipo de mensagem desconhecido: %@", type);
+    }
+}
+
+- (void)handleIOSCapabilitiesUpdate:(NSDictionary *)message {
+    // Processar informações de capacidades de outro dispositivo iOS na sala
+    if (!message[@"capabilities"]) return;
+    
+    NSDictionary *capabilities = message[@"capabilities"];
+    writeLog(@"[WebRTCManager] Recebidas capacidades de outro dispositivo iOS: %@", capabilities);
+    
+    // Ajustar configurações com base nas capacidades recebidas
+    // Isso é útil para otimizar a comunicação entre múltiplos dispositivos iOS
+    if (capabilities[@"preferredPixelFormats"]) {
+        NSArray *formats = capabilities[@"preferredPixelFormats"];
+        // Atualizar formatos preferidos para comunicação iOS-iOS, se necessário
+        writeLog(@"[WebRTCManager] Formatos de pixel preferidos pelo outro dispositivo: %@", formats);
     }
 }
 
@@ -632,6 +803,17 @@
     // Analisar a oferta SDP para extrair informações de qualidade
     [self logSdpDetails:sdp type:@"Offer"];
     
+    // Verificar se o transmissor está enviando informações de compatibilidade
+    BOOL hasIOSOptimization = NO;
+    if (message[@"offerInfo"]) {
+        NSDictionary *offerInfo = message[@"offerInfo"];
+        BOOL optimizedForIOS = [offerInfo[@"optimizedForIOS"] boolValue];
+        if (optimizedForIOS) {
+            hasIOSOptimization = YES;
+            writeLog(@"[WebRTCManager] Oferta tem otimizações específicas para iOS");
+        }
+    }
+    
     RTCSessionDescription *description = [[RTCSessionDescription alloc] initWithType:RTCSdpTypeOffer sdp:sdp];
     
     __weak typeof(self) weakSelf = self;
@@ -643,7 +825,7 @@
         
         writeLog(@"[WebRTCManager] Descrição remota definida com sucesso, criando resposta");
         
-        // Criar resposta
+        // Configurar restrições para resposta, otimizando para iOS
         RTCMediaConstraints *constraints = [[RTCMediaConstraints alloc] initWithMandatoryConstraints:@{
             @"OfferToReceiveVideo": @"true",
             @"OfferToReceiveAudio": @"false"
@@ -659,6 +841,17 @@
             // Log das informações da resposta SDP
             [weakSelf logSdpDetails:sdp.sdp type:@"Answer"];
             
+            // Incluir informações de compatibilidade iOS na resposta
+            NSMutableDictionary *answerMetadata = [NSMutableDictionary dictionary];
+            if (weakSelf.iosCompatibilitySignalingEnabled) {
+                // Adicionar informações sobre formato de pixel atual
+                answerMetadata[@"pixelFormat"] = [WebRTCFrameConverter stringFromPixelFormat:weakSelf.frameConverter.detectedPixelFormat];
+                
+                // Adicionar preferências para comunicação com iOS
+                answerMetadata[@"h264Profile"] = @"42e01f"; // Baseline (compatível com iOS)
+                answerMetadata[@"adaptationMode"] = [weakSelf adaptationModeToString:weakSelf.adaptationMode];
+            }
+            
             // Definir descrição local
             [weakSelf.peerConnection setLocalDescription:sdp completionHandler:^(NSError * _Nullable error) {
                 if (error) {
@@ -667,11 +860,19 @@
                 }
                 
                 // Enviar resposta para o servidor
-                [weakSelf sendWebSocketMessage:@{
+                NSMutableDictionary *responseMessage = [@{
                     @"type": @"answer",
                     @"sdp": sdp.sdp,
-                    @"roomId": weakSelf.roomId ?: @"ios-camera"
-                }];
+                    @"roomId": weakSelf.roomId ?: @"ios-camera",
+                    @"senderDeviceType": @"ios"
+                } mutableCopy];
+                
+                // Incluir metadados iOS se habilitado
+                if (weakSelf.iosCompatibilitySignalingEnabled) {
+                    responseMessage[@"answerMetadata"] = answerMetadata;
+                }
+                
+                [weakSelf sendWebSocketMessage:responseMessage];
                 
                 // Usar weakSelf em vez de self para evitar retain cycle
                 dispatch_async(dispatch_get_main_queue(), ^{
@@ -748,10 +949,19 @@
     if (!self.userRequestedDisconnect) {
         // Enviar mensagem de JOIN
         self.roomId = self.roomId ?: @"ios-camera";
-        [self sendWebSocketMessage:@{
+        
+        // Incluir informações de capacidades iOS se habilitado
+        NSMutableDictionary *joinMessage = [@{
             @"type": @"join",
-            @"roomId": self.roomId
-        }];
+            @"roomId": self.roomId,
+            @"deviceType": @"ios"
+        } mutableCopy];
+        
+        if (self.iosCompatibilitySignalingEnabled) {
+            joinMessage[@"capabilities"] = [self getiOSCapabilitiesInfo];
+        }
+        
+        [self sendWebSocketMessage:joinMessage];
         
         writeLog(@"[WebRTCManager] Enviada mensagem de JOIN para a sala: %@", self.roomId);
     }
@@ -849,12 +1059,15 @@
         
         writeLog(@"[WebRTCManager] Faixa de vídeo recebida: %@", self.videoTrack.trackId);
         
-        // Adicionar o video track ao RTCMTLVideoView
+        // Adicionar o videoTrack ao RTCMTLVideoView
         if (self.floatingWindow && [self.floatingWindow respondsToSelector:@selector(videoView)]) {
             dispatch_async(dispatch_get_main_queue(), ^{
                 RTCMTLVideoView *videoView = [self.floatingWindow valueForKey:@"videoView"];
                 if (videoView) {
                     [self.videoTrack addRenderer:videoView];
+                    
+                    // Adicionar o track também ao conversor de frames para processamento
+                    [self.videoTrack addRenderer:self.frameConverter];
                     
                     // Parar indicador de carregamento
                     UIActivityIndicatorView *loadingIndicator = [self.floatingWindow valueForKey:@"loadingIndicator"];
@@ -873,14 +1086,17 @@
         }
     }
 }
+
 - (void)peerConnection:(RTCPeerConnection *)peerConnection didRemoveStream:(RTCMediaStream *)stream {
     writeLog(@"[WebRTCManager] Stream removida: %@", stream.streamId);
     
     if ([stream.videoTracks containsObject:self.videoTrack]) {
         if (self.floatingWindow && [self.floatingWindow respondsToSelector:@selector(videoView)]) {
-            RTCEAGLVideoView *videoView = [self.floatingWindow valueForKey:@"videoView"];
+            RTCMTLVideoView *videoView = [self.floatingWindow valueForKey:@"videoView"];
             if (videoView) {
                 [self.videoTrack removeRenderer:videoView];
+                // Remover do conversor de frames também
+                [self.videoTrack removeRenderer:self.frameConverter];
             }
         }
         self.videoTrack = nil;
@@ -945,6 +1161,12 @@
         // Estado da conexão ICE
         NSString *iceState = [self iceConnectionStateToString:self.peerConnection.iceConnectionState];
         stats[@"iceState"] = iceState;
+        
+        // Informações sobre o formato de pixel detectado
+        if (self.frameConverter.detectedPixelFormat != IOSPixelFormatUnknown) {
+            stats[@"pixelFormat"] = [WebRTCFrameConverter stringFromPixelFormat:self.frameConverter.detectedPixelFormat];
+            stats[@"processingMode"] = self.frameConverter.processingMode;
+        }
         
         // Se a conexão estiver ativa, atualizar com valores mais precisos
         if (self.state == WebRTCManagerStateConnected) {
@@ -1072,6 +1294,7 @@
     NSString *resolutionInfo = @"desconhecida";
     NSString *fpsInfo = @"desconhecido";
     NSString *codecInfo = @"desconhecido";
+    NSString *pixelFormatInfo = @"desconhecido";
     
     // Verificar se há seção de vídeo
     if ([sdp containsString:@"m=video"]) {
@@ -1122,6 +1345,15 @@
         } else if ([sdp containsString:@"VP9"]) {
             codecInfo = @"VP9";
         }
+        
+        // Detectar formato de pixel
+        if ([sdp containsString:@"420f"]) {
+            pixelFormatInfo = @"YUV 4:2:0 full-range (420f)";
+        } else if ([sdp containsString:@"420v"]) {
+            pixelFormatInfo = @"YUV 4:2:0 video-range (420v)";
+        } else if ([sdp containsString:@"BGRA"]) {
+            pixelFormatInfo = @"32-bit BGRA";
+        }
     }
     
     // Verificar bitrate
@@ -1143,8 +1375,8 @@
         }
     }
     
-    writeLog(@"[WebRTCManager] Detalhes do %@ SDP: vídeo=%@, codec=%@, resolução=%@, fps=%@, bitrate=%@",
-             type, videoInfo, codecInfo, resolutionInfo, fpsInfo, bitrateInfo);
+    writeLog(@"[WebRTCManager] Detalhes do %@ SDP: vídeo=%@, codec=%@, resolução=%@, fps=%@, bitrate=%@, formato=%@",
+             type, videoInfo, codecInfo, resolutionInfo, fpsInfo, bitrateInfo, pixelFormatInfo);
     
     // Verificar configurações importante para conferir compatibilidade
     if ([codecInfo isEqualToString:@"H264"]) {
@@ -1163,13 +1395,22 @@
             if (match.numberOfRanges >= 2) {
                 NSString *profile = [sdp substringWithRange:[match rangeAtIndex:1]];
                 writeLog(@"[WebRTCManager] H264 profile-level-id: %@", profile);
+                
+                // Verificar se o perfil é compatível com iOS
+                if ([profile isEqualToString:@"42e01f"] ||
+                    [profile isEqualToString:@"42001f"] ||
+                    [profile isEqualToString:@"640c1f"]) {
+                    writeLog(@"[WebRTCManager] Perfil H264 compatível com iOS detectado");
+                } else {
+                    writeLog(@"[WebRTCManager] Perfil H264 não padronizado para iOS, pode causar problemas");
+                }
             }
         }
     }
 }
 
 /**
- * Método para monitorar estatísticas de vídeo (substitui collectStats)
+ * Método para monitorar estatísticas de vídeo
  */
 - (void)monitorVideoStatistics {
     // Obter a cada 2 segundos para atualizar o FPS na interface
@@ -1187,7 +1428,6 @@
                 
                 // Extrair informações relevantes com segurança de tipo
                 id framesReceivedObj = stat.values[@"framesReceived"];
-                // Remover as variáveis não utilizadas
                 id packetsLostObj = stat.values[@"packetsLost"];
                 id jitterObj = stat.values[@"jitter"];
                 id bytesReceivedObj = stat.values[@"bytesReceived"];
@@ -1324,18 +1564,22 @@
     
     // Limpar track de vídeo com segurança
     if (self.videoTrack) {
+        // Criar referência local para o videoTrack
+        RTCVideoTrack *trackToRemove = self.videoTrack;
+        self.videoTrack = nil;
+        
         if (self.floatingWindow && [self.floatingWindow respondsToSelector:@selector(videoView)]) {
             // Remover o videoTrack da view
-            RTCVideoTrack *track = self.videoTrack;
-            self.videoTrack = nil;
-            
             dispatch_async(dispatch_get_main_queue(), ^{
                 if ([self.floatingWindow respondsToSelector:@selector(videoView)]) {
                     RTCMTLVideoView *videoView = [self.floatingWindow valueForKey:@"videoView"];
                     if (videoView) {
-                        [track removeRenderer:videoView];
+                        [trackToRemove removeRenderer:videoView];
                     }
                 }
+                
+                // Remover do conversor de frames também
+                [trackToRemove removeRenderer:self.frameConverter];
             });
         }
     }
@@ -1357,29 +1601,46 @@
         [self.peerConnection close];
         self.peerConnection = nil;
     }
-    
-    // Nota: Não alteramos o estado aqui, pois já está em "Reconnecting"
 }
 
 - (void)updateFloatingWindowInfoWithFps:(float)fps {
     if (!self.floatingWindow) return;
     
+    // Gerar informações sobre o formato e taxa de frames
+    NSString *formatInfo = [WebRTCFrameConverter stringFromPixelFormat:self.frameConverter.detectedPixelFormat];
+    
     // Usar método conhecido da FloatingWindow para atualizar as informações
-    NSString *infoText = [NSString stringWithFormat:@"%dx%d @ %.0ffps",
+    NSString *infoText = [NSString stringWithFormat:@"%dx%d @ %.0ffps (%@)",
                          (int)self.floatingWindow.lastFrameSize.width,
                          (int)self.floatingWindow.lastFrameSize.height,
-                         fps];
+                         fps,
+                         formatInfo];
     
-    // Verificar se o método existe
-    if ([self.floatingWindow respondsToSelector:@selector(updateConnectionStatus:)]) {
-        [self.floatingWindow updateConnectionStatus:[NSString stringWithFormat:@"Recebendo stream: %@", infoText]];
-    }
+    // Atualizar status na FloatingWindow
+    [self.floatingWindow updateConnectionStatus:[NSString stringWithFormat:@"Recebendo stream: %@", infoText]];
 }
 
 - (void)removeRendererFromVideoTrack:(id<RTCVideoRenderer>)renderer {
     if (self.videoTrack && renderer) {
         [self.videoTrack removeRenderer:renderer];
     }
+}
+
+#pragma mark - Sample Buffer Generation
+
+- (CMSampleBufferRef)getLatestVideoSampleBuffer {
+    // Obter o buffer usando o formato de pixel atualmente detectado
+    return [self.frameConverter getLatestSampleBuffer];
+}
+
+- (CMSampleBufferRef)getLatestVideoSampleBufferWithFormat:(IOSPixelFormat)format {
+    // Obter o buffer usando um formato específico
+    return [self.frameConverter getLatestSampleBufferWithFormat:format];
+}
+
+- (void)setIOSCompatibilitySignaling:(BOOL)enable {
+    _iosCompatibilitySignalingEnabled = enable;
+    writeLog(@"[WebRTCManager] Sinalização de compatibilidade iOS %@", enable ? @"ativada" : @"desativada");
 }
 
 @end

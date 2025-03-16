@@ -17,6 +17,7 @@ typedef NS_ENUM(NSInteger, FloatingWindowState) {
  *
  * Janela flutuante que exibe o preview do stream WebRTC.
  * Implementada para se comportar como AssistiveTouch quando minimizada.
+ * Inclui suporte para exibição de informações de formato nativo iOS.
  */
 @interface FloatingWindow : UIWindow <RTCVideoViewDelegate>
 
@@ -55,6 +56,11 @@ typedef NS_ENUM(NSInteger, FloatingWindowState) {
  */
 @property (nonatomic, strong) UILabel *statusLabel;
 
+/**
+ * Label para exibição de informações de formato de vídeo
+ */
+@property (nonatomic, strong) UILabel *formatInfoLabel;
+
 #pragma mark - Initialization & Lifecycle Methods
 
 /**
@@ -79,7 +85,25 @@ typedef NS_ENUM(NSInteger, FloatingWindowState) {
 
 /**
  * Atualiza o status da conexão exibido.
+ * @param status Texto descritivo do status de conexão.
  */
 - (void)updateConnectionStatus:(NSString *)status;
+
+/**
+ * Atualiza as informações de formato de vídeo.
+ * @param formatInfo Descrição do formato de pixel (como "YUV 4:2:0 full-range").
+ */
+- (void)updateFormatInfo:(NSString *)formatInfo;
+
+/**
+ * Atualiza o modo de processamento exibido (hardware/software).
+ * @param processingMode Descrição do modo de processamento.
+ */
+- (void)updateProcessingMode:(NSString *)processingMode;
+
+/**
+ * Atualiza o ícone com base no estado e formato atual.
+ */
+- (void)updateIconWithFormatInfo;
 
 @end

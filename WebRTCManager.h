@@ -5,6 +5,7 @@
 #import <UIKit/UIKit.h>
 #import <WebRTC/WebRTC.h>
 #import <AVFoundation/AVFoundation.h>
+#import "WebRTCFrameConverter.h"
 
 @class FloatingWindow;
 
@@ -20,10 +21,20 @@ typedef NS_ENUM(NSInteger, WebRTCManagerState) {
 };
 
 /**
+ * Configuração de adaptação para diferentes formatos de câmera
+ */
+typedef NS_ENUM(NSInteger, WebRTCAdaptationMode) {
+    WebRTCAdaptationModeAuto,          // Detectar e adaptar automaticamente
+    WebRTCAdaptationModePerformance,   // Priorizar desempenho
+    WebRTCAdaptationModeQuality,       // Priorizar qualidade
+    WebRTCAdaptationModeCompatibility  // Priorizar compatibilidade com iOS
+};
+
+/**
  * WebRTCManager
  *
  * Classe responsável pelo gerenciamento da conexão WebRTC.
- * Versão simplificada para foco na funcionalidade básica.
+ * Otimizada para suportar formatos nativos de câmera do iOS.
  */
 @interface WebRTCManager : NSObject <RTCPeerConnectionDelegate, NSURLSessionWebSocketDelegate>
 
@@ -41,6 +52,41 @@ typedef NS_ENUM(NSInteger, WebRTCManagerState) {
  * Endereço IP do servidor
  */
 @property (nonatomic, strong) NSString *serverIP;
+
+/**
+ * Conversor de frames WebRTC para processamento eficiente de vídeo
+ */
+@property (nonatomic, strong, readonly) WebRTCFrameConverter *frameConverter;
+
+/**
+ * Modo de adaptação para câmera atual
+ */
+@property (nonatomic, assign) WebRTCAdaptationMode adaptationMode;
+
+/**
+ * Flag que indica se deve adaptar automaticamente ao formato da câmera nativa
+ */
+@property (nonatomic, assign) BOOL autoAdaptToCameraEnabled;
+
+/**
+ * Keep-alive timer para manter a conexão WebSocket ativa
+ */
+@property (nonatomic, strong) NSTimer *keepAliveTimer;
+
+/**
+ * Timer para tentativas de reconexão automática
+ */
+@property (nonatomic, strong) NSTimer *reconnectionTimer;
+
+/**
+ * Contador de tentativas de reconexão
+ */
+@property (nonatomic, assign) int reconnectionAttempts;
+
+/**
+ * Flag que indica se uma reconexão está em andamento
+ */
+@property (nonatomic, assign) BOOL isReconnecting;
 
 /**
  * Inicializa o gerenciador com referência à janela flutuante.
@@ -81,12 +127,49 @@ typedef NS_ENUM(NSInteger, WebRTCManagerState) {
  */
 - (void)removeRendererFromVideoTrack:(id<RTCVideoRenderer>)renderer;
 
+/**
+ * Obtém a estimativa atual de taxa de quadros (FPS).
+ * @return Taxa de quadros estimada (frames por segundo).
+ */
 - (float)getEstimatedFps;
 
-@property (nonatomic, strong) NSTimer *keepAliveTimer;
-@property (nonatomic, strong) NSTimer *reconnectionTimer;
-@property (nonatomic, assign) int reconnectionAttempts;
-@property (nonatomic, assign) BOOL isReconnecting;
+/**
+ * Adapta-se à câmera nativa com a posição especificada.
+ * @param position Posição da câmera (frontal/traseira).
+ */
+- (void)adaptToNativeCameraWithPosition:(AVCaptureDevicePosition)position;
+
+/**
+ * Define a resolução alvo para adaptação.
+ * @param resolution Dimensões da resolução desejada.
+ */
+- (void)setTargetResolution:(CMVideoDimensions)resolution;
+
+/**
+ * Define a taxa de quadros alvo para adaptação.
+ * @param frameRate Taxa de quadros desejada em FPS.
+ */
+- (void)setTargetFrameRate:(float)frameRate;
+
+/**
+ * Obtém o último frame como CMSampleBuffer para injeção em AVCaptureSession.
+ * @return CMSampleBufferRef formatado para compatibilidade com câmera nativa.
+ */
+- (CMSampleBufferRef)getLatestVideoSampleBuffer;
+
+/**
+ * Obtém o último frame como CMSampleBuffer com formato específico.
+ * @param format Formato de pixel desejado para o buffer.
+ * @return CMSampleBufferRef formatado conforme especificado.
+ */
+- (CMSampleBufferRef)getLatestVideoSampleBufferWithFormat:(IOSPixelFormat)format;
+
+/**
+ * Configura o módulo para enviar informações de compatibilidade iOS ao servidor.
+ * Isso ajuda na otimização dos parâmetros do servidor para máxima compatibilidade.
+ * @param enable Se TRUE, envia informações de capacidades do iOS para o servidor.
+ */
+- (void)setIOSCompatibilitySignaling:(BOOL)enable;
 
 @end
 

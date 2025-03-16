@@ -1,6 +1,6 @@
 /**
  * Servidor WebRTC otimizado para transmissão em alta qualidade 4K/60fps
- * Focado em rede local com mínima latência
+ * Com foco específico em compatibilidade com formatos iOS
  */
 
 const express = require('express');
@@ -18,14 +18,56 @@ const LOGGING_ENABLED = true;
 const LOG_FILE = './server.log';
 const MAX_CONNECTIONS = 10; // Limitado a transmissor + receptor
 const KEEP_ALIVE_INTERVAL = 1000; // 1 segundo para detecção rápida de desconexões
-const HIGH_QUALITY_BITRATE = 12000; // 12Mbps para 4K (equilibrado desempenho/qualidade)
 
 // Parâmetros de qualidade adaptativos
 const QUALITY_PRESETS = {
-    '2160p': 12000, // 4K: 12Mbps
-    '1440p': 8000,  // QHD: 8Mbps
-    '1080p': 5000,  // Full HD: 5Mbps
-    '720p': 2500    // HD: 2.5Mbps
+    '2160p': { // 4K
+        bitrate: 12000, // 12Mbps
+        width: 3840,
+        height: 2160
+    },
+    '1440p': { // QHD
+        bitrate: 8000, // 8Mbps
+        width: 2560,
+        height: 1440
+    },
+    '1080p': { // Full HD
+        bitrate: 5000, // 5Mbps
+        width: 1920,
+        height: 1080
+    },
+    '720p': { // HD
+        bitrate: 2500, // 2.5Mbps
+        width: 1280,
+        height: 720
+    }
+};
+
+// Configurações otimizadas para iOS
+const IOS_PREFERRED_FORMATS = {
+    // Ordem de preferência de formatos de pixel iOS (do mais para o menos preferido)
+    pixelFormats: ['420f', '420v', 'BGRA'],
+    // Codecs preferidos para compatibilidade com iOS
+    videoCodecs: {
+        H264: {
+            // Profiles compatíveis com iOS, em ordem de preferência
+            profiles: ['42e01f', '42001f', '640c1f'],
+            // Nível padrão
+            level: '1f',
+            // Packetization mode preferencial (1 para iOS)
+            packetizationMode: 1
+        },
+        VP8: {
+            // VP8 é suportado, mas não preferencial
+            priority: 2
+        }
+    },
+    // Parâmetros de transmissão ideais para iOS
+    rtpParameters: {
+        degradationPreference: 'maintain-resolution', // Priorizar manter resolução
+        maxBitrate: 12000000, // 12Mbps máximo
+        minBitrate: 100000 // 100kbps mínimo
+    }
 };
 
 // Inicializar aplicativo Express
@@ -52,6 +94,7 @@ const roomStats = {};
 const clients = new Map();
 const lastPingSent = new Map(); // Mapear clientes para tempo do último ping
 const lastPongReceived = new Map(); // Mapear clientes para tempo do último pong
+const clientDeviceTypes = new Map(); // Armazenar tipo de dispositivo do cliente (iOS, web, etc)
 
 /**
  * Função para logging com timestamp
@@ -120,6 +163,8 @@ const checkDeadConnections = () => {
     
     // Verificar cada cliente
     wss.clients.forEach(ws => {
+        if (!ws.id) return; // Ignorar conexões sem ID
+
         const lastPing = lastPingSent.get(ws.id) || 0;
         const lastPong = lastPongReceived.get(ws.id) || 0;
         
@@ -155,7 +200,9 @@ const getRoomStats = (roomId) => {
             bandwidth: 0,
             resolution: "unknown",
             fps: 0,
-            codec: "unknown"
+            codec: "unknown",
+            pixelFormat: "unknown",
+            h264Profile: "unknown"
         };
     }
     
@@ -182,20 +229,40 @@ const updateRoomActivity = (roomId, messageSize = 0) => {
 };
 
 /**
+ * Detecta o tipo de dispositivo cliente com base no User-Agent ou cabeçalhos
+ * @param {WebSocket} ws - Conexão WebSocket
+ * @param {object} request - Objeto de requisição HTTP
+ * @returns {string} - Tipo de dispositivo ('ios', 'android', 'web')
+ */
+const detectClientDeviceType = (ws, request) => {
+    if (!request || !request.headers) return 'unknown';
+    
+    const userAgent = request.headers['user-agent'] || '';
+    
+    if (userAgent.includes('iPhone') || userAgent.includes('iPad') || userAgent.includes('iPod')) {
+        return 'ios';
+    } else if (userAgent.includes('Android')) {
+        return 'android';
+    } else {
+        return 'web';
+    }
+};
+
+/**
  * Obtém o bitrate ideal com base na resolução
  * @param {string} resolution - Resolução do vídeo (ex: "1080p")
  * @returns {number} - Bitrate em kbps
  */
 const getOptimalBitrate = (resolution) => {
-    if (!resolution) return HIGH_QUALITY_BITRATE;
+    if (!resolution) return QUALITY_PRESETS['1080p'].bitrate;
     
-    for (const [key, value] of Object.entries(QUALITY_PRESETS)) {
+    for (const [key, preset] of Object.entries(QUALITY_PRESETS)) {
         if (resolution.includes(key)) {
-            return value;
+            return preset.bitrate;
         }
     }
     
-    return HIGH_QUALITY_BITRATE; // Default
+    return QUALITY_PRESETS['1080p'].bitrate; // Default
 };
 
 /**
@@ -214,11 +281,12 @@ const analyzeSdpQuality = (sdp) => {
         hasVP9: sdp.includes('VP9'),
         resolution: "unknown",
         fps: "unknown",
-        bitrateKbps: "unknown"
+        bitrateKbps: "unknown",
+        pixelFormat: "unknown"
     };
     
     // Tentar extrair resolução
-    const resMatch = sdp.match(/a=imageattr:.*send.*\[x=([0-9]+)\-?([0-9]+)?\,y=([0-9]+)\-?([0-9]+)?]/i);
+    const resMatch = sdp.match(/a=imageattr:.*send.*\[x=([0-9]+)\-?([0-9]*)?\\,y=([0-9]+)\-?([0-9]*)?]/i);
     if (resMatch && resMatch.length >= 4) {
         const width = resMatch[2] || resMatch[1];
         const height = resMatch[4] || resMatch[3];
@@ -244,9 +312,182 @@ const analyzeSdpQuality = (sdp) => {
         if (profileMatch && profileMatch.length >= 2) {
             result.h264Profile = profileMatch[1];
         }
+        
+        // Detectar formato de pixel se disponível
+        if (sdp.includes('420f')) {
+            result.pixelFormat = '420f'; // YUV 4:2:0 full-range (preferido pelo iOS)
+        } else if (sdp.includes('420v')) {
+            result.pixelFormat = '420v'; // YUV 4:2:0 video-range
+        } else if (sdp.includes('BGRA')) {
+            result.pixelFormat = 'BGRA'; // 32-bit BGRA
+        }
     }
     
     return result;
+};
+
+/**
+ * Otimiza SDP para iOS, focando em H264 com perfis compatíveis e formatos de pixel
+ * @param {string} sdp - SDP original
+ * @param {string} clientType - Tipo de cliente ('ios', 'web', etc)
+ * @param {string} resolution - Resolução desejada (opcional)
+ * @returns {string} - SDP otimizado
+ */
+const enhanceSdpForIOS = (sdp, clientType = 'web', resolution = null) => {
+    if (!sdp.includes('m=video')) return sdp;
+    
+    const lines = sdp.split('\n');
+    const newLines = [];
+    let inVideoSection = false;
+    let videoSectionModified = false;
+    let h264PayloadType = null;
+    
+    // Determinar o bitrate apropriado com base na resolução
+    const bitrate = getOptimalBitrate(resolution);
+    
+    // Fase 1: Encontrar payload type para H264
+    for (let i = 0; i < lines.length; i++) {
+        const line = lines[i];
+        if (line.startsWith('a=rtpmap:') && line.includes('H264')) {
+            h264PayloadType = line.split(':')[1].split(' ')[0];
+            break;
+        }
+    }
+    
+    // Fase 2: Modificar o SDP para otimizar para iOS
+    for (let i = 0; i < lines.length; i++) {
+        const line = lines[i];
+        
+        // Detectar seção de vídeo
+        if (line.startsWith('m=video')) {
+            inVideoSection = true;
+            
+            // Se for cliente iOS, reordenar os codecs para priorizar H264
+            if (clientType === 'ios' && h264PayloadType) {
+                // Tokenizar a linha m=video
+                const parts = line.split(' ');
+                const payloadTypes = parts.slice(3);
+                
+                // Remover h264PayloadType da lista
+                const index = payloadTypes.indexOf(h264PayloadType);
+                if (index !== -1) {
+                    payloadTypes.splice(index, 1);
+                    
+                    // Reordenar com H264 primeiro
+                    const newPayloadTypes = [h264PayloadType, ...payloadTypes];
+                    const newLine = `${parts[0]} ${parts[1]} ${parts[2]} ${newPayloadTypes.join(' ')}`;
+                    newLines.push(newLine);
+                    continue;
+                }
+            }
+            newLines.push(line);
+            continue;
+        } else if (line.startsWith('m=')) {
+            inVideoSection = false;
+        }
+        
+        // Para seção de vídeo, adicionar bitrate se não existir
+        if (inVideoSection && line.startsWith('c=') && !videoSectionModified) {
+            newLines.push(line);
+            
+            // Verificar se já existe uma linha b=AS
+            let hasAS = false;
+            let existingBitrate = 0;
+            for (let j = i + 1; j < lines.length && !lines[j].startsWith('m='); j++) {
+                if (lines[j].startsWith('b=AS:')) {
+                    hasAS = true;
+                    existingBitrate = parseInt(lines[j].substring(5));
+                    break;
+                }
+            }
+            
+            // Adicionar linha de bitrate alto para vídeo apenas se não existir ou se for menor que o desejado
+            if (!hasAS) {
+                newLines.push(`b=AS:${bitrate}`);
+                videoSectionModified = true;
+            } else if (existingBitrate < bitrate) {
+                // Se o bitrate existente for menor, substituiremos mais tarde
+                videoSectionModified = true;
+            }
+            continue;
+        }
+        
+        // Se encontramos uma linha b=AS: na seção de vídeo e queremos modificá-la
+        if (inVideoSection && line.startsWith('b=AS:') && videoSectionModified) {
+            const existingBitrate = parseInt(line.substring(5));
+            if (existingBitrate < bitrate) {
+                newLines.push(`b=AS:${bitrate}`);
+            } else {
+                newLines.push(line);
+            }
+            continue;
+        }
+        
+        // Otimizações específicas para H264 usado por iOS
+        if (inVideoSection && line.startsWith('a=fmtp:') && h264PayloadType && line.includes(h264PayloadType)) {
+            // Para clientes iOS, otimizar o perfil H264
+            if (clientType === 'ios') {
+                // Verificar se já tem profile-level-id
+                if (line.includes('profile-level-id=')) {
+                    // Verificar se o perfil já é um dos perfis compatíveis com iOS
+                    let hasCompatibleProfile = false;
+                    for (const profile of IOS_PREFERRED_FORMATS.videoCodecs.H264.profiles) {
+                        if (line.includes(`profile-level-id=${profile}`)) {
+                            hasCompatibleProfile = true;
+                            break;
+                        }
+                    }
+                    
+                    // Se não tem perfil compatível, substituir pelo primeiro perfil compatível
+                    if (!hasCompatibleProfile) {
+                        // Obter o perfil atual
+                        const currentProfile = line.match(/profile-level-id=([0-9a-fA-F]+)/i)[1];
+                        // Substituir pelo perfil preferido do iOS
+                        const newLine = line.replace(
+                            `profile-level-id=${currentProfile}`,
+                            `profile-level-id=${IOS_PREFERRED_FORMATS.videoCodecs.H264.profiles[0]}`
+                        );
+                        newLines.push(newLine);
+                        continue;
+                    }
+                } else {
+                    // Se não tem profile-level-id, adicionar o perfil preferido
+                    const newLine = `${line};profile-level-id=${IOS_PREFERRED_FORMATS.videoCodecs.H264.profiles[0]}`;
+                    newLines.push(newLine);
+                    continue;
+                }
+                
+                // Garantir packetization-mode=1 (preferido pelo iOS)
+                if (!line.includes('packetization-mode=')) {
+                    const newLine = `${line};packetization-mode=${IOS_PREFERRED_FORMATS.videoCodecs.H264.packetizationMode}`;
+                    newLines.push(newLine);
+                    continue;
+                }
+            }
+        }
+        
+        newLines.push(line);
+    }
+    
+    return newLines.join('\n');
+};
+
+/**
+ * Ajusta o SDP para priorizar formatos compatíveis com o dispositivo do cliente
+ * @param {string} sdp - String SDP original
+ * @param {string} deviceType - Tipo de dispositivo ('ios', 'android', 'web')
+ * @param {object} quality - Informações de qualidade da oferta (opcional)
+ * @returns {string} - SDP otimizado
+ */
+const optimizeSdpForDevice = (sdp, deviceType, quality = null) => {
+    // Se for iOS, usar otimizações específicas
+    if (deviceType === 'ios') {
+        return enhanceSdpForIOS(sdp, deviceType, quality?.resolution);
+    }
+    
+    // Para outros dispositivos, apenas ajustar bitrate e qualidade geral
+    const resolution = quality?.resolution || null;
+    return enhanceSdpForHighQuality(sdp, resolution);
 };
 
 /**
@@ -337,14 +578,22 @@ const enhanceSdpForHighQuality = (sdp, resolution = null) => {
 };
 
 // Manipular conexões WebSocket
-wss.on('connection', (ws) => {
+wss.on('connection', (ws, request) => {
     // Identificar cliente
     const clientId = uuidv4();
     ws.id = clientId;
     ws.isAlive = true;
     clients.set(clientId, ws);
     
-    log(`Nova conexão WebSocket estabelecida: ${clientId}`);
+    // Detectar tipo de dispositivo
+    const deviceType = detectClientDeviceType(ws, request);
+    clientDeviceTypes.set(clientId, deviceType);
+    
+    log(`Nova conexão WebSocket estabelecida: ${clientId} (${deviceType})`);
+    
+    // Inicializar tempos de ping/pong
+    lastPingSent.set(clientId, 0);
+    lastPongReceived.set(clientId, 0);
     
     let roomId = null;
     
@@ -402,14 +651,16 @@ wss.on('connection', (ws) => {
                 stats.connections++;
                 stats.peakConnections = Math.max(stats.peakConnections, rooms[roomId].length);
                 
-                log(`Cliente ${ws.id} entrou na sala: ${roomId}, total na sala: ${rooms[roomId].length}`);
+                const deviceType = clientDeviceTypes.get(ws.id) || 'unknown';
+                log(`Cliente ${ws.id} (${deviceType}) entrou na sala: ${roomId}, total na sala: ${rooms[roomId].length}`);
                 
                 // Notificar outros clientes
                 rooms[roomId].forEach(client => {
                     if (client !== ws && client.readyState === WebSocket.OPEN) {
                         client.send(JSON.stringify({ 
                             type: 'user-joined',
-                            userId: ws.id
+                            userId: ws.id,
+                            deviceType: deviceType
                         }));
                     }
                 });
@@ -434,32 +685,53 @@ wss.on('connection', (ws) => {
                 ws.send(JSON.stringify({
                     type: 'room-info',
                     clients: rooms[roomId].length,
-                    room: roomId
+                    room: roomId,
+                    deviceTypes: Array.from(new Set(
+                        rooms[roomId]
+                            .map(client => clientDeviceTypes.get(client.id))
+                            .filter(type => type)
+                    ))
                 }));
             } 
-            // Processar oferta SDP (otimizar para alta resolução)
+            // Processar oferta SDP (otimizar para dispositivo específico)
             else if (data.type === 'offer' && roomId) {
-                log(`Oferta SDP recebida de ${ws.id} na sala ${roomId} com comprimento ${data.sdp ? data.sdp.length : 0}`, true);
+                const deviceType = clientDeviceTypes.get(ws.id) || 'web';
+                log(`Oferta SDP recebida de ${ws.id} (${deviceType}) na sala ${roomId} com comprimento ${data.sdp ? data.sdp.length : 0}`, true);
                 
                 // Analisar qualidade da oferta para log
                 let quality = null;
                 if (data.sdp) {
                     quality = analyzeSdpQuality(data.sdp);
-                    log(`Qualidade da oferta: video=${quality.hasVideo}, audio=${quality.hasAudio}, codec=${quality.hasH264 ? 'H264' : (quality.hasVP9 ? 'VP9' : (quality.hasVP8 ? 'VP8' : 'unknown'))}, resolução=${quality.resolution}, fps=${quality.fps}, bitrate=${quality.bitrateKbps}`, true);
+                    log(`Qualidade da oferta: video=${quality.hasVideo}, audio=${quality.hasAudio}, codec=${quality.hasH264 ? 'H264' : (quality.hasVP9 ? 'VP9' : (quality.hasVP8 ? 'VP8' : 'unknown'))}, resolução=${quality.resolution}, fps=${quality.fps}, bitrate=${quality.bitrateKbps}, formato=${quality.pixelFormat}`, true);
                     
                     // Atualizar estatísticas da sala
                     const stats = getRoomStats(roomId);
                     stats.resolution = quality.resolution;
                     stats.fps = quality.fps;
                     stats.codec = quality.hasH264 ? 'H264' : (quality.hasVP9 ? 'VP9' : (quality.hasVP8 ? 'VP8' : 'unknown'));
+                    stats.pixelFormat = quality.pixelFormat;
+                    stats.h264Profile = quality.h264Profile || 'unknown';
                     
-                    // Otimizar SDP para alta qualidade, adaptando com base na resolução
-                    data.sdp = enhanceSdpForHighQuality(data.sdp, quality.resolution);
+                    // Otimizar SDP para o tipo de dispositivo de destino
+                    // Verificar se há dispositivos iOS na sala
+                    const hasIOSClients = rooms[roomId].some(client => 
+                        client !== ws && clientDeviceTypes.get(client.id) === 'ios'
+                    );
+                    
+                    // Se houverem dispositivos iOS na sala, otimizar especificamente para iOS
+                    if (hasIOSClients) {
+                        log(`Otimizando SDP para compatibilidade com iOS na sala ${roomId}`, true);
+                        data.sdp = optimizeSdpForDevice(data.sdp, 'ios', quality);
+                    } else {
+                        // Se não houver dispositivos iOS, otimizar para alta qualidade em geral
+                        data.sdp = enhanceSdpForHighQuality(data.sdp, quality.resolution);
+                    }
                 }
                 
                 // Armazenar oferta
                 data.senderId = ws.id;
                 data.timestamp = Date.now();
+                data.senderDeviceType = deviceType;
                 roomData[roomId].offers.push(data);
                 
                 // Limitar número de ofertas armazenadas
@@ -470,7 +742,20 @@ wss.on('connection', (ws) => {
                 // Encaminhar oferta para outros clientes
                 rooms[roomId].forEach(client => {
                     if (client !== ws && client.readyState === WebSocket.OPEN) {
-                        client.send(JSON.stringify(data));
+                        // Obter tipo de dispositivo do cliente de destino
+                        const targetDeviceType = clientDeviceTypes.get(client.id) || 'web';
+                        
+                        // Se o cliente de destino for iOS, otimizar especificamente para iOS
+                        let optimizedSdp = data.sdp;
+                        if (targetDeviceType === 'ios') {
+                            optimizedSdp = optimizeSdpForDevice(data.sdp, 'ios', quality);
+                        }
+                        
+                        // Enviar a oferta otimizada
+                        client.send(JSON.stringify({
+                            ...data,
+                            sdp: optimizedSdp
+                        }));
                     }
                 });
                 
@@ -478,17 +763,24 @@ wss.on('connection', (ws) => {
             } 
             // Processar resposta SDP
             else if (data.type === 'answer' && roomId) {
-                log(`Resposta SDP recebida de ${ws.id} na sala ${roomId}`);
+                const deviceType = clientDeviceTypes.get(ws.id) || 'web';
+                log(`Resposta SDP recebida de ${ws.id} (${deviceType}) na sala ${roomId}`);
                 
                 // Analisar qualidade da resposta
                 if (data.sdp) {
                     const quality = analyzeSdpQuality(data.sdp);
-                    log(`Qualidade da resposta: video=${quality.hasVideo}, audio=${quality.hasAudio}, codec=${quality.hasH264 ? 'H264' : (quality.hasVP9 ? 'VP9' : (quality.hasVP8 ? 'VP8' : 'unknown'))}, resolução=${quality.resolution}, fps=${quality.fps}`, true);
+                    log(`Qualidade da resposta: video=${quality.hasVideo}, audio=${quality.hasAudio}, codec=${quality.hasH264 ? 'H264' : (quality.hasVP9 ? 'VP9' : (quality.hasVP8 ? 'VP8' : 'unknown'))}, resolução=${quality.resolution}, fps=${quality.fps}, pixelFormat=${quality.pixelFormat}`, true);
+                    
+                    // Se for uma resposta de um dispositivo iOS, registrar os formatos para otimização futura
+                    if (deviceType === 'ios') {
+                        log(`Resposta recebida de dispositivo iOS com formato de pixel: ${quality.pixelFormat}, profile H264: ${quality.h264Profile}`, true);
+                    }
                 }
                 
                 // Armazenar resposta
                 data.senderId = ws.id;
                 data.timestamp = Date.now();
+                data.senderDeviceType = deviceType;
                 roomData[roomId].answers.push(data);
                 
                 // Limitar número de respostas armazenadas
@@ -520,6 +812,7 @@ wss.on('connection', (ws) => {
                     // Armazenar candidato
                     data.senderId = ws.id;
                     data.timestamp = Date.now();
+                    data.senderDeviceType = clientDeviceTypes.get(ws.id) || 'web';
                     roomData[roomId].iceCandidates.push(data);
                     
                     // Limitar número de candidatos armazenados
@@ -546,7 +839,8 @@ wss.on('connection', (ws) => {
                     if (client !== ws && client.readyState === WebSocket.OPEN) {
                         client.send(JSON.stringify({
                             type: 'peer-disconnected',
-                            userId: ws.id
+                            userId: ws.id,
+                            deviceType: clientDeviceTypes.get(ws.id) || 'unknown'
                         }));
                     }
                 });
@@ -560,6 +854,28 @@ wss.on('connection', (ws) => {
                     type: 'pong',
                     timestamp: Date.now()
                 }));
+                updateRoomActivity(roomId);
+            }
+            // Processar mensagens de capacidade (recurso específico para iOS)
+            else if (data.type === 'ios-capabilities' && roomId) {
+                // Receber informações de capacidade do dispositivo iOS
+                log(`Informações de capacidade do iOS recebidas de ${ws.id}: ${JSON.stringify(data.capabilities)}`);
+                
+                // Armazenar as capacidades para uso futuro
+                const roomStats = getRoomStats(roomId);
+                roomStats.iosCapabilities = data.capabilities;
+                
+                // Notificar outros clientes sobre as capacidades do iOS
+                rooms[roomId].forEach(client => {
+                    if (client !== ws && client.readyState === WebSocket.OPEN) {
+                        client.send(JSON.stringify({
+                            type: 'ios-capabilities-update',
+                            userId: ws.id,
+                            capabilities: data.capabilities
+                        }));
+                    }
+                });
+                
                 updateRoomActivity(roomId);
             }
             // Processar outras mensagens para a sala
@@ -578,10 +894,14 @@ wss.on('connection', (ws) => {
         } catch (e) {
             log(`Erro ao processar mensagem WebSocket: ${e.message}`, false, true);
             log(`Mensagem problemática: ${message.toString().substring(0, 100)}...`, false, true);
-            ws.send(JSON.stringify({
-                type: 'error', 
-                message: 'Invalid message format'
-            }));
+            try {
+                ws.send(JSON.stringify({
+                    type: 'error', 
+                    message: 'Invalid message format'
+                }));
+            } catch (sendError) {
+                log(`Erro ao enviar mensagem de erro: ${sendError.message}`, false, true);
+            }
         }
     });
     
@@ -590,6 +910,7 @@ wss.on('connection', (ws) => {
         log(`Conexão com cliente ${ws.id} fechada`);
         
         clients.delete(clientId);
+        clientDeviceTypes.delete(clientId);
         lastPingSent.delete(clientId);
         lastPongReceived.delete(clientId);
         
@@ -611,7 +932,8 @@ wss.on('connection', (ws) => {
                     if (client.readyState === WebSocket.OPEN) {
                         client.send(JSON.stringify({ 
                             type: 'user-left',
-                            userId: ws.id
+                            userId: ws.id,
+                            deviceType: clientDeviceTypes.get(ws.id) || 'unknown'
                         }));
                     }
                 });
@@ -623,6 +945,8 @@ wss.on('connection', (ws) => {
 // Configurar ping periódico para manter conexões vivas - intervalo reduzido para detecção rápida
 const pingInterval = setInterval(() => {
     wss.clients.forEach(ws => {
+        if (!ws.id) return; // Ignorar conexões sem ID
+        
         if (ws.isAlive === false) {
             log(`Terminando conexão inativa com ${ws.id}`);
             return ws.terminate();
@@ -658,6 +982,17 @@ app.get('/', (req, res) => {
     res.sendFile(path.join(__dirname, 'index.html'));
 });
 
+// Rota para verificar status do servidor
+app.get('/health', (req, res) => {
+    res.json({
+        status: 'ok',
+        connections: wss.clients.size,
+        rooms: Object.keys(rooms).length,
+        timestamp: new Date().toISOString(),
+        uptime: process.uptime()
+    });
+});
+
 // Informações sobre o servidor
 app.get('/info', (req, res) => {
     // Preparar estatísticas de salas
@@ -670,6 +1005,8 @@ app.get('/info', (req, res) => {
             resolution: stats.resolution,
             fps: stats.fps,
             codec: stats.codec,
+            pixelFormat: stats.pixelFormat || 'unknown',
+            h264Profile: stats.h264Profile || 'unknown',
             created: stats.created,
             lastActivity: stats.lastActivity
         };
@@ -694,14 +1031,24 @@ app.get('/room/:roomId/info', (req, res) => {
     
     const stats = getRoomStats(roomId);
     
+    // Contar dispositivos de cada tipo na sala
+    const deviceCounts = {};
+    rooms[roomId].forEach(client => {
+        const deviceType = clientDeviceTypes.get(client.id) || 'unknown';
+        deviceCounts[deviceType] = (deviceCounts[deviceType] || 0) + 1;
+    });
+    
     res.json({
         id: roomId,
         clients: rooms[roomId].length,
+        deviceTypes: deviceCounts,
         connections: stats.connections,
         messagesExchanged: stats.messagesExchanged,
         resolution: stats.resolution,
         fps: stats.fps,
         codec: stats.codec,
+        pixelFormat: stats.pixelFormat || 'unknown',
+        h264Profile: stats.h264Profile || 'unknown',
         created: stats.created,
         lastActivity: stats.lastActivity
     });
