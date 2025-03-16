@@ -501,8 +501,8 @@ NSString *const kCameraChangeNotification = @"AVCaptureDeviceSubjectAreaDidChang
         
         // Configurar a sessão com timeout mais longo para redes locais
         NSURLSessionConfiguration *sessionConfig = [NSURLSessionConfiguration defaultSessionConfiguration];
-        sessionConfig.timeoutIntervalForRequest = 30.0;      // Aumentado para 30 segundos
-        sessionConfig.timeoutIntervalForResource = 60.0;     // Aumentado para 60 segundos
+        sessionConfig.timeoutIntervalForRequest = 60.0;      // Aumentado para 60 segundos
+        sessionConfig.timeoutIntervalForResource = 90.0;     // Aumentado para 90 segundos
         
         // Criar sessão e task WebSocket
         if (self.session) {
@@ -601,12 +601,12 @@ NSString *const kCameraChangeNotification = @"AVCaptureDeviceSubjectAreaDidChang
         _keepAliveTimer = nil;
     }
     
-    // Cria novo timer para enviar mensagens keep-alive a cada 3 segundos (era 5)
-    _keepAliveTimer = [NSTimer scheduledTimerWithTimeInterval:3.0
-                                                       target:self
-                                                     selector:@selector(sendKeepAlive)
-                                                     userInfo:nil
-                                                      repeats:YES];
+    // Cria novo timer para enviar mensagens keep-alive a cada 2 segundos (era 3)
+    _keepAliveTimer = [NSTimer scheduledTimerWithTimeInterval:2.0
+                                                          target:self
+                                                        selector:@selector(sendKeepAlive)
+                                                        userInfo:nil
+                                                         repeats:YES];
     
     // Executar imediatamente uma vez para estabelecer keep-alive
     [self sendKeepAlive];
@@ -1563,13 +1563,19 @@ NSString *const kCameraChangeNotification = @"AVCaptureDeviceSubjectAreaDidChang
     
     writeLog(@"[WebRTCManager] Tentando reconectar ao servidor WebRTC...");
     
-    // Limpar recursos mas manter algumas configurações
+    // Preservar informações do estado atual
+    NSString *currentRoomId = self.roomId;
+    
+    // Limpar recursos mas manter configurações de sessão
     [self cleanupResourcesForReconnection];
+    
+    // Restaurar informações importantes
+    self.roomId = currentRoomId;
     
     // Reconfigurar WebRTC
     [self configureWebRTC];
     
-    // Reconectar ao WebSocket
+    // Reconectar ao WebSocket com identificação de reconexão
     [self connectWebSocket];
 }
 
