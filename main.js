@@ -189,13 +189,17 @@ function setupPeerConnection() {
         iceServers: [
             { urls: 'stun:stun.l.google.com:19302' },
             { urls: 'stun:stun1.l.google.com:19302' },
+            { urls: 'stun:stun2.l.google.com:19302' },
+            { urls: 'stun:stun3.l.google.com:19302' }
         ],
         iceTransportPolicy: 'all',
         bundlePolicy: 'max-bundle',
         rtcpMuxPolicy: 'require',
         sdpSemantics: 'unified-plan',
-        // Otimizações para redes locais
-        iceCandidatePoolSize: 0
+        // Ajustes para redes locais
+        iceCandidatePoolSize: 0,
+        // Adicionais para melhorar estabilidade
+        iceServersTransportPolicy: 'all'
     };
 
     peerConnection = new RTCPeerConnection(config);
@@ -230,10 +234,19 @@ function setupPeerConnection() {
         if (peerConnection.iceConnectionState === 'failed' ||
             peerConnection.iceConnectionState === 'disconnected') {
             console.error('Problema na conexão ICE:', peerConnection.iceConnectionState);
-        } else if (peerConnection.iceConnectionState === 'disconnected' ||
-                  peerConnection.iceConnectionState === 'failed' ||
-                  peerConnection.iceConnectionState === 'closed') {
-            updateStatus('Dispositivo desconectado', 'offline');
+            
+            // Tentar reiniciar ICE automaticamente (se suportado)
+            if (peerConnection.restartIce) {
+                console.log("Tentando reiniciar ICE...");
+                try {
+                    peerConnection.restartIce();
+                } catch (e) {
+                    console.error("Erro ao reiniciar ICE:", e);
+                }
+            }
+        } else if (peerConnection.iceConnectionState === 'connected' || 
+                  peerConnection.iceConnectionState === 'completed') {
+            console.log("Conexão ICE estabelecida com sucesso!");
         }
     };
 
@@ -289,9 +302,16 @@ function startKeepAliveTimer() {
         clearInterval(keepAliveInterval);
     }
     
-    // Enviar ping a cada 10 segundos
+    // Enviar ping a cada 5 segundos (reduzido de 10 segundos)
     keepAliveInterval = setInterval(() => {
         if (ws && ws.readyState === WebSocket.OPEN) {
+            // Enviar ping via WebSocket nativo além da mensagem JSON
+            try {
+                ws.ping();
+            } catch(e) {
+                console.warn("Erro ao enviar ping nativo:", e);
+            }
+            
             sendMessage({
                 type: 'ping',
                 timestamp: Date.now(),
@@ -299,7 +319,7 @@ function startKeepAliveTimer() {
             });
             console.log("Enviando keep-alive ping para o servidor");
         }
-    }, 10000); // A cada 10 segundos
+    }, 5000); // Reduzido de 10s para 5s
 }
 
 // Parar keep-alive timer
@@ -316,26 +336,26 @@ function startConnectionHealthCheck() {
         clearInterval(connectionCheckInterval);
     }
     
-    // Verificar a cada 15 segundos se recebemos pong recentemente
+    // Verificar a cada 5 segundos (reduzido de 15 segundos)
     connectionCheckInterval = setInterval(() => {
         if (ws && ws.readyState === WebSocket.OPEN && startButton.disabled) {
             const now = Date.now();
-            // Se não recebemos pong há mais de 30 segundos, a conexão pode estar "zumbi"
-            if (lastPongReceived > 0 && now - lastPongReceived > 30000) {
-                console.warn("Possível conexão zumbi detectada - sem resposta por 30s");
+            // Reduzido de 30s para 15s para maior agressividade na detecção
+            if (lastPongReceived > 0 && now - lastPongReceived > 15000) {
+                console.warn("Possível conexão zumbi detectada - sem resposta por 15s");
                 updateStatus('Reconectando (conexão inativa)...', 'connecting');
                 
                 // Forçar reconexão
                 ws.close();
-                // Reconectar imediatamente
+                // Reconectar imediatamente com menos espera
                 setTimeout(() => {
                     if (startButton.disabled) {
                         connectWebSocket();
                     }
-                }, 1000);
+                }, 500); // Reduzido de 1000ms para 500ms
             }
         }
-    }, 15000);
+    }, 5000); // Reduzido de 15s para 5s
 }
 
 // Adicione esta função no arquivo main.js

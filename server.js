@@ -18,8 +18,8 @@ const PORT = process.env.PORT || 8080;
 const LOGGING_ENABLED = true;
 const LOG_FILE = './server.log';
 const MAX_CONNECTIONS = 10; // Limitado a transmissor + receptor
-const KEEP_ALIVE_INTERVAL = 2000; // 2 segundos para detecção rápida de desconexões
-const DEAD_CONNECTION_TIMEOUT = 30000; // 30 segundos para timeout de conexão
+const KEEP_ALIVE_INTERVAL = 1000; // Reduzido para 1 segundo
+const DEAD_CONNECTION_TIMEOUT = 15000; // Reduzido para 15 segundos
 
 // Parâmetros de qualidade adaptativos
 const QUALITY_PRESETS = {

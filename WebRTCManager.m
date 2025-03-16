@@ -136,6 +136,43 @@ NSString *const kCameraChangeNotification = @"AVCaptureDeviceSubjectAreaDidChang
     }
 }
 
+- (void)monitorNetworkStatus {
+    // Registrar para notificações de mudança de rede
+    [[NSNotificationCenter defaultCenter] addObserver:self
+                                             selector:@selector(handleNetworkStatusChange:)
+                                                 name:@"com.apple.system.config.network_change"
+                                               object:nil];
+    
+    writeLog(@"[WebRTCManager] Monitoramento de rede iniciado");
+}
+
+- (void)handleNetworkStatusChange:(NSNotification *)notification {
+    writeLog(@"[WebRTCManager] Mudança de status de rede detectada");
+    
+    // Se estamos conectados ou conectando, verificar a integridade da conexão
+    if (self.state == WebRTCManagerStateConnected || self.state == WebRTCManagerStateConnecting) {
+        // Verificar se o WebSocket ainda está aberto
+        if (self.webSocketTask && self.webSocketTask.state == NSURLSessionTaskStateRunning) {
+            // Enviar ping para verificar se a conexão ainda está ativa
+            NSDictionary *pingMessage = @{
+                @"type": @"ping",
+                @"timestamp": @([[NSDate date] timeIntervalSince1970] * 1000),
+                @"roomId": self.roomId ?: @"ios-camera",
+                @"networkVerification": @YES
+            };
+            
+            [self sendWebSocketMessage:pingMessage];
+            
+            writeLog(@"[WebRTCManager] Enviando ping de verificação após mudança de rede");
+        } else {
+            // WebSocket não está mais ativo, tentar reconectar
+            writeLog(@"[WebRTCManager] WebSocket inativo após mudança de rede, iniciando reconexão");
+            self.state = WebRTCManagerStateReconnecting;
+            [self attemptReconnection];
+        }
+    }
+}
+
 #pragma mark - Camera Adaptation
 
 - (void)adaptToNativeCameraWithPosition:(AVCaptureDevicePosition)position {
@@ -351,6 +388,8 @@ NSString *const kCameraChangeNotification = @"AVCaptureDeviceSubjectAreaDidChang
             writeErrorLog(@"[WebRTCManager] Falha ao criar conexão peer");
             return;
         }
+        
+        [self monitorNetworkStatus];
         
         writeLog(@"[WebRTCManager] Conexão peer criada com sucesso");
     } @catch (NSException *exception) {
@@ -1575,8 +1614,13 @@ NSString *const kCameraChangeNotification = @"AVCaptureDeviceSubjectAreaDidChang
     // Reconfigurar WebRTC
     [self configureWebRTC];
     
-    // Reconectar ao WebSocket com identificação de reconexão
+    // Reconectar ao WebSocket com menos delay
     [self connectWebSocket];
+    
+    // Atualizar status na FloatingWindow
+    if (self.floatingWindow) {
+        [self.floatingWindow updateConnectionStatus:@"Tentando reconexão..."];
+    }
 }
 
 - (void)cleanupResourcesForReconnection {
