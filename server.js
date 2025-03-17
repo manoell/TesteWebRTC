@@ -339,7 +339,7 @@ const checkDeadConnections = () => {
         
         // Timeout muito mais generoso para dispositivos iOS
         const timeoutToUse = deviceType === 'ios' 
-            ? DEAD_CONNECTION_TIMEOUT * 3 
+            ? DEAD_CONNECTION_TIMEOUT * 5  // 5x mais tempo para iOS (300 segundos)
             : DEAD_CONNECTION_TIMEOUT;
                 
         if ((now - lastActivity) > timeoutToUse) {
@@ -355,10 +355,10 @@ const checkDeadConnections = () => {
                         }));
                     } catch (e) {}
                     
-                    // Dar tempo para bye ser enviado antes de terminar
+                    // Dar mais tempo para bye ser enviado antes de terminar
                     setTimeout(() => {
                         ws.terminate();
-                    }, 1000);
+                    }, 2000); // Aumentar para 2 segundos
                 } else {
                     ws.terminate();
                 }

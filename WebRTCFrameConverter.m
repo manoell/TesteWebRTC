@@ -207,42 +207,43 @@
 
 - (void)clearSampleBufferCache {
     @synchronized(self) {
-        __block NSUInteger liberadosAgora = 0;
+        NSMutableArray *buffersToRelease = [NSMutableArray array];
         
-        // Liberando _cachedSampleBuffer principal
+        // 1. Liberar _cachedSampleBuffer principal
         if (_cachedSampleBuffer) {
-            CFRelease(_cachedSampleBuffer);
+            [buffersToRelease addObject:[NSValue valueWithPointer:_cachedSampleBuffer]];
             _cachedSampleBuffer = NULL;
-            _totalSampleBuffersReleased++;
-            liberadosAgora++;
-            
-            // Remover do rastreamento ativo se existir
-            NSNumber *keyToRemove = @(CFHash(_cachedSampleBuffer));
-            if ([_activeSampleBuffers objectForKey:keyToRemove]) {
-                [_activeSampleBuffers removeObjectForKey:keyToRemove];
-            }
         }
         
-        // Usando cópia do dicionário para evitar problemas de mutação durante a iteração
-        NSDictionary *cacheCopy = [_sampleBufferCache copy];
-        [cacheCopy enumerateKeysAndObjectsUsingBlock:^(NSNumber *key, NSValue *value, BOOL *stop) {
+        // 2. Coletar buffers do _sampleBufferCache
+        for (NSValue *value in _sampleBufferCache.allValues) {
             CMSampleBufferRef buffer = NULL;
             [value getValue:&buffer];
             if (buffer) {
-                CFRelease(buffer);
-                self->_totalSampleBuffersReleased++;
-                liberadosAgora++;
-                
-                // Remover do rastreamento ativo
-                NSNumber *bufferKey = @(CFHash(buffer));
-                [self->_activeSampleBuffers removeObjectForKey:bufferKey];
+                [buffersToRelease addObject:[NSValue valueWithPointer:buffer]];
             }
-        }];
+        }
         
+        // 3. Limpar os dicionários
         [_sampleBufferCache removeAllObjects];
         [_sampleBufferCacheTimestamps removeAllObjects];
         
-        writeLog(@"[WebRTCFrameConverter] Cache de sample buffers limpo (%lu buffers liberados)", (unsigned long)liberadosAgora);
+        // 4. Liberar todos os buffers coletados fora do lock
+        NSUInteger liberados = 0;
+        for (NSValue *value in buffersToRelease) {
+            CMSampleBufferRef buffer = NULL;
+            [value getValue:&buffer];
+            if (buffer) {
+                NSNumber *bufferKey = @((intptr_t)buffer);
+                [_activeSampleBuffers removeObjectForKey:bufferKey];
+                
+                CFRelease(buffer);
+                _totalSampleBuffersReleased++;
+                liberados++;
+            }
+        }
+        
+        writeLog(@"[WebRTCFrameConverter] Cache de sample buffers limpo (%lu buffers liberados)", (unsigned long)liberados);
     }
 }
 
@@ -336,10 +337,9 @@
 }
 
 - (void)checkForResourceLeaks {
+    if (_isShuttingDown) return;
+    
     @synchronized(self) {
-        // Se o objeto estiver sendo desalocado, não fazer nada
-        if (_isShuttingDown) return;
-        
         NSInteger sampleBufferDiff = _totalSampleBuffersCreated - _totalSampleBuffersReleased;
         NSInteger pixelBufferDiff = _totalPixelBuffersLocked - _totalPixelBuffersUnlocked;
         
@@ -368,33 +368,25 @@
             }
         }
         
-        // Se temos um desbalanceamento significativo
-        if (sampleBufferDiff > 5 || pixelBufferDiff > 5) {
-            writeWarningLog(@"[WebRTCFrameConverter] Desbalanceamento detectado - SampleBuffers: %ld, PixelBuffers: %ld",
-                           (long)sampleBufferDiff, (long)pixelBufferDiff);
-            
-            // Auto-correção dos contadores para CVPixelBuffer (que não podemos limpar diretamente)
-            if (pixelBufferDiff > 0) {
-                _totalPixelBuffersUnlocked += pixelBufferDiff;
-                writeLog(@"[WebRTCFrameConverter] Ajustado contador de desbloqueios: +%ld", (long)pixelBufferDiff);
-            }
-            
-            // Para buffers de amostra, fazer limpeza real
+        // Corrigir desbalanceamento de PixelBuffer automaticamente
+        if (pixelBufferDiff > 0) {
+            writeLog(@"[WebRTCFrameConverter] Corrigindo desbalanceamento de %ld CVPixelBuffers", (long)pixelBufferDiff);
+            _totalPixelBuffersUnlocked += pixelBufferDiff;
+        }
+        
+        // Se desbalanceamento de SampleBuffer > 5, forçar limpeza
+        if (sampleBufferDiff > 5) {
+            writeLog(@"[WebRTCFrameConverter] Desbalanceamento detectado - SampleBuffers: %ld. Forçando limpeza.", (long)sampleBufferDiff);
             [self clearSampleBufferCache];
-            [self optimizeCacheSystem];
+        }
+        
+        // Para casos extremos, fazer reset completo
+        if (sampleBufferDiff > 20 || pixelBufferDiff > 20) {
+            writeLog(@"[WebRTCFrameConverter] Desbalanceamento severo - executando reset completo");
+            [self reset];
             
-            // Em casos extremos, forçar um reset completo
-            if (sampleBufferDiff > 20 || pixelBufferDiff > 20) {
-                writeWarningLog(@"[WebRTCFrameConverter] Desbalanceamento severo - executando reset completo");
-                [self reset];
-                
-                // Forçar um ciclo de coleta de lixo
-                @autoreleasepool { }
-            }
-        } else {
-            writeVerboseLog(@"[WebRTCFrameConverter] Recursos balanceados: SampleBuffers(%ld/%ld), PixelBuffers(%ld/%ld)",
-                          (long)_totalSampleBuffersCreated, (long)_totalSampleBuffersReleased,
-                          (long)_totalPixelBuffersLocked, (long)_totalPixelBuffersUnlocked);
+            // Forçar um ciclo de coleta de lixo
+            @autoreleasepool { }
         }
     }
 }
@@ -1606,21 +1598,42 @@
         writeLog(@"[WebRTCFrameConverter] Forçando liberação de todos os sample buffers ativos (%lu)", (unsigned long)_activeSampleBuffers.count);
         
         // Iterar sobre uma cópia para evitar modificar o dicionário durante a iteração
-        NSArray *activeBufferKeys = [_activeSampleBuffers.allKeys copy];
-        for (NSNumber *bufferKey in activeBufferKeys) {
-            [_activeSampleBuffers removeObjectForKey:bufferKey];
-            _totalSampleBuffersReleased++;
+        NSDictionary *buffersCopy = [_activeSampleBuffers copy];
+        for (NSNumber *bufferKey in buffersCopy) {
+            id bufferInfo = buffersCopy[bufferKey];
+            if (bufferInfo) {
+                [_activeSampleBuffers removeObjectForKey:bufferKey];
+                _totalSampleBuffersReleased++;
+            }
         }
         
         // Limpar cache também
         [self clearSampleBufferCache];
         
-        // Verificar se ainda há desbalanceamento
+        // Verificar e equilibrar os contadores de CVPixelBuffer
+        NSInteger pixelBufferDiff = _totalPixelBuffersLocked - _totalPixelBuffersUnlocked;
+        if (pixelBufferDiff > 0) {
+            writeLog(@"[WebRTCFrameConverter] Equilibrando contadores de CVPixelBuffer: %ld locks sem unlock", (long)pixelBufferDiff);
+            _totalPixelBuffersUnlocked += pixelBufferDiff;
+        }
+        
+        // Verificar e equilibrar os contadores de CMSampleBuffer
         NSInteger sampleBufferDiff = _totalSampleBuffersCreated - _totalSampleBuffersReleased;
         if (sampleBufferDiff > 0) {
-            writeWarningLog(@"[WebRTCFrameConverter] Ajustando contador de sample buffers: %ld buffers não liberados", (long)sampleBufferDiff);
+            writeLog(@"[WebRTCFrameConverter] Ajustando contador de sample buffers: %ld buffers não liberados", (long)sampleBufferDiff);
             _totalSampleBuffersReleased += sampleBufferDiff;
         }
+        
+        // Limpar todos os caches e variáveis internas
+        _cachedSampleBuffer = NULL;
+        _cachedSampleBufferHash = 0;
+        _cachedSampleBufferFormat = 0;
+        _cachedImage = nil;
+        _lastFrameHash = 0;
+        
+        [_sampleBufferCache removeAllObjects];
+        [_sampleBufferCacheTimestamps removeAllObjects];
+        [_activeSampleBuffers removeAllObjects];
     }
 }
 

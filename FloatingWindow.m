@@ -440,6 +440,11 @@
         return;
     }
     
+    // Limpar estado antigo
+    self.isReceivingFrames = NO;
+    self.lastFrameSize = CGSizeZero;
+    self.currentFps = 0;
+    
     self.isPreviewActive = YES;
     [self.toggleButton setTitle:@"Desativar Preview" forState:UIControlStateNormal];
     self.toggleButton.backgroundColor = [UIColor redColor]; // Vermelho quando ativo
@@ -478,6 +483,8 @@
 - (void)stopPreview {
     if (!self.isPreviewActive) return;
     
+    writeLog(@"[FloatingWindow] Parando preview");
+    
     self.isPreviewActive = NO;
     [self.toggleButton setTitle:@"Ativar Preview" forState:UIControlStateNormal];
     self.toggleButton.backgroundColor = [UIColor greenColor]; // Verde quando desativado
@@ -500,7 +507,7 @@
     // Marcar como não recebendo frames
     self.isReceivingFrames = NO;
     
-    // Desconectar WebRTC
+    // Enviar mensagem de bye primeiro
     if (self.webRTCManager) {
         @try {
             // Enviar mensagem bye
@@ -511,7 +518,8 @@
                 [self.webRTCManager stopWebRTC:YES];
             });
         } @catch (NSException *exception) {
-            writeErrorLog(@"[FloatingWindow] Exceção ao desativar WebRTC: %@", exception);
+            writeLog(@"[FloatingWindow] Exceção ao desativar WebRTC: %@", exception);
+            // Garantir que pare mesmo com exceção
             [self.webRTCManager stopWebRTC:YES];
         }
     }

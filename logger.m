@@ -42,6 +42,13 @@ static int gLogCounts[6] = {0, 0, 0, 0, 0, 0}; // Contadores para cada nível
 static void rotateLogFiles(void) {
     NSFileManager *fileManager = [NSFileManager defaultManager];
     
+    // Verificar se o arquivo de log atual existe
+    if (![fileManager fileExistsAtPath:gLogPath]) {
+        // Se não existe, apenas criar um novo arquivo vazio
+        [@"" writeToFile:gLogPath atomically:YES encoding:NSUTF8StringEncoding error:nil];
+        return;
+    }
+    
     // Remover arquivo de backup mais antigo, se existir
     NSString *oldestBackupPath = [NSString stringWithFormat:@"%@.%d", gLogPath, MAX_LOG_BACKUPS];
     [fileManager removeItemAtPath:oldestBackupPath error:nil];
@@ -57,7 +64,21 @@ static void rotateLogFiles(void) {
     
     // Mover o arquivo de log atual para .1
     NSString *backupPath = [NSString stringWithFormat:@"%@.1", gLogPath];
-    [fileManager moveItemAtPath:gLogPath toPath:backupPath error:nil];
+    
+    // Verificar se o backup já existe e removê-lo se necessário
+    if ([fileManager fileExistsAtPath:backupPath]) {
+        [fileManager removeItemAtPath:backupPath error:nil];
+    }
+    
+    // Tentar mover o arquivo atual para backup
+    NSError *moveError = nil;
+    BOOL moveSucess = [fileManager moveItemAtPath:gLogPath toPath:backupPath error:&moveError];
+    
+    if (!moveSucess) {
+        NSLog(@"[WebRTCTweak] Erro ao mover arquivo de log: %@", moveError);
+        // Tentar remover o arquivo atual em caso de falha
+        [fileManager removeItemAtPath:gLogPath error:nil];
+    }
     
     // Criar um novo arquivo de log vazio
     [@"" writeToFile:gLogPath atomically:YES encoding:NSUTF8StringEncoding error:nil];

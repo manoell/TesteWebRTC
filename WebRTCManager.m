@@ -1789,55 +1789,120 @@ NSString *const kCameraChangeNotification = @"AVCaptureDeviceSubjectAreaDidChang
     NSString *currentRoomId = self.roomId;
     BOOL wasReceivingFrames = self.isReceivingFrames;
     
-    // Garantir limpeza completa de recursos em reconexão
-    if (self.frameConverter) {
-        // Limpar TODOS os recursos sem referências às variáveis não usadas
-        [self.frameConverter reset];
-        [self.frameConverter performSafeCleanup];
-        
-        // Recriar o webRTCFrameConverter se necessário
-        if (self.frameConverter.frameCount > 1000) {  // Se muitos frames foram processados
-            // Remover referência atual
-            if (self.videoTrack) {
-                [self.videoTrack removeRenderer:self.frameConverter];
-            }
-            
-            // Criar novo conversor
-            WebRTCFrameConverter *novoConversor = [[WebRTCFrameConverter alloc] init];
-            
-            // Transferir callback
-            novoConversor.frameCallback = self.frameConverter.frameCallback;
-            
-            // Substituir conversor
-            self.frameConverter = novoConversor;
-            
-            writeLog(@"[WebRTCManager] Conversor de frames recriado durante reconexão");
-        }
-    }
-    
-    // Limpar recursos sem fechar o WebRTC Manager completamente
-    [self cleanupResourcesForReconnection];
+    // Desconectar completamente primeiro
+    [self cleanupForReconnection];
     
     // Restaurar informações importantes
     self.roomId = currentRoomId;
     
-    // Adicionar um pequeno delay para dar tempo aos recursos serem liberados
-    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(1.0 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
+    // Reconfigurar WebRTC com delay curto
+    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.5 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
         // Reconfigurar WebRTC
         [self configureWebRTC];
         
         // Reconectar ao WebSocket
         [self connectWebSocket];
         
-        // Se estava recebendo frames, restaurar o estado visual
         if (wasReceivingFrames && self.floatingWindow) {
             dispatch_async(dispatch_get_main_queue(), ^{
-                if ([self.floatingWindow respondsToSelector:@selector(updateConnectionStatus:)]) {
-                    [self.floatingWindow updateConnectionStatus:@"Reconectando..."];
-                }
+                [self.floatingWindow updateConnectionStatus:@"Reconectando..."];
             });
         }
     });
+}
+
+- (void)cleanupForReconnection {
+    writeLog(@"[WebRTCManager] Limpeza completa para reconexão");
+    
+    @try {
+        // Parar os timers antes de tudo
+        if (self.statsInterval) {
+            clearInterval(self.statsInterval);
+            self.statsInterval = nil;
+        }
+        
+        if (self.reconnectionTimer) {
+            [self.reconnectionTimer invalidate];
+            self.reconnectionTimer = nil;
+        }
+        
+        if (self.keepAliveInterval) {
+            [self.keepAliveInterval invalidate];
+            self.keepAliveInterval = nil;
+        }
+        
+        if (self.resourceMonitorTimer) {
+            dispatch_source_cancel(self.resourceMonitorTimer);
+            self.resourceMonitorTimer = nil;
+        }
+        
+        // 1. Limpar WebSocket primeiro para evitar callbacks
+        if (self.ws) {
+            NSURLSessionWebSocketTask *oldWS = self.ws;
+            self.ws = nil;
+            @try {
+                [oldWS cancel];
+            } @catch (NSException *e) {
+                writeLog(@"[WebRTCManager] Erro ao cancelar WebSocket: %@", e);
+            }
+        }
+        
+        // 2. Limpar a conexão peer
+        if (self.peerConnection) {
+            RTCPeerConnection *oldConnection = self.peerConnection;
+            self.peerConnection = nil;
+            @try {
+                [oldConnection close];
+            } @catch (NSException *e) {
+                writeLog(@"[WebRTCManager] Erro ao fechar conexão peer: %@", e);
+            }
+        }
+        
+        // 3. Limpar track de vídeo
+        if (self.videoTrack) {
+            RTCVideoTrack *oldTrack = self.videoTrack;
+            self.videoTrack = nil;
+            
+            if (self.floatingWindow && [self.floatingWindow respondsToSelector:@selector(videoView)]) {
+                RTCMTLVideoView *videoView = [self.floatingWindow valueForKey:@"videoView"];
+                if (videoView) {
+                    @try {
+                        [oldTrack removeRenderer:videoView];
+                    } @catch (NSException *e) {
+                        writeLog(@"[WebRTCManager] Erro ao remover renderer: %@", e);
+                    }
+                }
+            }
+            
+            if (self.frameConverter) {
+                @try {
+                    [oldTrack removeRenderer:self.frameConverter];
+                } @catch (NSException *e) {
+                    writeLog(@"[WebRTCManager] Erro ao remover frameConverter: %@", e);
+                }
+            }
+        }
+        
+        // 4. Reset completo do WebRTCFrameConverter
+        if (self.frameConverter) {
+            @try {
+                [self.frameConverter clearSampleBufferCache];
+                [self.frameConverter reset];
+                [self.frameConverter forceReleaseAllSampleBuffers];
+            } @catch (NSException *e) {
+                writeLog(@"[WebRTCManager] Erro ao resetar frameConverter: %@", e);
+            }
+        }
+        
+        // 5. Forçar ciclo de coleta de lixo
+        @autoreleasepool {}
+        
+        // Esperar um pouco para garantir que tudo foi limpo
+        usleep(100000); // 100ms
+        
+    } @catch (NSException *exception) {
+        writeLog(@"[WebRTCManager] Exceção durante limpeza para reconexão: %@", exception);
+    }
 }
 
 - (void)cleanupResourcesForReconnection {
