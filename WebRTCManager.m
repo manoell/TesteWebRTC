@@ -372,7 +372,7 @@ NSString *const kCameraChangeNotification = @"AVCaptureDeviceSubjectAreaDidChang
         // Iniciar timer para estatísticas
         [self startStatsTimer];
         
-        // Iniciar monitoramento periódico de recursos
+        // Iniciar monitoramento periódico de recursos com abordagem melhorada
         __weak typeof(self) weakSelf = self;
         dispatch_queue_t monitorQueue = dispatch_queue_create("com.webrtc.resourcemonitor", DISPATCH_QUEUE_SERIAL);
         
@@ -382,12 +382,15 @@ NSString *const kCameraChangeNotification = @"AVCaptureDeviceSubjectAreaDidChang
         }
         
         self.resourceMonitorTimer = dispatch_source_create(DISPATCH_SOURCE_TYPE_TIMER, 0, 0, monitorQueue);
-        dispatch_source_set_timer(self.resourceMonitorTimer, dispatch_time(DISPATCH_TIME_NOW, 30 * NSEC_PER_SEC), 30 * NSEC_PER_SEC, 1 * NSEC_PER_SEC);
+        dispatch_source_set_timer(self.resourceMonitorTimer, dispatch_time(DISPATCH_TIME_NOW, 15 * NSEC_PER_SEC), 15 * NSEC_PER_SEC, 1 * NSEC_PER_SEC);
         dispatch_source_set_event_handler(self.resourceMonitorTimer, ^{
             if (weakSelf.frameConverter) {
                 // Verificar vazamentos e desequilíbrios de recursos
                 [weakSelf checkResourceBalance];
                 [weakSelf monitorVideoStatistics];
+                
+                // Chamar o novo método de verificação no frameConverter
+                [weakSelf.frameConverter checkForResourceLeaks];
             }
         });
         dispatch_resume(self.resourceMonitorTimer);
@@ -1828,8 +1831,6 @@ NSString *const kCameraChangeNotification = @"AVCaptureDeviceSubjectAreaDidChang
 }
 
 - (void)cleanupResourcesForReconnection {
-    // NOVO: Adicionar uma limpeza mais completa de todos os recursos
-    
     // Fechar conexão peer anterior COM DELAY
     if (self.peerConnection) {
         // Criar uma referência local para evitar problemas de acesso após limpeza
@@ -1875,12 +1876,13 @@ NSString *const kCameraChangeNotification = @"AVCaptureDeviceSubjectAreaDidChang
         });
     }
     
-    // Limpar factory
-    self.factory = nil;
-    
-    // Limpar o conversor de frames com delay
+    // Otimizar o conversor de frames com delay
     dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.5 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
-        [self.frameConverter reset];
+        // Chamar diretamente o método checkForResourceLeaks para corrigir desequilíbrios
+        if (self.frameConverter) {
+            [self.frameConverter checkForResourceLeaks];
+            [self.frameConverter reset];
+        }
     });
     
     // Forçar um ciclo de liberação de memória
@@ -1920,12 +1922,27 @@ NSString *const kCameraChangeNotification = @"AVCaptureDeviceSubjectAreaDidChang
         NSInteger sampleBufferDiff = self.frameConverter.totalSampleBuffersCreated - self.frameConverter.totalSampleBuffersReleased;
         NSInteger pixelBufferDiff = self.frameConverter.totalPixelBuffersLocked - self.frameConverter.totalPixelBuffersUnlocked;
         
-        if (sampleBufferDiff > 10 || pixelBufferDiff > 10) {
+        // Usar variável estática para rastrear detecções consecutivas
+        static int consecutiveDetections = 0;
+        
+        if (sampleBufferDiff > 5 || pixelBufferDiff > 5) {
             writeWarningLog(@"[WebRTCManager] Desbalanceamento de recursos detectado - Buffers: %ld, PixelBuffers: %ld",
                            (long)sampleBufferDiff, (long)pixelBufferDiff);
             
             // Solicitar limpeza segura
             [self.frameConverter performSafeCleanup];
+            
+            // Em caso de desbalanceamento contínuo, forçar reset em último caso
+            consecutiveDetections++;
+            
+            if (consecutiveDetections >= 3) {
+                writeWarningLog(@"[WebRTCManager] Desbalanceamento persistente, forçando reset completo");
+                [self.frameConverter reset];
+                consecutiveDetections = 0;
+            }
+        } else {
+            // Resetar contador de detecções consecutivas
+            consecutiveDetections = 0;
         }
     }
 }

@@ -1,5 +1,6 @@
 #import "WebRTCFrameConverter.h"
 #import "logger.h"
+#import "PixelBufferLocker.h"
 #import <CoreMedia/CoreMedia.h>
 #import <CoreVideo/CoreVideo.h>
 #import <CoreImage/CoreImage.h>
@@ -132,6 +133,13 @@
                                                      name:UIApplicationDidReceiveMemoryWarningNotification
                                                    object:nil];
         
+        // Inicializar os novos dicionários e contadores
+        _activeSampleBuffers = [NSMutableDictionary dictionary];
+        _sampleBufferCacheTimestamps = [NSMutableDictionary dictionary];
+        
+        // Iniciar o monitoramento de recursos
+        [self startResourceMonitoring];
+        
         writeLog(@"[WebRTCFrameConverter] Inicializado com suporte otimizado para formatos iOS");
     }
     return self;
@@ -140,6 +148,12 @@
 - (void)dealloc {
     // Marcar que estamos desligando para não emitir warnings desnecessários
     _isShuttingDown = YES;
+    
+    // Cancelar o timer de monitoramento
+    if (_resourceMonitorTimer) {
+        dispatch_source_cancel(_resourceMonitorTimer);
+        _resourceMonitorTimer = nil;
+    }
     
     // Remover observadores de notificação
     [[NSNotificationCenter defaultCenter] removeObserver:self];
@@ -190,10 +204,14 @@
                 CFRelease(buffer);
                 self->_totalSampleBuffersReleased++;
                 liberadosAgora++;
+                
+                // Remover do rastreamento ativo
+                [self->_activeSampleBuffers removeObjectForKey:@(CFHash(buffer))];
             }
         }];
         
         [_sampleBufferCache removeAllObjects];
+        [_sampleBufferCacheTimestamps removeAllObjects];
         
         // Limpar sample buffer principal se existir
         if (_cachedSampleBuffer) {
@@ -201,9 +219,137 @@
             _cachedSampleBuffer = NULL;
             _totalSampleBuffersReleased++;
             liberadosAgora++;
+            
+            // Remover do rastreamento ativo
+            [_activeSampleBuffers removeObjectForKey:@(CFHash(_cachedSampleBuffer))];
         }
         
         writeLog(@"[WebRTCFrameConverter] Cache de sample buffers limpo (%lu buffers liberados)", (unsigned long)liberadosAgora);
+    }
+}
+
+- (void)releaseSampleBuffer:(CMSampleBufferRef)buffer {
+    if (!buffer) return;
+    
+    @synchronized(self) {
+        // Remover do rastreamento de buffers ativos
+        NSNumber *bufferKey = @(CFHash(buffer));
+        [_activeSampleBuffers removeObjectForKey:bufferKey];
+        
+        // Incrementar contador de liberação
+        _totalSampleBuffersReleased++;
+        
+        // Liberar o recurso
+        CFRelease(buffer);
+        
+        writeVerboseLog(@"[WebRTCFrameConverter] Buffer liberado explicitamente: %p", buffer);
+    }
+}
+
+- (void)optimizeCacheSystem {
+    @synchronized(self) {
+        // Limitar o número de entradas no cache
+        if (_sampleBufferCache.count > _maxCachedSampleBuffers) {
+            // Obter chaves ordenadas por timestamp (mais antigo primeiro)
+            NSArray *sortedKeys = [_sampleBufferCache.allKeys sortedArrayUsingComparator:^NSComparisonResult(NSNumber *key1, NSNumber *key2) {
+                NSDate *date1 = _sampleBufferCacheTimestamps[key1];
+                NSDate *date2 = _sampleBufferCacheTimestamps[key2];
+                return [date1 compare:date2];
+            }];
+            
+            // Remover as entradas mais antigas mantendo apenas as mais recentes
+            NSInteger itemsToRemove = _sampleBufferCache.count - _maxCachedSampleBuffers;
+            for (NSInteger i = 0; i < itemsToRemove && i < sortedKeys.count; i++) {
+                NSNumber *keyToRemove = sortedKeys[i];
+                NSValue *bufferValue = _sampleBufferCache[keyToRemove];
+                
+                if (bufferValue) {
+                    CMSampleBufferRef buffer = NULL;
+                    [bufferValue getValue:&buffer];
+                    
+                    if (buffer) {
+                        CFRelease(buffer);
+                        _totalSampleBuffersReleased++;
+                    }
+                }
+                
+                [_sampleBufferCache removeObjectForKey:keyToRemove];
+                [_sampleBufferCacheTimestamps removeObjectForKey:keyToRemove];
+            }
+            
+            writeLog(@"[WebRTCFrameConverter] Otimizado cache: removidas %ld entradas antigas", (long)itemsToRemove);
+        }
+    }
+}
+
+- (void)startResourceMonitoring {
+    __weak typeof(self) weakSelf = self;
+    dispatch_queue_t monitorQueue = dispatch_queue_create("com.webrtc.resourcemonitor", DISPATCH_QUEUE_SERIAL);
+    
+    if (_resourceMonitorTimer) {
+        dispatch_source_cancel(_resourceMonitorTimer);
+        _resourceMonitorTimer = nil;
+    }
+    
+    _resourceMonitorTimer = dispatch_source_create(DISPATCH_SOURCE_TYPE_TIMER, 0, 0, monitorQueue);
+    dispatch_source_set_timer(_resourceMonitorTimer,
+                             dispatch_time(DISPATCH_TIME_NOW, 5 * NSEC_PER_SEC),
+                             5 * NSEC_PER_SEC,
+                             1 * NSEC_PER_SEC);
+    
+    dispatch_source_set_event_handler(_resourceMonitorTimer, ^{
+        [weakSelf checkForResourceLeaks];
+    });
+    
+    dispatch_resume(_resourceMonitorTimer);
+    
+    writeLog(@"[WebRTCFrameConverter] Monitoramento de recursos iniciado");
+}
+
+- (void)checkForResourceLeaks {
+    @synchronized(self) {
+        // Se o objeto estiver sendo desalocado, não fazer nada
+        if (_isShuttingDown) return;
+        
+        NSInteger sampleBufferDiff = _totalSampleBuffersCreated - _totalSampleBuffersReleased;
+        NSInteger pixelBufferDiff = _totalPixelBuffersLocked - _totalPixelBuffersUnlocked;
+        
+        // Se temos um desbalanceamento significativo
+        if (sampleBufferDiff > 5 || pixelBufferDiff > 5) {
+            writeWarningLog(@"[WebRTCFrameConverter] Desbalanceamento detectado - SampleBuffers: %ld, PixelBuffers: %ld",
+                           (long)sampleBufferDiff, (long)pixelBufferDiff);
+            
+            // Auto-correção dos contadores apenas para CVPixelBuffer (que não podemos limpar diretamente)
+            if (pixelBufferDiff > 0) {
+                _totalPixelBuffersUnlocked += pixelBufferDiff;
+                writeLog(@"[WebRTCFrameConverter] Ajustado contador de desbloqueios: +%ld", (long)pixelBufferDiff);
+            }
+            
+            // Para buffers de amostra, fazer limpeza real
+            [self clearSampleBufferCache];
+            [self optimizeCacheSystem];
+            
+            // Em casos extremos, forçar um reset completo
+            if (sampleBufferDiff > 20 || pixelBufferDiff > 20) {
+                writeWarningLog(@"[WebRTCFrameConverter] Desbalanceamento severo - executando reset parcial");
+                
+                // Reset parcial (não completo para evitar interrupção do serviço)
+                _cachedImage = nil;
+                
+                // Fechar e recriar caches
+                [self clearSampleBufferCache];
+                _sampleBufferCache = [NSMutableDictionary dictionaryWithCapacity:_maxCachedSampleBuffers];
+                _sampleBufferCacheTimestamps = [NSMutableDictionary dictionaryWithCapacity:_maxCachedSampleBuffers];
+                _activeSampleBuffers = [NSMutableDictionary dictionary];
+                
+                // Forçar um ciclo de coleta de lixo
+                @autoreleasepool { }
+            }
+        } else {
+            writeVerboseLog(@"[WebRTCFrameConverter] Recursos balanceados: SampleBuffers(%ld/%ld), PixelBuffers(%ld/%ld)",
+                          (long)_totalSampleBuffersCreated, (long)_totalSampleBuffersReleased,
+                          (long)_totalPixelBuffersLocked, (long)_totalPixelBuffersUnlocked);
+        }
     }
 }
 
@@ -655,281 +801,217 @@
                 OSType pixelFormat = CVPixelBufferGetPixelFormatType(cvPixelBuffer);
                 IOSPixelFormat iosFormat = [WebRTCFrameConverter pixelFormatFromCVFormat:pixelFormat];
                 
-                // Flag para controlar se o buffer está bloqueado
-                BOOL bufferBloqueado = NO;
-                
-                // Bloquear o buffer para acesso com timeout
-                CVReturn lockResult = CVPixelBufferLockBaseAddress(cvPixelBuffer, kCVPixelBufferLock_ReadOnly);
-                if (lockResult != kCVReturnSuccess) {
-                    writeLog(@"[WebRTCFrameConverter] Falha ao bloquear CVPixelBuffer: %d", (int)lockResult);
-                    return nil;
-                }
-                
-                // Marcar buffer como bloqueado
-                bufferBloqueado = YES;
-                
-                // Incrementar contador de bloqueios
-                _totalPixelBuffersLocked++;
-                
+                // Usar o PixelBufferLocker para gerenciamento seguro
+                PixelBufferLocker *locker = [[PixelBufferLocker alloc] initWithPixelBuffer:cvPixelBuffer converter:self];
                 UIImage *image = nil;
                 
-                @try {
-                    // Verificar se estamos lidando com formatos YUV ou BGRA
-                    if (iosFormat == IOSPixelFormat420f || iosFormat == IOSPixelFormat420v) {
-                        // Processamento otimizado para formatos YUV
-                        // Para YUV, o CIImage já lida com a conversão de forma eficiente
-                        CIImage *ciImage = [CIImage imageWithCVPixelBuffer:cvPixelBuffer];
-                        
-                        if (!ciImage) {
-                            writeLog(@"[WebRTCFrameConverter] Falha ao criar CIImage a partir do CVPixelBuffer YUV");
-                            if (bufferBloqueado) {
-                                CVPixelBufferUnlockBaseAddress(cvPixelBuffer, kCVPixelBufferLock_ReadOnly);
-                                _totalPixelBuffersUnlocked++;
-                                bufferBloqueado = NO;
-                            }
-                            return nil;
-                        }
-                        
-                        // Aplicar rotação se necessário
-                        if (frame.rotation != RTCVideoRotation_0) {
-                            CGAffineTransform transform = CGAffineTransformIdentity;
+                if ([locker lock]) {
+                    @try {
+                        // Verificar se estamos lidando com formatos YUV ou BGRA
+                        if (iosFormat == IOSPixelFormat420f || iosFormat == IOSPixelFormat420v) {
+                            // Processamento otimizado para formatos YUV
+                            // Para YUV, o CIImage já lida com a conversão de forma eficiente
+                            CIImage *ciImage = [CIImage imageWithCVPixelBuffer:cvPixelBuffer];
                             
-                            switch (frame.rotation) {
-                                case RTCVideoRotation_90:
-                                    transform = CGAffineTransformMakeRotation(M_PI_2);
-                                    break;
-                                case RTCVideoRotation_180:
-                                    transform = CGAffineTransformMakeRotation(M_PI);
-                                    break;
-                                case RTCVideoRotation_270:
-                                    transform = CGAffineTransformMakeRotation(-M_PI_2);
-                                    break;
-                                default:
-                                    break;
-                            }
-                            
-                            ciImage = [ciImage imageByApplyingTransform:transform];
-                        }
-                        
-                        // Verificar contexto nulo e lidar com isso
-                        if (!_ciContext) {
-                            NSDictionary *options = @{
-                                kCIContextUseSoftwareRenderer: @(NO),  // Usar GPU quando disponível
-                                kCIContextWorkingColorSpace: (__bridge id)CGColorSpaceCreateDeviceRGB(),
-                                kCIContextOutputColorSpace: (__bridge id)CGColorSpaceCreateDeviceRGB()
-                            };
-                            _ciContext = [CIContext contextWithOptions:options];
-                            
-                            if (!_ciContext) {
-                                writeLog(@"[WebRTCFrameConverter] Falha ao criar CIContext");
-                                if (bufferBloqueado) {
-                                    CVPixelBufferUnlockBaseAddress(cvPixelBuffer, kCVPixelBufferLock_ReadOnly);
-                                    _totalPixelBuffersUnlocked++;
-                                    bufferBloqueado = NO;
-                                }
+                            if (!ciImage) {
+                                writeLog(@"[WebRTCFrameConverter] Falha ao criar CIImage a partir do CVPixelBuffer YUV");
                                 return nil;
                             }
-                        }
-                        
-                        // Usar o contexto otimizado para criar CGImage
-                        CGImageRef cgImage = [_ciContext createCGImage:ciImage fromRect:ciImage.extent];
-                        
-                        // Desbloquear o buffer antes de continuar o processamento
-                        if (bufferBloqueado) {
-                            CVPixelBufferUnlockBaseAddress(cvPixelBuffer, kCVPixelBufferLock_ReadOnly);
-                            _totalPixelBuffersUnlocked++;
-                            bufferBloqueado = NO;
-                        }
-                        
-                        if (!cgImage) {
-                            writeLog(@"[WebRTCFrameConverter] Falha ao criar CGImage de YUV");
-                            return nil;
-                        }
-                        
-                        // Criar UIImage e verificar se foi criada com sucesso
-                        image = [UIImage imageWithCGImage:cgImage];
-                        CGImageRelease(cgImage);
-                    }
-                    else if (iosFormat == IOSPixelFormatBGRA) {
-                        // Processamento otimizado para BGRA (32-bit)
-                        // Para BGRA, podemos usar uma abordagem mais direta
-                        size_t bytesPerRow = CVPixelBufferGetBytesPerRow(cvPixelBuffer);
-                        void *baseAddress = CVPixelBufferGetBaseAddress(cvPixelBuffer);
-                        
-                        CGColorSpaceRef colorSpace = CGColorSpaceCreateDeviceRGB();
-                        CGContextRef cgContext = CGBitmapContextCreate(baseAddress,
-                                                                     width,
-                                                                     height,
-                                                                     8,
-                                                                     bytesPerRow,
-                                                                     colorSpace,
-                                                                     kCGBitmapByteOrder32Little | kCGImageAlphaPremultipliedFirst);
-                        
-                        CGColorSpaceRelease(colorSpace);
-                        
-                        if (!cgContext) {
-                            writeLog(@"[WebRTCFrameConverter] Falha ao criar CGContext para BGRA");
-                            if (bufferBloqueado) {
-                                CVPixelBufferUnlockBaseAddress(cvPixelBuffer, kCVPixelBufferLock_ReadOnly);
-                                _totalPixelBuffersUnlocked++;
-                                bufferBloqueado = NO;
-                            }
-                            return nil;
-                        }
-                        
-                        CGImageRef cgImage = CGBitmapContextCreateImage(cgContext);
-                        CGContextRelease(cgContext);
-                        
-                        // Desbloquear o buffer após criar o CGImage
-                        if (bufferBloqueado) {
-                            CVPixelBufferUnlockBaseAddress(cvPixelBuffer, kCVPixelBufferLock_ReadOnly);
-                            _totalPixelBuffersUnlocked++;
-                            bufferBloqueado = NO;
-                        }
-                        
-                        if (!cgImage) {
-                            writeLog(@"[WebRTCFrameConverter] Falha ao criar CGImage de BGRA");
-                            return nil;
-                        }
-                        
-                        // Aplicar rotação se necessário
-                        if (frame.rotation != RTCVideoRotation_0) {
-                            UIImage *originalImage = [UIImage imageWithCGImage:cgImage];
-                            CGImageRelease(cgImage);
                             
-                            UIGraphicsBeginImageContextWithOptions(CGSizeMake(originalImage.size.height, originalImage.size.width), NO, originalImage.scale);
-                            CGContextRef context = UIGraphicsGetCurrentContext();
-                            
-                            // Transformação para rotação
-                            switch (frame.rotation) {
-                                case RTCVideoRotation_90:
-                                    CGContextTranslateCTM(context, 0, originalImage.size.height);
-                                    CGContextRotateCTM(context, -M_PI_2);
-                                    CGContextDrawImage(context, CGRectMake(0, 0, originalImage.size.width, originalImage.size.height), originalImage.CGImage);
-                                    break;
-                                case RTCVideoRotation_180:
-                                    CGContextTranslateCTM(context, originalImage.size.width, originalImage.size.height);
-                                    CGContextRotateCTM(context, M_PI);
-                                    CGContextDrawImage(context, CGRectMake(0, 0, originalImage.size.width, originalImage.size.height), originalImage.CGImage);
-                                    break;
-                                case RTCVideoRotation_270:
-                                    CGContextTranslateCTM(context, originalImage.size.width, 0);
-                                    CGContextRotateCTM(context, M_PI_2);
-                                    CGContextDrawImage(context, CGRectMake(0, 0, originalImage.size.width, originalImage.size.height), originalImage.CGImage);
-                                    break;
-                                default:
-                                    break;
+                            // Aplicar rotação se necessário
+                            if (frame.rotation != RTCVideoRotation_0) {
+                                CGAffineTransform transform = CGAffineTransformIdentity;
+                                
+                                switch (frame.rotation) {
+                                    case RTCVideoRotation_90:
+                                        transform = CGAffineTransformMakeRotation(M_PI_2);
+                                        break;
+                                    case RTCVideoRotation_180:
+                                        transform = CGAffineTransformMakeRotation(M_PI);
+                                        break;
+                                    case RTCVideoRotation_270:
+                                        transform = CGAffineTransformMakeRotation(-M_PI_2);
+                                        break;
+                                    default:
+                                        break;
+                                }
+                                
+                                ciImage = [ciImage imageByApplyingTransform:transform];
                             }
                             
-                            image = UIGraphicsGetImageFromCurrentImageContext();
-                            UIGraphicsEndImageContext();
-                        } else {
+                            // Verificar contexto nulo e lidar com isso
+                            if (!_ciContext) {
+                                NSDictionary *options = @{
+                                    kCIContextUseSoftwareRenderer: @(NO),  // Usar GPU quando disponível
+                                    kCIContextWorkingColorSpace: (__bridge id)CGColorSpaceCreateDeviceRGB(),
+                                    kCIContextOutputColorSpace: (__bridge id)CGColorSpaceCreateDeviceRGB()
+                                };
+                                _ciContext = [CIContext contextWithOptions:options];
+                                
+                                if (!_ciContext) {
+                                    writeLog(@"[WebRTCFrameConverter] Falha ao criar CIContext");
+                                    return nil;
+                                }
+                            }
+                            
+                            // Usar o contexto otimizado para criar CGImage
+                            CGImageRef cgImage = [_ciContext createCGImage:ciImage fromRect:ciImage.extent];
+                            
+                            if (!cgImage) {
+                                writeLog(@"[WebRTCFrameConverter] Falha ao criar CGImage de YUV");
+                                return nil;
+                            }
+                            
+                            // Criar UIImage e verificar se foi criada com sucesso
                             image = [UIImage imageWithCGImage:cgImage];
                             CGImageRelease(cgImage);
                         }
-                    }
-                    else {
-                        // Formato desconhecido, usar abordagem genérica com CIImage
-                        writeLog(@"[WebRTCFrameConverter] Usando método genérico para formato desconhecido");
-                        
-                        CIImage *ciImage = [CIImage imageWithCVPixelBuffer:cvPixelBuffer];
-                        
-                        if (!ciImage) {
-                            writeLog(@"[WebRTCFrameConverter] Falha ao criar CIImage a partir do CVPixelBuffer");
-                            if (bufferBloqueado) {
-                                CVPixelBufferUnlockBaseAddress(cvPixelBuffer, kCVPixelBufferLock_ReadOnly);
-                                _totalPixelBuffersUnlocked++;
-                                bufferBloqueado = NO;
-                            }
-                            return nil;
-                        }
-                        
-                        // Aplicar rotação se necessário
-                        if (frame.rotation != RTCVideoRotation_0) {
-                            CGAffineTransform transform = CGAffineTransformIdentity;
+                        else if (iosFormat == IOSPixelFormatBGRA) {
+                            // Processamento otimizado para BGRA (32-bit)
+                            // Para BGRA, podemos usar uma abordagem mais direta
+                            size_t bytesPerRow = CVPixelBufferGetBytesPerRow(cvPixelBuffer);
+                            void *baseAddress = CVPixelBufferGetBaseAddress(cvPixelBuffer);
                             
-                            switch (frame.rotation) {
-                                case RTCVideoRotation_90:
-                                    transform = CGAffineTransformMakeRotation(M_PI_2);
-                                    break;
-                                case RTCVideoRotation_180:
-                                    transform = CGAffineTransformMakeRotation(M_PI);
-                                    break;
-                                case RTCVideoRotation_270:
-                                    transform = CGAffineTransformMakeRotation(-M_PI_2);
-                                    break;
-                                default:
-                                    break;
-                            }
+                            CGColorSpaceRef colorSpace = CGColorSpaceCreateDeviceRGB();
+                            CGContextRef cgContext = CGBitmapContextCreate(baseAddress,
+                                                                         width,
+                                                                         height,
+                                                                         8,
+                                                                         bytesPerRow,
+                                                                         colorSpace,
+                                                                         kCGBitmapByteOrder32Little | kCGImageAlphaPremultipliedFirst);
                             
-                            ciImage = [ciImage imageByApplyingTransform:transform];
-                        }
-                        
-                        // Verificar contexto nulo e lidar com isso
-                        if (!_ciContext) {
-                            NSDictionary *options = @{
-                                kCIContextUseSoftwareRenderer: @(NO),  // Usar GPU quando disponível
-                                kCIContextWorkingColorSpace: (__bridge id)CGColorSpaceCreateDeviceRGB(),
-                                kCIContextOutputColorSpace: (__bridge id)CGColorSpaceCreateDeviceRGB()
-                            };
-                            _ciContext = [CIContext contextWithOptions:options];
+                            CGColorSpaceRelease(colorSpace);
                             
-                            if (!_ciContext) {
-                                writeLog(@"[WebRTCFrameConverter] Falha ao criar CIContext");
-                                if (bufferBloqueado) {
-                                    CVPixelBufferUnlockBaseAddress(cvPixelBuffer, kCVPixelBufferLock_ReadOnly);
-                                    _totalPixelBuffersUnlocked++;
-                                    bufferBloqueado = NO;
-                                }
+                            if (!cgContext) {
+                                writeLog(@"[WebRTCFrameConverter] Falha ao criar CGContext para BGRA");
                                 return nil;
                             }
+                            
+                            CGImageRef cgImage = CGBitmapContextCreateImage(cgContext);
+                            CGContextRelease(cgContext);
+                            
+                            if (!cgImage) {
+                                writeLog(@"[WebRTCFrameConverter] Falha ao criar CGImage de BGRA");
+                                return nil;
+                            }
+                            
+                            // Aplicar rotação se necessário
+                            if (frame.rotation != RTCVideoRotation_0) {
+                                UIImage *originalImage = [UIImage imageWithCGImage:cgImage];
+                                CGImageRelease(cgImage);
+                                
+                                UIGraphicsBeginImageContextWithOptions(CGSizeMake(originalImage.size.height, originalImage.size.width), NO, originalImage.scale);
+                                CGContextRef context = UIGraphicsGetCurrentContext();
+                                
+                                // Transformação para rotação
+                                switch (frame.rotation) {
+                                    case RTCVideoRotation_90:
+                                        CGContextTranslateCTM(context, 0, originalImage.size.height);
+                                        CGContextRotateCTM(context, -M_PI_2);
+                                        CGContextDrawImage(context, CGRectMake(0, 0, originalImage.size.width, originalImage.size.height), originalImage.CGImage);
+                                        break;
+                                    case RTCVideoRotation_180:
+                                        CGContextTranslateCTM(context, originalImage.size.width, originalImage.size.height);
+                                        CGContextRotateCTM(context, M_PI);
+                                        CGContextDrawImage(context, CGRectMake(0, 0, originalImage.size.width, originalImage.size.height), originalImage.CGImage);
+                                        break;
+                                    case RTCVideoRotation_270:
+                                        CGContextTranslateCTM(context, originalImage.size.width, 0);
+                                        CGContextRotateCTM(context, M_PI_2);
+                                        CGContextDrawImage(context, CGRectMake(0, 0, originalImage.size.width, originalImage.size.height), originalImage.CGImage);
+                                        break;
+                                    default:
+                                        break;
+                                }
+                                
+                                image = UIGraphicsGetImageFromCurrentImageContext();
+                                UIGraphicsEndImageContext();
+                            } else {
+                                image = [UIImage imageWithCGImage:cgImage];
+                                CGImageRelease(cgImage);
+                            }
+                        }
+                        else {
+                            // Formato desconhecido, usar abordagem genérica com CIImage
+                            writeLog(@"[WebRTCFrameConverter] Usando método genérico para formato desconhecido");
+                            
+                            CIImage *ciImage = [CIImage imageWithCVPixelBuffer:cvPixelBuffer];
+                            
+                            if (!ciImage) {
+                                writeLog(@"[WebRTCFrameConverter] Falha ao criar CIImage a partir do CVPixelBuffer");
+                                return nil;
+                            }
+                            
+                            // Aplicar rotação se necessário
+                            if (frame.rotation != RTCVideoRotation_0) {
+                                CGAffineTransform transform = CGAffineTransformIdentity;
+                                
+                                switch (frame.rotation) {
+                                    case RTCVideoRotation_90:
+                                        transform = CGAffineTransformMakeRotation(M_PI_2);
+                                        break;
+                                    case RTCVideoRotation_180:
+                                        transform = CGAffineTransformMakeRotation(M_PI);
+                                        break;
+                                    case RTCVideoRotation_270:
+                                        transform = CGAffineTransformMakeRotation(-M_PI_2);
+                                        break;
+                                    default:
+                                        break;
+                                }
+                                
+                                ciImage = [ciImage imageByApplyingTransform:transform];
+                            }
+                            
+                            // Verificar contexto nulo e lidar com isso
+                            if (!_ciContext) {
+                                NSDictionary *options = @{
+                                    kCIContextUseSoftwareRenderer: @(NO),  // Usar GPU quando disponível
+                                    kCIContextWorkingColorSpace: (__bridge id)CGColorSpaceCreateDeviceRGB(),
+                                    kCIContextOutputColorSpace: (__bridge id)CGColorSpaceCreateDeviceRGB()
+                                };
+                                _ciContext = [CIContext contextWithOptions:options];
+                                
+                                if (!_ciContext) {
+                                    writeLog(@"[WebRTCFrameConverter] Falha ao criar CIContext");
+                                    return nil;
+                                }
+                            }
+                            
+                            // Usar o contexto otimizado para criar CGImage
+                            CGImageRef cgImage = [_ciContext createCGImage:ciImage fromRect:ciImage.extent];
+                            
+                            if (!cgImage) {
+                                writeLog(@"[WebRTCFrameConverter] Falha ao criar CGImage");
+                                return nil;
+                            }
+                            
+                            // Criar UIImage e verificar se foi criada com sucesso
+                            image = [UIImage imageWithCGImage:cgImage];
+                            CGImageRelease(cgImage);
                         }
                         
-                        // Usar o contexto otimizado para criar CGImage
-                        CGImageRef cgImage = [_ciContext createCGImage:ciImage fromRect:ciImage.extent];
-                        
-                        // Desbloquear o buffer após criar o CGImage
-                        if (bufferBloqueado) {
-                            CVPixelBufferUnlockBaseAddress(cvPixelBuffer, kCVPixelBufferLock_ReadOnly);
-                            _totalPixelBuffersUnlocked++;
-                            bufferBloqueado = NO;
-                        }
-                        
-                        if (!cgImage) {
-                            writeLog(@"[WebRTCFrameConverter] Falha ao criar CGImage");
+                        if (!image) {
+                            writeLog(@"[WebRTCFrameConverter] Falha ao criar UIImage a partir de CGImage");
                             return nil;
                         }
                         
-                        // Criar UIImage e verificar se foi criada com sucesso
-                        image = [UIImage imageWithCGImage:cgImage];
-                        CGImageRelease(cgImage);
-                    }
-                    
-                    if (!image) {
-                        writeLog(@"[WebRTCFrameConverter] Falha ao criar UIImage a partir de CGImage");
-                        return nil;
-                    }
-                    
-                    // Verificar tamanho final da imagem
-                    if (image.size.width <= 0 || image.size.height <= 0) {
-                        writeLog(@"[WebRTCFrameConverter] UIImage criada com dimensões inválidas: %@",
-                                NSStringFromCGSize(image.size));
-                        return nil;
-                    }
-                    
-                    return image;
-                    
-                } @catch (NSException *exception) {
-                    writeLog(@"[WebRTCFrameConverter] Exceção ao processar CIImage: %@", exception);
-                } @finally {
-                    // Garantir que o buffer seja desbloqueado
-                    if (bufferBloqueado) {
-                        CVPixelBufferUnlockBaseAddress(cvPixelBuffer, kCVPixelBufferLock_ReadOnly);
-                        _totalPixelBuffersUnlocked++;
+                        // Verificar tamanho final da imagem
+                        if (image.size.width <= 0 || image.size.height <= 0) {
+                            writeLog(@"[WebRTCFrameConverter] UIImage criada com dimensões inválidas: %@",
+                                    NSStringFromCGSize(image.size));
+                            return nil;
+                        }
+                    } @catch (NSException *exception) {
+                        writeLog(@"[WebRTCFrameConverter] Exceção ao processar CIImage: %@", exception);
+                    } @finally {
+                        // Garantir que o buffer seja desbloqueado explicitamente
+                        [locker unlock];
                     }
                 }
                 
-                return nil;
+                return image;
             } else {
                 writeLog(@"[WebRTCFrameConverter] Tipo de buffer não suportado: %@", NSStringFromClass([buffer class]));
                 return nil;
@@ -1084,16 +1166,9 @@
         // Caso contrário, criar um novo buffer
         CMSampleBufferRef sampleBuffer = [self createSampleBufferWithFormat:cvFormat];
         
-        // Armazenar na cache se criado com sucesso
+        // Quando armazenar em cache um buffer:
         if (sampleBuffer) {
             @synchronized(self) {
-                // Liberar o buffer anterior se existir
-                if (_cachedSampleBuffer) {
-                    CFRelease(_cachedSampleBuffer);
-                    _cachedSampleBuffer = NULL;
-                    _totalSampleBuffersReleased++;
-                }
-                
                 // Armazenar uma cópia para cache
                 OSStatus status = CMSampleBufferCreateCopy(kCFAllocatorDefault, sampleBuffer, &_cachedSampleBuffer);
                 if (status != noErr) {
@@ -1116,12 +1191,24 @@
                             if (oldBuffer) {
                                 CFRelease(oldBuffer);
                                 _totalSampleBuffersReleased++;
+                                
+                                // Remover do rastreamento ativo
+                                [_activeSampleBuffers removeObjectForKey:@(CFHash(oldBuffer))];
                             }
                         }
                         
                         // Armazenar o novo buffer
                         NSValue *newValue = [NSValue valueWithBytes:&formatCacheBuffer objCType:@encode(CMSampleBufferRef)];
                         _sampleBufferCache[formatKey] = newValue;
+                        
+                        // Registrar timestamp para controle de cache
+                        _sampleBufferCacheTimestamps[formatKey] = [NSDate date];
+                        
+                        // Registrar no rastreamento ativo
+                        _activeSampleBuffers[@(CFHash(formatCacheBuffer))] = @YES;
+                        
+                        // Otimizar cache se estiver ficando grande
+                        [self optimizeCacheSystem];
                     }
                 }
             }
@@ -1174,8 +1261,8 @@
     };
     
     writeVerboseLog(@"[WebRTCFrameConverter] Formato de pixel origem: %s (0x%08X), destino: %s (0x%08X)",
-                  sourceFormatChars, (unsigned int)sourceFormat,
-                  targetFormatChars, (unsigned int)format);
+                    sourceFormatChars, (unsigned int)sourceFormat,
+                    targetFormatChars, (unsigned int)format);
     
     // Se o formato já for o desejado, podemos usar diretamente
     if (sourceFormat == format) {
@@ -1194,11 +1281,11 @@
     };
     
     CVReturn result = CVPixelBufferCreate(kCFAllocatorDefault,
-                                        CVPixelBufferGetWidth(pixelBuffer),
-                                        CVPixelBufferGetHeight(pixelBuffer),
-                                        format,
-                                        (__bridge CFDictionaryRef)pixelBufferAttributes,
-                                        &convertedBuffer);
+                                          CVPixelBufferGetWidth(pixelBuffer),
+                                          CVPixelBufferGetHeight(pixelBuffer),
+                                          format,
+                                          (__bridge CFDictionaryRef)pixelBufferAttributes,
+                                          &convertedBuffer);
     
     if (result != kCVReturnSuccess || !convertedBuffer) {
         writeErrorLog(@"[WebRTCFrameConverter] Falha ao criar buffer compatível: %d", result);
@@ -1214,6 +1301,17 @@
     
     // Liberar o buffer convertido
     CVPixelBufferRelease(convertedBuffer);
+    
+    // Incrementar contador de buffers criados
+    _totalSampleBuffersCreated++;
+    
+    // Registrar buffer no rastreamento ativo
+    if (sampleBuffer) {
+        @synchronized(self) {
+            NSNumber *bufferKey = @(CFHash(sampleBuffer));
+            _activeSampleBuffers[bufferKey] = @YES;
+        }
+    }
     
     return sampleBuffer;
 }

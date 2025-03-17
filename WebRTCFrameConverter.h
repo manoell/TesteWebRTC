@@ -49,8 +49,23 @@ typedef NS_ENUM(NSInteger, IOSPixelFormat) {
 
 @property (nonatomic, assign, readonly) NSUInteger totalSampleBuffersCreated;
 @property (nonatomic, assign, readonly) NSUInteger totalSampleBuffersReleased;
-@property (nonatomic, assign, readonly) NSUInteger totalPixelBuffersLocked;
-@property (nonatomic, assign, readonly) NSUInteger totalPixelBuffersUnlocked;
+@property (nonatomic, assign) NSUInteger totalPixelBuffersLocked;
+@property (nonatomic, assign) NSUInteger totalPixelBuffersUnlocked;
+
+/**
+ * Dicionário para rastreamento ativo de sample buffers
+ */
+@property (nonatomic, strong, readonly) NSMutableDictionary *activeSampleBuffers;
+
+/**
+ * Dicionário para timestamps de cache
+ */
+@property (nonatomic, strong, readonly) NSMutableDictionary *sampleBufferCacheTimestamps;
+
+/**
+ * Timer para monitoramento de recursos
+ */
+@property (nonatomic, strong) dispatch_source_t resourceMonitorTimer;
 
 /**
  * Inicializa o conversor de frames.
@@ -147,5 +162,26 @@ typedef NS_ENUM(NSInteger, IOSPixelFormat) {
  * Este método deve ser chamado quando o app entra em background ou em situações de baixa memória.
  */
 - (void)performSafeCleanup;
+
+/**
+ * Libera explicitamente um CMSampleBuffer e atualiza contadores.
+ * @param buffer O buffer a ser liberado.
+ */
+- (void)releaseSampleBuffer:(CMSampleBufferRef)buffer;
+
+/**
+ * Monitora e corrige automaticamente vazamentos de recursos.
+ */
+- (void)checkForResourceLeaks;
+
+/**
+ * Inicia o monitoramento periódico de recursos.
+ */
+- (void)startResourceMonitoring;
+
+/**
+ * Otimiza o sistema de cache removendo entradas antigas.
+ */
+- (void)optimizeCacheSystem;
 
 @end
