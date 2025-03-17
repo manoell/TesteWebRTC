@@ -151,24 +151,28 @@ NSString *const kCameraChangeNotification = @"AVCaptureDeviceSubjectAreaDidChang
     
     // Se estamos conectados ou conectando, verificar a integridade da conexão
     if (self.state == WebRTCManagerStateConnected || self.state == WebRTCManagerStateConnecting) {
-        // Verificar se o WebSocket ainda está aberto
-        if (self.webSocketTask && self.webSocketTask.state == NSURLSessionTaskStateRunning) {
-            // Enviar ping para verificar se a conexão ainda está ativa
-            NSDictionary *pingMessage = @{
-                @"type": @"ping",
-                @"timestamp": @([[NSDate date] timeIntervalSince1970] * 1000),
-                @"roomId": self.roomId ?: @"ios-camera",
-                @"networkVerification": @YES
-            };
-            
-            [self sendWebSocketMessage:pingMessage];
-            
-            writeLog(@"[WebRTCManager] Enviando ping de verificação após mudança de rede");
-        } else {
-            // WebSocket não está mais ativo, tentar reconectar
+        // Verificar se o WebSocket ainda está ativo
+        if (!self.webSocketTask || self.webSocketTask.state != NSURLSessionTaskStateRunning) {
             writeLog(@"[WebRTCManager] WebSocket inativo após mudança de rede, iniciando reconexão");
             self.state = WebRTCManagerStateReconnecting;
             [self attemptReconnection];
+        } else {
+            // Enviar ping para verificar se a conexão ainda está ativa
+            @try {
+                [self.webSocketTask sendPingWithPongReceiveHandler:^(NSError * _Nullable error) {
+                    if (error) {
+                        writeLog(@"[WebRTCManager] Falha no ping após mudança de rede: %@", error);
+                        self.state = WebRTCManagerStateReconnecting;
+                        [self attemptReconnection];
+                    } else {
+                        writeLog(@"[WebRTCManager] Conexão confirmada após mudança de rede");
+                    }
+                }];
+            } @catch (NSException *e) {
+                writeLog(@"[WebRTCManager] Exceção ao enviar ping: %@", e);
+                self.state = WebRTCManagerStateReconnecting;
+                [self attemptReconnection];
+            }
         }
     }
 }
@@ -519,29 +523,18 @@ NSString *const kCameraChangeNotification = @"AVCaptureDeviceSubjectAreaDidChang
 
 - (void)connectWebSocket {
     @try {
-        // Se já estiver tentando conectar, impedir nova conexão
-        if (self.webSocketTask && self.webSocketTask.state == NSURLSessionTaskStateRunning) {
-            writeLog(@"[WebRTCManager] Já existe uma conexão WebSocket ativa, ignorando nova tentativa");
-            return;
-        }
-        
-        // Adicionar log para verificar o IP que está sendo usado
-        writeLog(@"[WebRTCManager] Tentando conectar ao servidor WebSocket: %@", self.serverIP);
-        
-        // Criar URL para o servidor
+        // URL para o servidor
         NSString *urlString = [NSString stringWithFormat:@"ws://%@:8080", self.serverIP];
         NSURL *url = [NSURL URLWithString:urlString];
         
-        if (!url) {
-            writeErrorLog(@"[WebRTCManager] URL inválida: %@", urlString);
-            self.state = WebRTCManagerStateError;
-            return;
-        }
+        // Configurar URL Request com timeouts aumentados
+        NSMutableURLRequest *request = [NSMutableURLRequest requestWithURL:url];
+        request.timeoutInterval = 60.0; // Aumentar para 60 segundos
         
-        // Configurar a sessão com timeout mais longo para redes locais
+        // Configurar a sessão com timeout mais longo
         NSURLSessionConfiguration *sessionConfig = [NSURLSessionConfiguration defaultSessionConfiguration];
-        sessionConfig.timeoutIntervalForRequest = 60.0;      // Aumentado para 60 segundos
-        sessionConfig.timeoutIntervalForResource = 90.0;     // Aumentado para 90 segundos
+        sessionConfig.timeoutIntervalForRequest = 60.0;     // 60 segundos
+        sessionConfig.timeoutIntervalForResource = 120.0;   // 2 minutos
         
         // Criar sessão e task WebSocket
         if (self.session) {
@@ -551,7 +544,6 @@ NSString *const kCameraChangeNotification = @"AVCaptureDeviceSubjectAreaDidChang
                                                      delegate:self
                                                 delegateQueue:[NSOperationQueue mainQueue]];
         
-        NSURLRequest *request = [NSURLRequest requestWithURL:url];
         self.webSocketTask = [self.session webSocketTaskWithRequest:request];
         
         // Iniciar recepção de mensagens
@@ -560,32 +552,34 @@ NSString *const kCameraChangeNotification = @"AVCaptureDeviceSubjectAreaDidChang
         // Conectar
         [self.webSocketTask resume];
         
-        // Preparar dados de capacidades iOS para envio após conexão
-        NSDictionary *iOSCapabilities = [self getiOSCapabilitiesInfo];
-        
-        // Enviar mensagem inicial de JOIN com capacidades iOS depois que a conexão estiver estabelecida
+        // Depois que a conexão for estabelecida, enviar JOIN com um pequeno delay
         dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.5 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
-            if (self.webSocketTask && self.webSocketTask.state == NSURLSessionTaskStateRunning) {
-                NSMutableDictionary *joinMessage = [@{
-                    @"type": @"join",
-                    @"roomId": self.roomId ?: @"ios-camera",
-                    @"deviceType": @"ios"
-                } mutableCopy];
-                
-                // Incluir informações de capacidades iOS se habilitado
-                if (self.iosCompatibilitySignalingEnabled) {
-                    joinMessage[@"capabilities"] = iOSCapabilities;
-                }
-                
-                [self sendWebSocketMessage:joinMessage];
-            }
+            [self sendJoinMessage];
         });
-        
-        // Iniciar o timer de keep-alive para evitar timeout
-        [self startKeepAliveTimer];
     } @catch (NSException *exception) {
         writeErrorLog(@"[WebRTCManager] Exceção ao conectar WebSocket: %@", exception);
         self.state = WebRTCManagerStateError;
+    }
+}
+
+// Novo método separado para enviar JOIN
+- (void)sendJoinMessage {
+    if (self.webSocketTask && self.webSocketTask.state == NSURLSessionTaskStateRunning) {
+        NSMutableDictionary *joinMessage = [@{
+            @"type": @"join",
+            @"roomId": self.roomId ?: @"ios-camera",
+            @"deviceType": @"ios",
+            @"reconnect": @(self.reconnectAttempts > 0)
+        } mutableCopy];
+        
+        // Incluir informações de capacidades iOS
+        if (self.iosCompatibilitySignalingEnabled) {
+            joinMessage[@"capabilities"] = [self getiOSCapabilitiesInfo];
+        }
+        
+        [self sendWebSocketMessage:joinMessage];
+        
+        writeLog(@"[WebRTCManager] Enviada mensagem de JOIN para a sala: %@", self.roomId ?: @"ios-camera");
     }
 }
 
@@ -634,30 +628,46 @@ NSString *const kCameraChangeNotification = @"AVCaptureDeviceSubjectAreaDidChang
 }
 
 - (void)startKeepAliveTimer {
-    // Cancela timer existente se houver
+    // Limpar intervalo existente
     if (_keepAliveTimer) {
         [_keepAliveTimer invalidate];
         _keepAliveTimer = nil;
     }
     
-    // Cria novo timer para enviar mensagens keep-alive a cada 2 segundos (era 3)
+    // Usar intervalo exato de 2 segundos para sincronizar com o servidor
     _keepAliveTimer = [NSTimer scheduledTimerWithTimeInterval:2.0
-                                                          target:self
-                                                        selector:@selector(sendKeepAlive)
-                                                        userInfo:nil
-                                                         repeats:YES];
+                                                      target:self
+                                                    selector:@selector(sendKeepAlive)
+                                                    userInfo:nil
+                                                     repeats:YES];
     
-    // Executar imediatamente uma vez para estabelecer keep-alive
+    // Usar runloop específico para garantir que o timer continue mesmo durante reconexões
+    [[NSRunLoop mainRunLoop] addTimer:_keepAliveTimer forMode:NSRunLoopCommonModes];
+    
+    // Executar imediatamente
     [self sendKeepAlive];
 }
 
 - (void)sendKeepAlive {
     if (self.webSocketTask && self.webSocketTask.state == NSURLSessionTaskStateRunning) {
+        // Enviar ping nativo WebSocket
+        [self.webSocketTask sendPingWithPongReceiveHandler:^(NSError * _Nullable error) {
+            if (error) {
+                writeErrorLog(@"[WebRTCManager] Erro ao receber pong: %@", error);
+            }
+        }];
+        
+        // Também enviar mensagem JSON ping (para compatibilidade total)
         [self sendWebSocketMessage:@{
             @"type": @"ping",
             @"roomId": self.roomId ?: @"ios-camera",
-            @"timestamp": @([[NSDate date] timeIntervalSince1970] * 1000)
+            @"timestamp": @([[NSDate date] timeIntervalSince1970] * 1000),
+            @"deviceInfo": @{
+                @"reconnectAttempts": @(self.reconnectAttempts),
+                @"isReceivingFrames": @(self.isReceivingFrames)
+            }
         }];
+        
         writeVerboseLog(@"[WebRTCManager] Enviando mensagem keep-alive (ping)");
     }
 }
@@ -1047,13 +1057,23 @@ NSString *const kCameraChangeNotification = @"AVCaptureDeviceSubjectAreaDidChang
 
 - (void)URLSession:(NSURLSession *)session task:(NSURLSessionTask *)task didCompleteWithError:(NSError *)error {
     if (error) {
-        writeLog(@"[WebRTCManager] WebSocket completou com erro: %@", error);
-        
-        if (!self.userRequestedDisconnect) {
-            self.state = WebRTCManagerStateError;
+        // Verificar erro específico de timeout
+        if ([error.domain isEqualToString:NSURLErrorDomain] &&
+            (error.code == NSURLErrorTimedOut || error.code == NSURLErrorNetworkConnectionLost)) {
+            writeLog(@"[WebRTCManager] Timeout ou perda de conexão detectado: %@", error);
             
-            // Iniciar processo de reconexão automaticamente
-            [self startReconnectionTimer];
+            // Verificar se já estamos em processo de reconexão
+            if (!self.isReconnecting && !self.userRequestedDisconnect) {
+                self.state = WebRTCManagerStateReconnecting;
+                [self startReconnectionTimer];
+            }
+        } else {
+            writeLog(@"[WebRTCManager] WebSocket completou com erro: %@", error);
+            
+            if (!self.userRequestedDisconnect) {
+                self.state = WebRTCManagerStateError;
+                [self startReconnectionTimer];
+            }
         }
     }
 }
@@ -1604,8 +1624,9 @@ NSString *const kCameraChangeNotification = @"AVCaptureDeviceSubjectAreaDidChang
     
     // Preservar informações do estado atual
     NSString *currentRoomId = self.roomId;
+    BOOL wasReceivingFrames = self.isReceivingFrames;
     
-    // Limpar recursos mas manter configurações de sessão
+    // Limpar recursos sem fechar o WebRTC Manager completamente
     [self cleanupResourcesForReconnection];
     
     // Restaurar informações importantes
@@ -1614,72 +1635,53 @@ NSString *const kCameraChangeNotification = @"AVCaptureDeviceSubjectAreaDidChang
     // Reconfigurar WebRTC
     [self configureWebRTC];
     
-    // Reconectar ao WebSocket com menos delay
+    // Reconectar ao WebSocket
     [self connectWebSocket];
     
-    // Atualizar status na FloatingWindow
-    if (self.floatingWindow) {
-        [self.floatingWindow updateConnectionStatus:@"Tentando reconexão..."];
+    // Se estava recebendo frames, restaurar o estado visual
+    if (wasReceivingFrames && self.floatingWindow) {
+        dispatch_async(dispatch_get_main_queue(), ^{
+            if ([self.floatingWindow respondsToSelector:@selector(updateConnectionStatus:)]) {
+                [self.floatingWindow updateConnectionStatus:@"Reconectando..."];
+            }
+        });
     }
 }
 
 - (void)cleanupResourcesForReconnection {
-    // Similar a cleanupResources mas preserva algumas configurações
-    // e não muda o estado para Desconectado
-    
     // Parar timers (exceto o de reconexão)
     [self stopStatsTimer];
     
-    if (self.keepAliveTimer) {
-        [self.keepAliveTimer invalidate];
-        self.keepAliveTimer = nil;
-    }
-    
-    // Desativar recepção de frames
-    self.isReceivingFrames = NO;
-    if (self.floatingWindow) {
-        self.floatingWindow.isReceivingFrames = NO;
-    }
-    
-    // Limpar track de vídeo com segurança
-    if (self.videoTrack) {
-        // Criar referência local para o videoTrack
-        RTCVideoTrack *trackToRemove = self.videoTrack;
-        self.videoTrack = nil;
-        
-        if (self.floatingWindow && [self.floatingWindow respondsToSelector:@selector(videoView)]) {
-            // Remover o videoTrack da view
-            dispatch_async(dispatch_get_main_queue(), ^{
-                if ([self.floatingWindow respondsToSelector:@selector(videoView)]) {
-                    RTCMTLVideoView *videoView = [self.floatingWindow valueForKey:@"videoView"];
-                    if (videoView) {
-                        [trackToRemove removeRenderer:videoView];
-                    }
-                }
-                
-                // Remover do conversor de frames também
-                [trackToRemove removeRenderer:self.frameConverter];
-            });
+    // Limpar track de vídeo
+    if (self.videoTrack && self.floatingWindow && [self.floatingWindow respondsToSelector:@selector(videoView)]) {
+        RTCMTLVideoView *videoView = [self.floatingWindow valueForKey:@"videoView"];
+        if (videoView) {
+            [self.videoTrack removeRenderer:videoView];
+            [self.videoTrack removeRenderer:self.frameConverter];
         }
+        self.videoTrack = nil;
     }
     
-    // Cancelar WebSocket
+    // Fechar conexão peer anterior
+    if (self.peerConnection) {
+        [self.peerConnection close];
+        self.peerConnection = nil;
+    }
+    
+    // Cancelar WebSocket existente
     if (self.webSocketTask) {
         [self.webSocketTask cancel];
         self.webSocketTask = nil;
     }
     
-    // Liberar sessão
+    // Liberar sessão URL existente
     if (self.session) {
         [self.session invalidateAndCancel];
         self.session = nil;
     }
     
-    // Fechar conexão peer
-    if (self.peerConnection) {
-        [self.peerConnection close];
-        self.peerConnection = nil;
-    }
+    // NÃO limpar o frameConverter completamente, apenas resetar
+    [self.frameConverter reset];
 }
 
 - (void)updateFloatingWindowInfoWithFps:(float)fps {

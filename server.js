@@ -18,8 +18,8 @@ const PORT = process.env.PORT || 8080;
 const LOGGING_ENABLED = true;
 const LOG_FILE = './server.log';
 const MAX_CONNECTIONS = 10; // Limitado a transmissor + receptor
-const KEEP_ALIVE_INTERVAL = 1000; // Reduzido para 1 segundo
-const DEAD_CONNECTION_TIMEOUT = 15000; // Reduzido para 15 segundos
+const KEEP_ALIVE_INTERVAL = 2000; // 2 segundos exatos em milisegundos
+const DEAD_CONNECTION_TIMEOUT = 20000; // 20 segundos (mais espaço para reconexão)
 
 // Parâmetros de qualidade adaptativos
 const QUALITY_PRESETS = {
@@ -89,6 +89,7 @@ const wss = new WebSocket.Server({
     maxPayload: 64 * 1024 * 1024, // 64MB
     // Configurar timeout mais generoso para WebSockets
     clientTracking: true,
+    // Manter as conexões vivas por mais tempo
     perMessageDeflate: {
         zlibDeflateOptions: {
             chunkSize: 1024,
@@ -98,9 +99,8 @@ const wss = new WebSocket.Server({
         zlibInflateOptions: {
             chunkSize: 10 * 1024
         },
-        // Apenas compactar mensagens maiores que 10KB
         threshold: 10 * 1024,
-        // Não desabilitar contexto entre mensagens
+        // Importante: NÃO desabilitar contexto entre mensagens
         serverNoContextTakeover: false, 
         clientNoContextTakeover: false
     }
@@ -340,31 +340,39 @@ const checkDeadConnections = () => {
         
         // Se enviamos um ping e não recebemos pong dentro do timeout
         if (lastPing > lastPong && (now - lastPing) > DEAD_CONNECTION_TIMEOUT) {
-            // Para iOS, ser mais tolerante com timeout
+            // Para iOS, ser mais tolerante com timeout (2x mais tempo)
             const timeoutToUse = deviceType === 'ios' 
-                ? DEAD_CONNECTION_TIMEOUT * 1.5 // 50% mais tempo para iOS
+                ? DEAD_CONNECTION_TIMEOUT * 2 
                 : DEAD_CONNECTION_TIMEOUT;
                 
             if ((now - lastPing) > timeoutToUse) {
-                log(`Cliente ${ws.id} (${deviceType}) não respondeu por ${(now - lastPing) / 1000}s. Terminando conexão.`);
+                log(`Cliente ${ws.id} (${deviceType}) não respondeu por ${(now - lastPing) / 1000}s. Verificando conexão...`);
                 
-                // Se o cliente já teve segunda chance, terminar conexão
-                if (ws.secondChance) {
+                // Dar mais chances para clientes iOS
+                const maxSecondChances = deviceType === 'ios' ? 3 : 1;
+                
+                if (!ws.secondChanceCount) {
+                    ws.secondChanceCount = 0;
+                }
+                
+                // Se o cliente já teve todas as segundas chances, terminar conexão
+                if (ws.secondChanceCount >= maxSecondChances) {
                     try {
                         ws.terminate();
+                        log(`Cliente ${ws.id} não respondeu após ${maxSecondChances} tentativas. Terminando conexão.`);
                     } catch (e) {
                         log(`Erro ao terminar conexão: ${e.message}`, false, true);
                     }
                 } else {
-                    // Dar uma segunda chance
-                    ws.secondChance = true;
-                    log(`Marcando cliente ${ws.id} para verificação adicional antes de terminar`);
+                    // Incrementar contador de segundas chances
+                    ws.secondChanceCount++;
+                    log(`Tentativa ${ws.secondChanceCount}/${maxSecondChances} para cliente ${ws.id}`);
                     
                     // Enviar ping de emergência
                     try {
                         ws.ping();
                         
-                        // Enviar também mensagem ping JSON (mais compatível com alguns clientes)
+                        // Enviar também mensagem ping JSON
                         if (ws.readyState === WebSocket.OPEN) {
                             ws.send(JSON.stringify({
                                 type: 'ping',
@@ -380,8 +388,8 @@ const checkDeadConnections = () => {
                 }
             }
         } else if (lastPing > 0 && lastPong > lastPing) {
-            // Se recebemos resposta, limpar flag de segunda chance
-            ws.secondChance = false;
+            // Se recebemos resposta, resetar contador de segundas chances
+            ws.secondChanceCount = 0;
         }
     });
 };
