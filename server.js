@@ -18,8 +18,8 @@ const PORT = process.env.PORT || 8080;
 const LOGGING_ENABLED = true;
 const LOG_FILE = './server.log';
 const MAX_CONNECTIONS = 10; // Limitado a transmissor + receptor
-const KEEP_ALIVE_INTERVAL = 2000; // 2 segundos exatos em milisegundos
-const DEAD_CONNECTION_TIMEOUT = 20000; // 20 segundos (mais espaço para reconexão)
+const KEEP_ALIVE_INTERVAL = 10000; // 10 segundos (era 5s)
+const DEAD_CONNECTION_TIMEOUT = 60000; // 60 segundos (era 30s)
 
 // Parâmetros de qualidade adaptativos
 const QUALITY_PRESETS = {
@@ -330,66 +330,40 @@ const cleanupEmptyRooms = () => {
 const checkDeadConnections = () => {
     const now = Date.now();
     
-    // Verificar cada cliente
     wss.clients.forEach(ws => {
-        if (!ws.id) return; // Ignorar conexões sem ID
+        if (!ws.id) return;
 
-        const lastPing = lastPingSent.get(ws.id) || 0;
-        const lastPong = lastPongReceived.get(ws.id) || 0;
+        const lastActivity = lastPongReceived.get(ws.id) || 0;
         const deviceType = clientDeviceTypes.get(ws.id) || 'unknown';
         
-        // Se enviamos um ping e não recebemos pong dentro do timeout
-        if (lastPing > lastPong && (now - lastPing) > DEAD_CONNECTION_TIMEOUT) {
-            // Para iOS, ser mais tolerante com timeout (2x mais tempo)
-            const timeoutToUse = deviceType === 'ios' 
-                ? DEAD_CONNECTION_TIMEOUT * 2 
-                : DEAD_CONNECTION_TIMEOUT;
+        // Timeout muito mais generoso
+        const timeoutToUse = deviceType === 'ios' 
+            ? DEAD_CONNECTION_TIMEOUT * 3 
+            : DEAD_CONNECTION_TIMEOUT;
                 
-            if ((now - lastPing) > timeoutToUse) {
-                log(`Cliente ${ws.id} (${deviceType}) não respondeu por ${(now - lastPing) / 1000}s. Verificando conexão...`);
-                
-                // Dar mais chances para clientes iOS
-                const maxSecondChances = deviceType === 'ios' ? 3 : 1;
-                
-                if (!ws.secondChanceCount) {
-                    ws.secondChanceCount = 0;
-                }
-                
-                // Se o cliente já teve todas as segundas chances, terminar conexão
-                if (ws.secondChanceCount >= maxSecondChances) {
+        if ((now - lastActivity) > timeoutToUse) {
+            log(`Cliente ${ws.id} (${deviceType}) inativo por ${(now - lastActivity)/1000}s, encerrando conexão`);
+            
+            try {
+                // Enviar mensagem "bye" antes de terminar
+                if (ws.readyState === WebSocket.OPEN) {
                     try {
-                        ws.terminate();
-                        log(`Cliente ${ws.id} não respondeu após ${maxSecondChances} tentativas. Terminando conexão.`);
-                    } catch (e) {
-                        log(`Erro ao terminar conexão: ${e.message}`, false, true);
-                    }
-                } else {
-                    // Incrementar contador de segundas chances
-                    ws.secondChanceCount++;
-                    log(`Tentativa ${ws.secondChanceCount}/${maxSecondChances} para cliente ${ws.id}`);
+                        ws.send(JSON.stringify({
+                            type: 'bye',
+                            reason: 'timeout'
+                        }));
+                    } catch (e) {}
                     
-                    // Enviar ping de emergência
-                    try {
-                        ws.ping();
-                        
-                        // Enviar também mensagem ping JSON
-                        if (ws.readyState === WebSocket.OPEN) {
-                            ws.send(JSON.stringify({
-                                type: 'ping',
-                                timestamp: now,
-                                emergency: true
-                            }));
-                            
-                            lastPingSent.set(ws.id, now);
-                        }
-                    } catch (e) {
-                        log(`Erro ao enviar ping de emergência: ${e.message}`, false, true);
-                    }
+                    // Dar tempo para bye ser enviado antes de terminar
+                    setTimeout(() => {
+                        ws.terminate();
+                    }, 1000);
+                } else {
+                    ws.terminate();
                 }
+            } catch (e) {
+                log(`Erro ao terminar conexão: ${e.message}`, false, true);
             }
-        } else if (lastPing > 0 && lastPong > lastPing) {
-            // Se recebemos resposta, resetar contador de segundas chances
-            ws.secondChanceCount = 0;
         }
     });
 };

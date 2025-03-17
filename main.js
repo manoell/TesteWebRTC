@@ -184,44 +184,91 @@ async function getLocalMediaStream() {
 }
 
 // Configurar conexão WebRTC
-function setupPeerConnection() {
+async function setupPeerConnection() {
+    console.log("Criando nova conexão peer, garantindo que recursos antigos foram liberados");
+    
+    // Verificação de segurança para garantir que conexões anteriores foram limpas
+    if (peerConnection) {
+        console.warn("Conexão peer anterior ainda existe, fechando forçadamente");
+        try {
+            peerConnection.close();
+        } catch (e) {
+            console.error("Erro ao fechar conexão anterior:", e);
+        }
+        peerConnection = null;
+        
+        // Esperar um pouco para garantir liberação de recursos
+        await new Promise(resolve => setTimeout(resolve, 1000));
+    }
+
+    // Configuração altamente otimizada para redes locais
     const config = {
         iceServers: [
             { urls: 'stun:stun.l.google.com:19302' },
             { urls: 'stun:stun1.l.google.com:19302' },
-            { urls: 'stun:stun2.l.google.com:19302' },
-            { urls: 'stun:stun3.l.google.com:19302' }
+            { urls: 'stun:stun2.l.google.com:19302' }
         ],
         iceTransportPolicy: 'all',
         bundlePolicy: 'max-bundle',
         rtcpMuxPolicy: 'require',
         sdpSemantics: 'unified-plan',
-        // Ajustes para redes locais
-        iceCandidatePoolSize: 0,
-        // Adicionais para melhorar estabilidade
-        iceServersTransportPolicy: 'all'
+        // Crucial: habilitar TCP para melhor desempenho em rede local
+        iceTransportPolicy: 'all',
+        // Reduzir pool de candidatos para redes locais
+        iceCandidatePoolSize: 0
     };
 
     peerConnection = new RTCPeerConnection(config);
 
     // Adicionar stream de vídeo
-    localStream.getTracks().forEach(track => {
-        console.log(`Adicionando track: ${track.kind}`);
-        peerConnection.addTrack(track, localStream);
-    });
+    if (localStream) {
+        console.log("Adicionando tracks do stream local");
+        localStream.getTracks().forEach(track => {
+            console.log(`Adicionando track: ${track.kind}`);
+            peerConnection.addTrack(track, localStream);
+        });
+    } else {
+        console.warn("Sem stream local disponível para adicionar à conexão peer");
+    }
 
-    // Configurar eventos
+    // Configurar timeout de conexão ICE mais generoso
+    let iceConnectionTimeout = setTimeout(() => {
+        if (peerConnection && peerConnection.iceConnectionState !== 'connected' && 
+            peerConnection.iceConnectionState !== 'completed') {
+            console.warn("Timeout de conexão ICE - reiniciando processo");
+            resetVideoStream();
+        }
+    }, 30000); // 30 segundos para estabelecer conexão ICE
+
+    // Configurar eventos com tratamento de erro aprimorado
     peerConnection.onicecandidate = event => {
-        if (event.candidate) {
-            sendMessage({
-                type: 'ice-candidate',
-                candidate: event.candidate.candidate,
-                sdpMid: event.candidate.sdpMid,
-                sdpMLineIndex: event.candidate.sdpMLineIndex,
-                roomId: roomIdInput.value
-            });
-        } else {
-            console.log("Coleta de candidatos ICE completa");
+        try {
+            if (event.candidate) {
+                console.log(`Enviando candidato ICE: ${event.candidate.candidate.substring(0, 50)}...`);
+                
+                sendMessage({
+                    type: 'ice-candidate',
+                    candidate: event.candidate.candidate,
+                    sdpMid: event.candidate.sdpMid,
+                    sdpMLineIndex: event.candidate.sdpMLineIndex,
+                    roomId: roomIdInput.value
+                });
+            } else {
+                console.log("Coleta de candidatos ICE completa");
+                // Garantir que a negociação continue mesmo sem candidatos
+                setTimeout(() => {
+                    if (peerConnection.iceConnectionState === 'new' || 
+                        peerConnection.iceConnectionState === 'checking') {
+                        console.log("Forçando continuação da negociação após coleta de candidatos");
+                        // Criar nova oferta para forçar negociação
+                        if (peerConnection.signalingState === 'stable') {
+                            createAndSendOffer(true);
+                        }
+                    }
+                }, 5000);
+            }
+        } catch (e) {
+            console.error("Erro no tratamento de candidato ICE:", e);
         }
     };
 
@@ -230,28 +277,95 @@ function setupPeerConnection() {
         connectionStats.innerHTML = `ICE State: ${peerConnection.iceConnectionState}`;
         connectionInfo.textContent = `Status da conexão: ${peerConnection.iceConnectionState}`;
         
-        // Adicionar log detalhado
+        // Limpar timeout se conectado
+        if (peerConnection.iceConnectionState === 'connected' || 
+            peerConnection.iceConnectionState === 'completed') {
+            clearTimeout(iceConnectionTimeout);
+        }
+        
+        // Tratamento de problemas de conexão
         if (peerConnection.iceConnectionState === 'failed' ||
             peerConnection.iceConnectionState === 'disconnected') {
             console.error('Problema na conexão ICE:', peerConnection.iceConnectionState);
             
-            // Tentar reiniciar ICE automaticamente (se suportado)
-            if (peerConnection.restartIce) {
-                console.log("Tentando reiniciar ICE...");
-                try {
-                    peerConnection.restartIce();
-                } catch (e) {
-                    console.error("Erro ao reiniciar ICE:", e);
-                }
+            // Se estiver em estado 'failed', forçar reconexão imediatamente
+            if (peerConnection.iceConnectionState === 'failed') {
+                console.log("Estado 'failed' detectado, forçando reconexão");
+                resetVideoStream();
+            } 
+            // Se 'disconnected', dar chance de recuperação automática
+            else if (peerConnection.iceConnectionState === 'disconnected') {
+                console.log("Estado 'disconnected', dando chance de recuperação");
+                setTimeout(() => {
+                    if (peerConnection && peerConnection.iceConnectionState === 'disconnected') {
+                        console.log("Ainda 'disconnected' após espera, forçando reconexão");
+                        resetVideoStream();
+                    }
+                }, 10000); // Esperar 10s para ver se recupera sozinho
             }
-        } else if (peerConnection.iceConnectionState === 'connected' || 
-                  peerConnection.iceConnectionState === 'completed') {
-            console.log("Conexão ICE estabelecida com sucesso!");
         }
     };
 
-    // Monitor de estatísticas
-    startStatsMonitor();
+    peerConnection.onicecandidateerror = (event) => {
+        console.warn('Erro no candidato ICE:', event);
+    };
+
+    // Monitor de estatísticas muito mais agressivo
+    setupAdaptiveQuality();
+    
+    return peerConnection;
+}
+
+function setupAdaptiveQuality() {
+    if (!peerConnection) return;
+    
+    let lastQualityCheckTime = Date.now();
+    let connectionIssues = 0;
+    
+    // Monitor de qualidade a cada 5 segundos
+    const qualityInterval = setInterval(async () => {
+        if (!peerConnection || !startButton.disabled) {
+            clearInterval(qualityInterval);
+            return;
+        }
+        
+        try {
+            const stats = await peerConnection.getStats();
+            let packetLoss = 0;
+            let jitter = 0;
+            let roundTripTime = 0;
+            
+            stats.forEach(stat => {
+                // Monitor de qualidade da conexão
+                if (stat.type === 'remote-inbound-rtp' && stat.kind === 'video') {
+                    packetLoss = stat.packetsLost || 0;
+                    jitter = stat.jitter || 0;
+                } else if (stat.type === 'candidate-pair' && stat.state === 'succeeded') {
+                    roundTripTime = stat.currentRoundTripTime || 0;
+                }
+            });
+            
+            const now = Date.now();
+            // Se temos problemas de conexão
+            if (packetLoss > 5 || jitter > 0.05 || roundTripTime > 0.3) {
+                connectionIssues++;
+                console.warn(`Problemas de conexão detectados: perda=${packetLoss}, jitter=${jitter}, RTT=${roundTripTime}`);
+                
+                // Se persistirem, tentar reconectar
+                if (connectionIssues >= 3 && (now - lastQualityCheckTime > 15000)) {
+                    console.log("Problemas persistentes de conexão, tentando reiniciar conexão");
+                    resetVideoStream();
+                    lastQualityCheckTime = now;
+                    connectionIssues = 0;
+                }
+            } else {
+                // Resetar contador se não há problemas
+                connectionIssues = Math.max(0, connectionIssues - 1);
+            }
+        } catch (e) {
+            console.error("Erro ao verificar qualidade da conexão:", e);
+        }
+    }, 5000);
 }
 
 // Iniciar monitoramento de estatísticas
@@ -364,30 +478,40 @@ function resetVideoStream() {
     
     // Se temos um peerConnection ativo, primeiro limpamos a conexão atual
     if (peerConnection) {
-        // Remover a track existente do peerConnection
-        const senders = peerConnection.getSenders();
-        senders.forEach(sender => {
-            peerConnection.removeTrack(sender);
-        });
-        
-        // Fechar conexão peer para liberar recursos
-        peerConnection.close();
+        try {
+            // Remover a track existente do peerConnection
+            const senders = peerConnection.getSenders();
+            senders.forEach(sender => {
+                try {
+                    peerConnection.removeTrack(sender);
+                } catch (e) {
+                    console.warn("Erro ao remover track:", e);
+                }
+            });
+            
+            // Fechar conexão peer para liberar recursos
+            peerConnection.close();
+        } catch (e) {
+            console.error("Erro ao limpar peerConnection:", e);
+        }
         peerConnection = null;
     }
     
-    // Reconstruir a conexão peer
-    setupPeerConnection();
-    
-    // Não precisamos recriar o stream local, pois ele já existe
-    // Mas precisamos readicionar as tracks ao novo peerConnection
-    if (localStream) {
-        localStream.getTracks().forEach(track => {
-            console.log(`Readicionando track: ${track.kind}`);
-            peerConnection.addTrack(track, localStream);
-        });
-    }
-    
-    connectionInfo.textContent = 'Status da conexão: Reconectado, aguardando dispositivos';
+    // Adicionar um pequeno delay antes de reconstruir
+    setTimeout(() => {
+        // Reconstruir a conexão peer
+        setupPeerConnection();
+        
+        // Se ainda temos o stream local, readicionar suas tracks
+        if (localStream) {
+            localStream.getTracks().forEach(track => {
+                console.log(`Readicionando track: ${track.kind}`);
+                peerConnection.addTrack(track, localStream);
+            });
+        }
+        
+        connectionInfo.textContent = 'Status da conexão: Reconectado, aguardando dispositivos';
+    }, 1000); // Delay de 1 segundo para garantir limpeza adequada
 }
 
 // Conectar ao servidor WebSocket com reconexão automática
@@ -696,6 +820,22 @@ async function createAndSendOffer(optimizeForIOS = false) {
 
 // Helper para configurar bitrate específico na SDP
 function setMediaBitrate(sdp, media, bitrate) {
+    // Em rede local, podemos usar bitrates mais altos
+    switch(videoQuality.value) {
+        case '2160p': // 4K
+            bitrate = 20000; // 20Mbps para 4K em rede local
+            break;
+        case '1440p': // QHD
+            bitrate = 12000; // 12Mbps para 1440p
+            break;
+        case '1080p': // Full HD
+            bitrate = 8000;  // 8Mbps para 1080p
+            break;
+        case '720p':  // HD
+            bitrate = 4000;  // 4Mbps para 720p
+            break;
+    }
+    
     const lines = sdp.split('\n');
     let line = -1;
 
@@ -717,7 +857,7 @@ function setMediaBitrate(sdp, media, bitrate) {
         if (lines[i].startsWith('m=') && i !== line) break; // Próxima seção m=
 
         if (lines[i].startsWith('b=AS:')) {
-            // Em vez de substituir, apenas modificamos se o valor for muito menor
+            // Substituir se o valor atual for muito menor
             const currentBitrate = parseInt(lines[i].substring(5), 10);
             if (currentBitrate < bitrate) {
                 lines[i] = 'b=AS:' + bitrate;
@@ -813,6 +953,7 @@ function prioritizeCodec(sdp, mediaType, codecName) {
     const lines = sdp.split('\n');
     let mediaLine = -1;
     let codecPts = [];
+    let h264ProfilePt = null; // Preferencial para iOS (profile-level-id 42e01f)
     
     // Encontrar a linha de mídia
     for (let i = 0; i < lines.length; i++) {
@@ -824,31 +965,64 @@ function prioritizeCodec(sdp, mediaType, codecName) {
     
     if (mediaLine === -1) return sdp;
     
-    // Encontrar todos os payload types para o codec desejado
-    for (let i = mediaLine + 1; i < lines.length; i++) {
-        if (lines[i].startsWith('m=')) break;
-        
-        if (lines[i].startsWith('a=rtpmap:') && lines[i].includes(codecName)) {
-            const pt = lines[i].split(':')[1].split(' ')[0];
-            codecPts.push(pt);
+    // Primeiro encontrar payload type com profile ideal para iOS
+    if (codecName === 'H264' && iosOptimize.checked) {
+        for (let i = mediaLine + 1; i < lines.length; i++) {
+            if (lines[i].startsWith('m=')) break;
+            
+            // Encontrar linhas de formato para H264
+            if (lines[i].startsWith('a=rtpmap:') && lines[i].includes('H264')) {
+                const pt = lines[i].split(':')[1].split(' ')[0];
+                
+                // Procurar o profile-level-id correspondente
+                for (let j = i + 1; j < lines.length; j++) {
+                    if (lines[j].startsWith('a=fmtp:' + pt) && 
+                        lines[j].includes('profile-level-id=42e01f')) {
+                        h264ProfilePt = pt;
+                        break;
+                    }
+                }
+                
+                // Se encontramos o payload type ideal, podemos parar
+                if (h264ProfilePt) break;
+                
+                // Caso contrário, adicionar à lista de PTs de H264
+                codecPts.push(pt);
+            }
         }
     }
     
-    if (codecPts.length === 0) return sdp;
+    // Se não encontramos o PT ideal, buscar todos os PTs do codec
+    if (!h264ProfilePt) {
+        for (let i = mediaLine + 1; i < lines.length; i++) {
+            if (lines[i].startsWith('m=')) break;
+            
+            if (lines[i].startsWith('a=rtpmap:') && lines[i].includes(codecName)) {
+                const pt = lines[i].split(':')[1].split(' ')[0];
+                codecPts.push(pt);
+            }
+        }
+    }
     
-    // Reordenar payload types na linha de mídia para priorizar o codec
-    const mLine = lines[mediaLine].split(' ');
-    const payloadTypes = mLine.slice(3);
-    
-    // Remover os payload types do codec desejado
-    const filteredPts = payloadTypes.filter(pt => !codecPts.includes(pt));
-    
-    // Reordenar com o codec desejado primeiro
-    const newPts = [...codecPts, ...filteredPts];
-    
-    // Reconstruir a linha de mídia
-    mLine.splice(3, payloadTypes.length, ...newPts);
-    lines[mediaLine] = mLine.join(' ');
+    if ((h264ProfilePt || codecPts.length > 0) && mediaLine !== -1) {
+        // Reordenar payload types na linha de mídia para priorizar o codec
+        const mLine = lines[mediaLine].split(' ');
+        const payloadTypes = mLine.slice(3);
+        
+        // Remover os payload types do codec desejado
+        const filteredPts = payloadTypes.filter(pt => 
+            pt !== h264ProfilePt && !codecPts.includes(pt));
+        
+        // Reordenar com o codec desejado primeiro (PT ideal primeiro, se disponível)
+        const priorityPts = h264ProfilePt ? [h264ProfilePt, ...codecPts] : codecPts;
+        const newPts = [...priorityPts, ...filteredPts];
+        
+        // Reconstruir a linha de mídia
+        mLine.splice(3, payloadTypes.length, ...newPts);
+        lines[mediaLine] = mLine.join(' ');
+        
+        console.log(`Codec ${codecName} priorizado. Profile iOS: ${h264ProfilePt ? 'encontrado' : 'não encontrado'}`);
+    }
     
     return lines.join('\n');
 }

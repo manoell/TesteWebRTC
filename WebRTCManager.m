@@ -71,8 +71,11 @@ NSString *const kCameraChangeNotification = @"AVCaptureDeviceSubjectAreaDidChang
     // Remover observadores de notificação
     [[NSNotificationCenter defaultCenter] removeObserver:self];
     
-    // Parar WebRTC e limpar recursos
+    // Garantir que tudo seja liberado
     [self stopWebRTC:YES];
+    
+    // Esperar um pouco para garantir liberação de recursos
+    sleep(1);
 }
 
 #pragma mark - State Management
@@ -315,15 +318,20 @@ NSString *const kCameraChangeNotification = @"AVCaptureDeviceSubjectAreaDidChang
 }
 
 - (void)configureWebRTC {
-    writeLog(@"[WebRTCManager] Configurando WebRTC com otimizações para iOS");
-    
     @try {
+        writeLog(@"[WebRTCManager] Configurando WebRTC com otimizações para iOS");
+        
         // Configuração adaptada para integração com iOS
         RTCConfiguration *config = [[RTCConfiguration alloc] init];
         
-        // Para rede local, apenas um servidor STUN é suficiente
+        // Para rede local, servidores STUN são suficientes
         config.iceServers = @[
-            [[RTCIceServer alloc] initWithURLStrings:@[@"stun:stun.l.google.com:19302"]]
+            [[RTCIceServer alloc] initWithURLStrings:@[
+                @"stun:stun.l.google.com:19302",
+                @"stun:stun1.l.google.com:19302",
+                @"stun:stun2.l.google.com:19302",
+                @"stun:stun3.l.google.com:19302"
+            ]]
         ];
         
         // Configurações de ICE otimizadas para redes locais e iOS
@@ -334,8 +342,8 @@ NSString *const kCameraChangeNotification = @"AVCaptureDeviceSubjectAreaDidChang
         config.candidateNetworkPolicy = RTCCandidateNetworkPolicyAll;
         config.continualGatheringPolicy = RTCContinualGatheringPolicyGatherContinually;
         
-        // Priorizar candidatos locais para rede local
-        config.iceCandidatePoolSize = 0; // Desabilitar pool de candidatos para redes locais
+        // Aumentar o pool de candidatos para melhorar a confiabilidade em rede local
+        config.iceCandidatePoolSize = 2; // Aumentar para 2 (era 0)
                 
         // Inicializar a fábrica com configurações específicas para a plataforma
         RTCDefaultVideoDecoderFactory *decoderFactory = [[RTCDefaultVideoDecoderFactory alloc] init];
@@ -358,31 +366,17 @@ NSString *const kCameraChangeNotification = @"AVCaptureDeviceSubjectAreaDidChang
             return;
         }
         
-        // Configurar restrições específicas para iOS
-        // Contraints otimizadas para vídeo de alta resolução e compatibilidade iOS
-        RTCMediaConstraints *constraints;
-        
-        if (self.adaptationMode == WebRTCAdaptationModeCompatibility) {
-            // Modo de compatibilidade: otimizado para iOS
-            constraints = [[RTCMediaConstraints alloc]
-                          initWithMandatoryConstraints:@{
-                              @"OfferToReceiveVideo": @"true",
-                              @"OfferToReceiveAudio": @"false"
-                          }
-                          optionalConstraints:@{
-                              @"DtlsSrtpKeyAgreement": @"true", // Melhora segurança e compatibilidade
-                              @"RtpDataChannels": @"false",  // Não precisamos de canais de dados RTP
-                              @"internalSctpDataChannels": @"false" // Não precisamos de canais SCTP
-                          }];
-        } else {
-            // Outros modos: configurações padrão
-            constraints = [[RTCMediaConstraints alloc]
-                          initWithMandatoryConstraints:@{
-                              @"OfferToReceiveVideo": @"true",
-                              @"OfferToReceiveAudio": @"false"
-                          }
-                          optionalConstraints:nil];
-        }
+        // Configurar para alta qualidade de vídeo com compatibilidade iOS
+        RTCMediaConstraints *constraints = [[RTCMediaConstraints alloc]
+                                          initWithMandatoryConstraints:@{
+                                              @"OfferToReceiveVideo": @"true",
+                                              @"OfferToReceiveAudio": @"false"
+                                          }
+                                          optionalConstraints:@{
+                                              @"DtlsSrtpKeyAgreement": @"true", // Melhora segurança e compatibilidade
+                                              @"RtpDataChannels": @"false",  // Não precisamos de canais de dados RTP
+                                              @"internalSctpDataChannels": @"false" // Não precisamos de canais SCTP
+                                          }];
         
         self.peerConnection = [self.factory peerConnectionWithConfiguration:config
                                                                constraints:constraints
@@ -1632,56 +1626,87 @@ NSString *const kCameraChangeNotification = @"AVCaptureDeviceSubjectAreaDidChang
     // Restaurar informações importantes
     self.roomId = currentRoomId;
     
-    // Reconfigurar WebRTC
-    [self configureWebRTC];
-    
-    // Reconectar ao WebSocket
-    [self connectWebSocket];
-    
-    // Se estava recebendo frames, restaurar o estado visual
-    if (wasReceivingFrames && self.floatingWindow) {
-        dispatch_async(dispatch_get_main_queue(), ^{
-            if ([self.floatingWindow respondsToSelector:@selector(updateConnectionStatus:)]) {
-                [self.floatingWindow updateConnectionStatus:@"Reconectando..."];
-            }
-        });
-    }
+    // Adicionar um pequeno delay para dar tempo aos recursos serem liberados
+    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(1.0 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
+        // Reconfigurar WebRTC
+        [self configureWebRTC];
+        
+        // Reconectar ao WebSocket
+        [self connectWebSocket];
+        
+        // Se estava recebendo frames, restaurar o estado visual
+        if (wasReceivingFrames && self.floatingWindow) {
+            dispatch_async(dispatch_get_main_queue(), ^{
+                if ([self.floatingWindow respondsToSelector:@selector(updateConnectionStatus:)]) {
+                    [self.floatingWindow updateConnectionStatus:@"Reconectando..."];
+                }
+            });
+        }
+    });
 }
 
 - (void)cleanupResourcesForReconnection {
-    // Parar timers (exceto o de reconexão)
-    [self stopStatsTimer];
+    // NOVO: Adicionar uma limpeza mais completa de todos os recursos
     
-    // Limpar track de vídeo
-    if (self.videoTrack && self.floatingWindow && [self.floatingWindow respondsToSelector:@selector(videoView)]) {
-        RTCMTLVideoView *videoView = [self.floatingWindow valueForKey:@"videoView"];
-        if (videoView) {
-            [self.videoTrack removeRenderer:videoView];
-            [self.videoTrack removeRenderer:self.frameConverter];
-        }
-        self.videoTrack = nil;
-    }
-    
-    // Fechar conexão peer anterior
+    // Fechar conexão peer anterior COM DELAY
     if (self.peerConnection) {
-        [self.peerConnection close];
+        // Criar uma referência local para evitar problemas de acesso após limpeza
+        RTCPeerConnection *oldConnection = self.peerConnection;
         self.peerConnection = nil;
+        
+        dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.5 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
+            [oldConnection close];
+        });
     }
     
-    // Cancelar WebSocket existente
-    if (self.webSocketTask) {
-        [self.webSocketTask cancel];
-        self.webSocketTask = nil;
+    // Limpar track de vídeo com referência própria
+    RTCVideoTrack *oldTrack = self.videoTrack;
+    self.videoTrack = nil;
+    
+    if (oldTrack && self.floatingWindow && [self.floatingWindow respondsToSelector:@selector(videoView)]) {
+        dispatch_async(dispatch_get_main_queue(), ^{
+            RTCMTLVideoView *videoView = [self.floatingWindow valueForKey:@"videoView"];
+            if (videoView) {
+                [oldTrack removeRenderer:videoView];
+                [oldTrack removeRenderer:self.frameConverter];
+            }
+        });
     }
     
-    // Liberar sessão URL existente
-    if (self.session) {
-        [self.session invalidateAndCancel];
-        self.session = nil;
+    // Cancelar WebSocket com referência separada
+    NSURLSessionWebSocketTask *oldTask = self.webSocketTask;
+    self.webSocketTask = nil;
+    
+    if (oldTask) {
+        dispatch_async(dispatch_get_main_queue(), ^{
+            [oldTask cancel];
+        });
     }
     
-    // NÃO limpar o frameConverter completamente, apenas resetar
-    [self.frameConverter reset];
+    // Liberar sessão com delay
+    NSURLSession *oldSession = self.session;
+    self.session = nil;
+    
+    if (oldSession) {
+        dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.5 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
+            [oldSession invalidateAndCancel];
+        });
+    }
+    
+    // Limpar factory
+    self.factory = nil;
+    
+    // Limpar o conversor de frames com delay
+    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.5 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
+        [self.frameConverter reset];
+    });
+    
+    // Forçar um ciclo de liberação de memória
+    dispatch_async(dispatch_get_global_queue(DISPATCH_QUEUE_PRIORITY_LOW, 0), ^{
+        @autoreleasepool {
+            NSLog(@"Liberando pool de autoreleased objects");
+        }
+    });
 }
 
 - (void)updateFloatingWindowInfoWithFps:(float)fps {
