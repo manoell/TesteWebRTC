@@ -437,26 +437,63 @@ function startKeepAliveTimer() {
     // Limpar intervalo existente, se houver
     if (keepAliveInterval) {
         clearInterval(keepAliveInterval);
+        keepAliveInterval = null;
     }
     
-    // Enviar ping a cada 5 segundos (reduzido de 10 segundos)
+    // Enviar ping a cada 5 segundos
     keepAliveInterval = setInterval(() => {
         if (ws && ws.readyState === WebSocket.OPEN) {
-            // Enviar ping via WebSocket nativo além da mensagem JSON
+            // Verificar se não recebemos pong há muito tempo
+            const now = Date.now();
+            if (lastPongReceived > 0 && now - lastPongReceived > 20000) {
+                console.warn("Conexão inativa há mais de 20s, tentando reconectar...");
+                
+                // Fechar conexão existente
+                try {
+                    const oldWs = ws;
+                    ws = null;
+                    oldWs.close();
+                } catch (e) {
+                    console.error("Erro ao fechar WebSocket:", e);
+                }
+                
+                // Reconectar após breve delay
+                setTimeout(() => {
+                    if (startButton.disabled) { // Só reconecta se streaming estiver ativo
+                        connectWebSocket();
+                    }
+                }, 500);
+                
+                return;
+            }
+            
+            // Enviar ping via WebSocket nativo
             try {
                 ws.ping();
             } catch(e) {
                 console.warn("Erro ao enviar ping nativo:", e);
             }
             
+            // Enviar mensagem de ping JSON
             sendMessage({
                 type: 'ping',
                 timestamp: Date.now(),
                 roomId: roomIdInput.value
             });
             console.log("Enviando keep-alive ping para o servidor");
+        } else if (startButton.disabled && (!ws || ws.readyState !== WebSocket.OPEN)) {
+            // Se o streaming está ativo mas WebSocket não está aberto, reconectar
+            console.warn("WebSocket não está conectado e streaming ativo, reconectando...");
+            connectWebSocket();
         }
-    }, 5000); // Reduzido de 10s para 5s
+    }, 5000);
+    
+    // Adicionar ao runloop principal para garantir execução
+    if (keepAliveInterval) {
+        window.addEventListener('beforeunload', () => {
+            clearInterval(keepAliveInterval);
+        });
+    }
 }
 
 // Parar keep-alive timer
@@ -573,37 +610,31 @@ function connectWebSocket() {
     ws = new WebSocket(serverUrl);
 
     ws.onopen = () => {
-		console.log('WebSocket conectado');
-		// Resetar contador de reconexão quando conectado com sucesso
-		reconnectAttempts = 0;
-		lastPongReceived = Date.now(); // Inicializar timestamp de pong
-		
-		// Se já estávamos conectados antes (reconexão), resetar o stream de vídeo
-		if (reconnectAttempts > 0) {
-			// Reset do stream após reconexão para evitar congelamento
-			resetVideoStream();
-		}
-		
-		// Enviar informações sobre o tipo de dispositivo e otimizações
-		const deviceInfo = {
-			type: 'join',
-			roomId: roomIdInput.value,
-			deviceType: 'web',
-			capabilities: {
-				h264Supported: true,
-				preferIOS: iosOptimize.checked,
-				preferredCodec: videoCodec.value,
-				preferredH264Profile: h264Profile.value,
-				preferredPixelFormat: pixelFormat.value
-			}
-		};
-		
-		ws.send(JSON.stringify(deviceInfo));
-		updateStatus('Conectado ao servidor', 'online');
-		
-		// Iniciar keep-alive
-		startKeepAliveTimer();
-	};
+        console.log('WebSocket conectado');
+        // Resetar contador de reconexão quando conectado com sucesso
+        reconnectAttempts = 0;
+        lastPongReceived = Date.now(); // Inicializar timestamp de pong
+        
+        // Enviar informações sobre o tipo de dispositivo e otimizações
+        const deviceInfo = {
+            type: 'join',
+            roomId: roomIdInput.value,
+            deviceType: 'web',
+            capabilities: {
+                h264Supported: true,
+                preferIOS: iosOptimize.checked,
+                preferredCodec: videoCodec.value,
+                preferredH264Profile: h264Profile.value,
+                preferredPixelFormat: pixelFormat.value
+            }
+        };
+        
+        ws.send(JSON.stringify(deviceInfo));
+        updateStatus('Conectado ao servidor', 'online');
+        
+        // Iniciar keep-alive
+        startKeepAliveTimer();
+    };
 
     ws.onclose = (event) => {
         console.log(`WebSocket desconectado (código: ${event.code}, razão: ${event.reason})`);
@@ -739,6 +770,9 @@ async function handleMessage(message) {
         case 'pong':
             // Receber pong do servidor (manter conexão viva)
             lastPongReceived = Date.now();
+            // Resetar contador de reconexões quando um pong é recebido
+            reconnectAttempts = 0;
+            console.log("Pong recebido, conexão confirmada");
             break;
             
         case 'room-info':

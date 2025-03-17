@@ -68,6 +68,21 @@ typedef NS_ENUM(NSInteger, IOSPixelFormat) {
 @property (nonatomic, strong) dispatch_source_t resourceMonitorTimer;
 
 /**
+ * Incrementa o contador de bloqueios de PixelBuffer
+ */
+- (void)incrementPixelBufferLockCount;
+
+/**
+ * Incrementa o contador de desbloqueios de PixelBuffer
+ */
+- (void)incrementPixelBufferUnlockCount;
+
+/**
+ * Força a liberação de todos os sample buffers ativos
+ */
+- (void)forceReleaseAllSampleBuffers;
+
+/**
  * Inicializa o conversor de frames.
  * @return Uma nova instância do conversor.
  */
@@ -183,5 +198,10 @@ typedef NS_ENUM(NSInteger, IOSPixelFormat) {
  * Otimiza o sistema de cache removendo entradas antigas.
  */
 - (void)optimizeCacheSystem;
+
+/**
+ * Limpa o cache de sample buffers atual.
+ */
+- (void)clearSampleBufferCache;
 
 @end

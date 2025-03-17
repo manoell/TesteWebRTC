@@ -92,10 +92,20 @@ NSString *const kCameraChangeNotification = @"AVCaptureDeviceSubjectAreaDidChang
     // Se estamos conectados, não desconectar completamente, apenas limpar recursos não essenciais
     if (self.state == WebRTCManagerStateConnected) {
         if (self.frameConverter) {
+            // Primeiro limpar todo o cache
+            [self.frameConverter clearSampleBufferCache];
+            
+            // Forçar liberação de todos os buffers ativos
+            [self.frameConverter forceReleaseAllSampleBuffers];
+            
+            // Agora realizar limpeza segura de outros recursos
             [self.frameConverter performSafeCleanup];
         }
         
-        // Aqui podemos fazer outras otimizações para economizar recursos em background
+        // Forçar ciclo de coleta de garbage
+        @autoreleasepool {
+            // Executa ciclo vazio de autorelease pool
+        }
     }
 }
 

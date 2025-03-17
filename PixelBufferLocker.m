@@ -21,8 +21,8 @@
         if (result == kCVReturnSuccess) {
             _locked = YES;
             if (_converter) {
-                // Usando método seguro para incrementar contador
-                [_converter performSelector:@selector(incrementPixelBufferLockCount)];
+                // Incrementar contador de locks diretamente
+                [_converter incrementPixelBufferLockCount];
             }
             return YES;
         } else {
@@ -37,8 +37,8 @@
         CVPixelBufferUnlockBaseAddress(_pixelBuffer, kCVPixelBufferLock_ReadOnly);
         _locked = NO;
         if (_converter) {
-            // Usando método seguro para incrementar contador
-            [_converter performSelector:@selector(incrementPixelBufferUnlockCount)];
+            // Incrementar contador de unlocks diretamente
+            [_converter incrementPixelBufferUnlockCount];
         }
     }
 }
