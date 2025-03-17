@@ -14,10 +14,73 @@ A meta final é uma substituição completamente transparente, onde qualquer apl
 | `index.html` | Interface web de transmissão | ✅ Funcional, otimizado para codecs iOS |
 | `Tweak.xm` | Ponto de entrada do tweak | ✅ Funcional, reorganizado |
 | `FloatingWindow.h/m` | Interface de preview | ✅ Funcional, com suporte para informações de formato |
-| `WebRTCManager.h/m` | Gerenciamento de conexão | ✅ Funcional, otimizado |
-| `WebRTCFrameConverter.h/m` | Processamento de frames | ✅ Funcional, com compatibilidade para formatos iOS |
+| `WebRTCManager.h/m` | Gerenciamento de conexão | ✅ Funcional, necessita otimizações específicas |
+| `WebRTCFrameConverter.h/m` | Processamento de frames | ✅ Funcional, necessita melhorias de gerenciamento de recursos |
 | `logger.h/m` | Sistema de logging | ✅ Funcional, bem implementado |
-| `implemetacaoSubstituicao.txt` | Referência para substituição | 🔄 Aguardando implementação |
+| `implemetacaoSubstituicao.txt` | Referência para substituição | 🔄 Necessita refinamentos antes da implementação |
+
+## Estado Atual do Desenvolvimento
+
+O projeto encontra-se atualmente na **fase final de preparação antes da substituição direta do feed da câmera**. A implementação de visualização do stream WebRTC em uma janela flutuante está funcional e otimizada para formatos nativos do iOS.
+
+### Pontos Fortes da Implementação Atual:
+
+1. **Compatibilidade otimizada com iOS:**
+   - Suporte completo para formatos YUV (420f, 420v) e BGRA
+   - Priorização de codecs compatíveis com iOS (H.264 com perfil baseline)
+   - Transmissão em alta qualidade (até 4K/60fps) com adaptação automática
+
+2. **Sistema modular bem estruturado:**
+   - Separação clara entre gerenciamento WebRTC e conversão de frames
+   - Interface flutuante com diagnósticos visuais
+   - Sistema de logging extensivo
+
+3. **Mecanismos de resiliência:**
+   - Reconexão automática após falhas
+   - Adaptação dinâmica à qualidade da rede
+   - Monitoramento de performance
+
+## Plano de Ação Antes da Substituição
+
+Antes de avançar para a fase de substituição direta do feed da câmera, é necessário realizar as seguintes otimizações:
+
+### Etapa 1: Correção de Gerenciamento de Recursos (Alta Prioridade)
+
+- [ ] Revisar e corrigir liberação de memória para CMSampleBuffer
+- [ ] Verificar bloqueios/desbloqueios corretos de CVPixelBuffer
+- [ ] Implementar rastreamento de recursos para evitar vazamentos
+- [ ] Otimizar sistema de cache de frames
+
+### Etapa 2: Sincronização e Precisão de Timing (Alta Prioridade)
+
+- [ ] Implementar sincronização precisa de timestamps com relógio do sistema
+- [ ] Configurar corretamente CMTimingInfo para preservar timing original
+- [ ] Adicionar suporte adequado para frames droppados
+
+### Etapa 3: Otimizações de Performance (Média Prioridade)
+
+- [ ] Acelerar conversão de formatos nativos do iOS (especialmente YUV 4:2:0)
+- [ ] Maximizar uso de aceleração de hardware
+- [ ] Otimizar escalonamento de resolução e taxa de frames
+
+### Etapa 4: Preparação para Substituição (Alta Prioridade)
+
+- [ ] Refinar código de hook para AVCaptureSession
+- [ ] Melhorar detecção e manipulação de delegates de câmera
+- [ ] Implementar preservação de metadados importantes (exposição, balance de branco)
+- [ ] Adicionar simulação de recursos como flash e zoom
+
+### Etapa 5: Sistema de Diagnóstico Avançado (Média Prioridade)
+
+- [ ] Implementar logging específico para processo de substituição
+- [ ] Adicionar contadores de frames por fonte (original vs. substituído)
+- [ ] Criar visualizadores de diagnóstico em tempo real
+
+### Etapa 6: Testes Finais (Média Prioridade)
+
+- [ ] Adicionar chaves de configuração para alternar modos
+- [ ] Testar com múltiplos aplicativos de câmera populares
+- [ ] Documentar comportamentos e compatibilidade por aplicativo
 
 ## Requisitos de Compatibilidade Identificados
 
@@ -44,50 +107,6 @@ A câmera iOS utiliza principalmente três formatos:
 - `AVCaptureVideoDataOutput setSampleBufferDelegate:`
 - `AVCaptureConnection setVideoOrientation:`
 - `AVCaptureConnection setVideoMirrored:`
-
-## Progresso do Plano de Reorganização e Otimização
-
-### ✅ Fase 1: Otimização de Transmissão (CONCLUÍDA)
-- **Configuração do Servidor WebRTC:**
-  - ✅ Configurado para usar H.264 com perfil compatível com iOS
-  - ✅ Implementada sinalização otimizada para formatos YUV 4:2:0
-  - ✅ Priorizada transmissão diretamente em formato `420f`
-
-- **Adaptação da página web de transmissão:**
-  - ✅ Configurações de resolução específicas para iOS
-  - ✅ Implementado escalonamento inteligente baseado em capacidade de rede
-
-### ✅ Fase 2: Reorganização do Código Existente (CONCLUÍDA)
-- **WebRTCFrameConverter:**
-  - ✅ Implementado suporte nativo a formatos iOS
-  - ✅ Minimizadas conversões entre formatos
-  - ✅ Adicionada aceleração de hardware para conversões necessárias
-
-- **WebRTCManager:**
-  - ✅ Otimizado gerenciamento de memória e recursos
-  - ✅ Implementada reconexão inteligente
-  - ✅ Aprimorado processamento de sinalização
-
-- **FloatingWindow:**
-  - ✅ Adicionada exibição de informações detalhadas de formato (420f, 420v, BGRA)
-  - ✅ Implementada indicação visual do modo de processamento (hardware/software)
-  - ✅ Aprimorada interface para visualização de diagnóstico
-
-### 🔄 Fase 3: Implementação da Substituição (EM ANDAMENTO)
-- **Framework de Substituição:**
-  - 🔜 Desenvolver APIs para injeção de frames
-  - 🔜 Implementar mecanismo de interceptação de delegates
-  - 🔜 Criar sistema para adaptação dinâmica
-
-- **Hooks de Sistemas:**
-  - 🔜 Criar hooks para classes AVCapture
-  - 🔜 Implementar intercepção de eventos da câmera
-  - 🔜 Desenvolver sistema de substituição transparente
-
-- **Sistema de Diagnóstico:**
-  - 🔜 Criar logs detalhados específicos para substituição
-  - 🔜 Implementar detecção de problemas em tempo real
-  - 🔜 Desenvolver ferramentas visuais de debugging
 
 ## Arquitetura para Substituição Direta da Câmera
 
@@ -132,66 +151,6 @@ Para garantir que o feed substituto seja entregue a todos os delegates:
 }
 ```
 
-### 4. Gerenciamento de Propriedades de Vídeo
-```objective-c
-%hook AVCaptureConnection
-
-- (void)setVideoOrientation:(AVCaptureVideoOrientation)orientation {
-    %orig;
-    // Atualizar orientação do feed substituto para manter sincronização
-}
-
-- (void)setVideoMirrored:(BOOL)mirrored {
-    %orig;
-    // Atualizar espelhamento do feed substituto
-}
-
-%end
-```
-
-## Próximos Passos Técnicos
-
-### Fase 3: Implementação do Subsistema de Substituição (PRÓXIMO PASSO)
-1. **Criar Framework de Substituição:**
-   - Desenvolver APIs para injeção de frames
-   - Implementar mecanismo de interceptação de delegates
-   - Criar sistema para adaptação dinâmica às condições da câmera
-
-2. **Implementar Hooks de Sistemas:**
-   - Criar hooks precisos para classes AVCapture
-   - Implementar intercepção de eventos da câmera
-   - Desenvolver sistema transparente de passagem ou substituição
-
-3. **Desenvolver Sistema de Diagnóstico:**
-   - Criar logs detalhados específicos para substituição
-   - Implementar detecção de problemas em tempo real
-   - Desenvolver ferramentas visuais de debugging
-
-## Configuração do Ambiente
-
-### Requisitos do Servidor
-- Node.js 14.0+
-- Dependências: express, ws, http, cors, uuid
-- Configuração de rede: porta 8080 acessível na rede local
-
-### Requisitos do Cliente iOS
-- iOS 14.0+ jailbroken
-- Theos instalado para compilação
-- CocoaPods para gerenciamento de dependências
-- WebRTC framework instalado
-
-### Compilação e Instalação
-```bash
-# Instalar dependências
-pod install
-
-# Compilar tweak
-make package
-
-# Instalar no dispositivo
-make install THEOS_DEVICE_IP=<ip_do_dispositivo>
-```
-
 ## Uso Atual (Fase de Preview)
 
 ### Iniciar Servidor
@@ -210,27 +169,10 @@ node server.js
 3. Use gestos para mover e interagir com a janela
 4. Observe as informações de formato de pixel e processamento para diagnóstico
 
-## Dicas de Desenvolvimento e Testes
+## Próximos Passos
 
-### Logging e Diagnóstico
-- Configure o nível de log em `Tweak.xm`:
-  ```objective-c
-  setLogLevel(5); // Nível máximo para desenvolvimento
-  ```
-- Consulte logs em `/var/tmp/testeWebRTC.log`
-
-### Métricas de Performance
-Para monitorar o desempenho durante o desenvolvimento:
-- Latência: ideal < 100ms para experiência realista
-- Uso de CPU: manter abaixo de 20% para estabilidade
-- Uso de memória: evitar crescimento contínuo
-
-### Testes de Compatibilidade
-Testar com vários aplicativos que utilizam a câmera:
-- Câmera nativa do iOS (fotos e vídeos)
-- FaceTime e chamadas de vídeo
-- Apps populares de terceiros (Instagram, Snapchat, etc.)
+Após a conclusão das otimizações listadas no Plano de Ação, o projeto avançará para a fase de implementação da substituição direta do feed da câmera, onde o stream WebRTC será injetado diretamente na cadeia de processamento de vídeo do iOS, permitindo que qualquer aplicativo que use a câmera receba o stream como se fosse o feed da câmera real.
 
 ---
 
-Este projeto visa criar um sistema completo que permite substituir o feed da câmera nativa do iOS no nível mais fundamental possível, de modo que qualquer aplicativo que utilize AVFoundation receba o stream WebRTC como se fosse a câmera original, sem necessidade de modificações adicionais. Com a conclusão das Fases 1 e 2, o sistema já funciona em modo de preview com suporte a todos os formatos nativos do iOS e diagnóstico visual. O próximo passo é implementar a substituição direta do feed da câmera através do código descrito no arquivo `implemetacaoSubstituicao.txt`.
+Este documento representa o estado atual do projeto e o plano de otimizações necessárias antes da implementação da substituição direta do feed da câmera nativa do iOS.
