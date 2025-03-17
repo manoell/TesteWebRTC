@@ -47,6 +47,11 @@ typedef NS_ENUM(NSInteger, IOSPixelFormat) {
  */
 @property (nonatomic, copy, readonly) NSString *processingMode;
 
+@property (nonatomic, assign, readonly) NSUInteger totalSampleBuffersCreated;
+@property (nonatomic, assign, readonly) NSUInteger totalSampleBuffersReleased;
+@property (nonatomic, assign, readonly) NSUInteger totalPixelBuffersLocked;
+@property (nonatomic, assign, readonly) NSUInteger totalPixelBuffersUnlocked;
+
 /**
  * Inicializa o conversor de frames.
  * @return Uma nova instância do conversor.

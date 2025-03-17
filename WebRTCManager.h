@@ -89,6 +89,11 @@ typedef NS_ENUM(NSInteger, WebRTCAdaptationMode) {
 @property (nonatomic, assign) BOOL isReconnecting;
 
 /**
+ * Timer para monitoramento de recursos
+ */
+@property (nonatomic, strong) dispatch_source_t resourceMonitorTimer;
+
+/**
  * Inicializa o gerenciador com referência à janela flutuante.
  * @param window FloatingWindow para atualização de interface.
  * @return Nova instância do gerenciador.

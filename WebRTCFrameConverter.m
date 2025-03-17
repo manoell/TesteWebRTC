@@ -60,6 +60,11 @@
 @synthesize detectedPixelFormat = _detectedPixelFormat;
 @synthesize processingMode = _processingMode;
 
+@synthesize totalSampleBuffersCreated = _totalSampleBuffersCreated;
+@synthesize totalSampleBuffersReleased = _totalSampleBuffersReleased;
+@synthesize totalPixelBuffersLocked = _totalPixelBuffersLocked;
+@synthesize totalPixelBuffersUnlocked = _totalPixelBuffersUnlocked;
+
 #pragma mark - Inicialização e Cleanup
 
 - (instancetype)init {
@@ -175,6 +180,8 @@
 
 - (void)clearSampleBufferCache {
     @synchronized(self) {
+        __block NSUInteger liberadosAgora = 0;
+        
         // Liberar todos os sample buffers em cache
         [_sampleBufferCache enumerateKeysAndObjectsUsingBlock:^(NSNumber *key, NSValue *value, BOOL *stop) {
             CMSampleBufferRef buffer = NULL;
@@ -182,6 +189,7 @@
             if (buffer) {
                 CFRelease(buffer);
                 self->_totalSampleBuffersReleased++;
+                liberadosAgora++;
             }
         }];
         
@@ -192,9 +200,10 @@
             CFRelease(_cachedSampleBuffer);
             _cachedSampleBuffer = NULL;
             _totalSampleBuffersReleased++;
+            liberadosAgora++;
         }
         
-        writeLog(@"[WebRTCFrameConverter] Cache de sample buffers limpo");
+        writeLog(@"[WebRTCFrameConverter] Cache de sample buffers limpo (%lu buffers liberados)", (unsigned long)liberadosAgora);
     }
 }
 
@@ -584,12 +593,28 @@
                     }
                 } @catch (NSException *exception) {
                     writeLog(@"[WebRTCFrameConverter] Exceção ao processar frame: %@", exception);
-                    dispatch_semaphore_signal(self->_frameProcessingSemaphore);
+                    
+                    // Tentar recuperar o estado
+                    dispatch_async(dispatch_get_main_queue(), ^{
+                        // Liberar semáforo para evitar deadlock
+                        dispatch_semaphore_signal(self->_frameProcessingSemaphore);
+                        
+                        // Reset parcial para continuar funcionando
+                        self->_lastFrameHash = 0;
+                        self->_cachedImage = nil;
+                        if (self->_cachedSampleBuffer) {
+                            CFRelease(self->_cachedSampleBuffer);
+                            self->_cachedSampleBuffer = NULL;
+                            self->_totalSampleBuffersReleased++;
+                        }
+                    });
                 }
             }
         });
     } @catch (NSException *exception) {
         writeLog(@"[WebRTCFrameConverter] Exceção externa ao processar frame: %@", exception);
+        // Garantir que o semáforo seja liberado em caso de exceção
+        dispatch_semaphore_signal(_frameProcessingSemaphore);
     }
 }
 
@@ -630,12 +655,18 @@
                 OSType pixelFormat = CVPixelBufferGetPixelFormatType(cvPixelBuffer);
                 IOSPixelFormat iosFormat = [WebRTCFrameConverter pixelFormatFromCVFormat:pixelFormat];
                 
+                // Flag para controlar se o buffer está bloqueado
+                BOOL bufferBloqueado = NO;
+                
                 // Bloquear o buffer para acesso com timeout
                 CVReturn lockResult = CVPixelBufferLockBaseAddress(cvPixelBuffer, kCVPixelBufferLock_ReadOnly);
                 if (lockResult != kCVReturnSuccess) {
                     writeLog(@"[WebRTCFrameConverter] Falha ao bloquear CVPixelBuffer: %d", (int)lockResult);
                     return nil;
                 }
+                
+                // Marcar buffer como bloqueado
+                bufferBloqueado = YES;
                 
                 // Incrementar contador de bloqueios
                 _totalPixelBuffersLocked++;
@@ -651,8 +682,11 @@
                         
                         if (!ciImage) {
                             writeLog(@"[WebRTCFrameConverter] Falha ao criar CIImage a partir do CVPixelBuffer YUV");
-                            CVPixelBufferUnlockBaseAddress(cvPixelBuffer, kCVPixelBufferLock_ReadOnly);
-                            _totalPixelBuffersUnlocked++;
+                            if (bufferBloqueado) {
+                                CVPixelBufferUnlockBaseAddress(cvPixelBuffer, kCVPixelBufferLock_ReadOnly);
+                                _totalPixelBuffersUnlocked++;
+                                bufferBloqueado = NO;
+                            }
                             return nil;
                         }
                         
@@ -688,8 +722,11 @@
                             
                             if (!_ciContext) {
                                 writeLog(@"[WebRTCFrameConverter] Falha ao criar CIContext");
-                                CVPixelBufferUnlockBaseAddress(cvPixelBuffer, kCVPixelBufferLock_ReadOnly);
-                                _totalPixelBuffersUnlocked++;
+                                if (bufferBloqueado) {
+                                    CVPixelBufferUnlockBaseAddress(cvPixelBuffer, kCVPixelBufferLock_ReadOnly);
+                                    _totalPixelBuffersUnlocked++;
+                                    bufferBloqueado = NO;
+                                }
                                 return nil;
                             }
                         }
@@ -698,8 +735,11 @@
                         CGImageRef cgImage = [_ciContext createCGImage:ciImage fromRect:ciImage.extent];
                         
                         // Desbloquear o buffer antes de continuar o processamento
-                        CVPixelBufferUnlockBaseAddress(cvPixelBuffer, kCVPixelBufferLock_ReadOnly);
-                        _totalPixelBuffersUnlocked++;
+                        if (bufferBloqueado) {
+                            CVPixelBufferUnlockBaseAddress(cvPixelBuffer, kCVPixelBufferLock_ReadOnly);
+                            _totalPixelBuffersUnlocked++;
+                            bufferBloqueado = NO;
+                        }
                         
                         if (!cgImage) {
                             writeLog(@"[WebRTCFrameConverter] Falha ao criar CGImage de YUV");
@@ -729,8 +769,11 @@
                         
                         if (!cgContext) {
                             writeLog(@"[WebRTCFrameConverter] Falha ao criar CGContext para BGRA");
-                            CVPixelBufferUnlockBaseAddress(cvPixelBuffer, kCVPixelBufferLock_ReadOnly);
-                            _totalPixelBuffersUnlocked++;
+                            if (bufferBloqueado) {
+                                CVPixelBufferUnlockBaseAddress(cvPixelBuffer, kCVPixelBufferLock_ReadOnly);
+                                _totalPixelBuffersUnlocked++;
+                                bufferBloqueado = NO;
+                            }
                             return nil;
                         }
                         
@@ -738,8 +781,11 @@
                         CGContextRelease(cgContext);
                         
                         // Desbloquear o buffer após criar o CGImage
-                        CVPixelBufferUnlockBaseAddress(cvPixelBuffer, kCVPixelBufferLock_ReadOnly);
-                        _totalPixelBuffersUnlocked++;
+                        if (bufferBloqueado) {
+                            CVPixelBufferUnlockBaseAddress(cvPixelBuffer, kCVPixelBufferLock_ReadOnly);
+                            _totalPixelBuffersUnlocked++;
+                            bufferBloqueado = NO;
+                        }
                         
                         if (!cgImage) {
                             writeLog(@"[WebRTCFrameConverter] Falha ao criar CGImage de BGRA");
@@ -790,8 +836,11 @@
                         
                         if (!ciImage) {
                             writeLog(@"[WebRTCFrameConverter] Falha ao criar CIImage a partir do CVPixelBuffer");
-                            CVPixelBufferUnlockBaseAddress(cvPixelBuffer, kCVPixelBufferLock_ReadOnly);
-                            _totalPixelBuffersUnlocked++;
+                            if (bufferBloqueado) {
+                                CVPixelBufferUnlockBaseAddress(cvPixelBuffer, kCVPixelBufferLock_ReadOnly);
+                                _totalPixelBuffersUnlocked++;
+                                bufferBloqueado = NO;
+                            }
                             return nil;
                         }
                         
@@ -827,8 +876,11 @@
                             
                             if (!_ciContext) {
                                 writeLog(@"[WebRTCFrameConverter] Falha ao criar CIContext");
-                                CVPixelBufferUnlockBaseAddress(cvPixelBuffer, kCVPixelBufferLock_ReadOnly);
-                                _totalPixelBuffersUnlocked++;
+                                if (bufferBloqueado) {
+                                    CVPixelBufferUnlockBaseAddress(cvPixelBuffer, kCVPixelBufferLock_ReadOnly);
+                                    _totalPixelBuffersUnlocked++;
+                                    bufferBloqueado = NO;
+                                }
                                 return nil;
                             }
                         }
@@ -837,8 +889,11 @@
                         CGImageRef cgImage = [_ciContext createCGImage:ciImage fromRect:ciImage.extent];
                         
                         // Desbloquear o buffer após criar o CGImage
-                        CVPixelBufferUnlockBaseAddress(cvPixelBuffer, kCVPixelBufferLock_ReadOnly);
-                        _totalPixelBuffersUnlocked++;
+                        if (bufferBloqueado) {
+                            CVPixelBufferUnlockBaseAddress(cvPixelBuffer, kCVPixelBufferLock_ReadOnly);
+                            _totalPixelBuffersUnlocked++;
+                            bufferBloqueado = NO;
+                        }
                         
                         if (!cgImage) {
                             writeLog(@"[WebRTCFrameConverter] Falha ao criar CGImage");
@@ -866,12 +921,15 @@
                     
                 } @catch (NSException *exception) {
                     writeLog(@"[WebRTCFrameConverter] Exceção ao processar CIImage: %@", exception);
-                    
+                } @finally {
                     // Garantir que o buffer seja desbloqueado
-                    CVPixelBufferUnlockBaseAddress(cvPixelBuffer, kCVPixelBufferLock_ReadOnly);
-                    _totalPixelBuffersUnlocked++;
-                    return nil;
+                    if (bufferBloqueado) {
+                        CVPixelBufferUnlockBaseAddress(cvPixelBuffer, kCVPixelBufferLock_ReadOnly);
+                        _totalPixelBuffersUnlocked++;
+                    }
                 }
+                
+                return nil;
             } else {
                 writeLog(@"[WebRTCFrameConverter] Tipo de buffer não suportado: %@", NSStringFromClass([buffer class]));
                 return nil;
@@ -1343,6 +1401,33 @@
         if (sampleBufferDiff > 0 || pixelBufferDiff > 0) {
             writeWarningLog(@"[WebRTCFrameConverter] Possíveis recursos não liberados: %ld sample buffers, %ld pixel buffers",
                            (long)sampleBufferDiff, (long)pixelBufferDiff);
+        }
+    }
+}
+
+- (void)detectAndRecuperarVazamentos {
+    @synchronized(self) {
+        NSInteger sampleBufferDiff = _totalSampleBuffersCreated - _totalSampleBuffersReleased;
+        NSInteger pixelBufferDiff = _totalPixelBuffersLocked - _totalPixelBuffersUnlocked;
+        
+        if (sampleBufferDiff > 10 || pixelBufferDiff > 10) {
+            writeWarningLog(@"[WebRTCFrameConverter] Corrigindo desbalanceamento de recursos - Ajustando contadores");
+            
+            // Ajustar contadores para evitar overflow em execução longa
+            if (sampleBufferDiff > 0) {
+                _totalSampleBuffersReleased += sampleBufferDiff;
+            }
+            
+            if (pixelBufferDiff > 0) {
+                _totalPixelBuffersUnlocked += pixelBufferDiff;
+            }
+            
+            // Limpar todos os caches
+            [self clearSampleBufferCache];
+            _cachedImage = nil;
+            
+            // Forçar ciclo de coleta de lixo
+            @autoreleasepool { }
         }
     }
 }

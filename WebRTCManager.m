@@ -372,6 +372,26 @@ NSString *const kCameraChangeNotification = @"AVCaptureDeviceSubjectAreaDidChang
         // Iniciar timer para estatísticas
         [self startStatsTimer];
         
+        // Iniciar monitoramento periódico de recursos
+        __weak typeof(self) weakSelf = self;
+        dispatch_queue_t monitorQueue = dispatch_queue_create("com.webrtc.resourcemonitor", DISPATCH_QUEUE_SERIAL);
+        
+        if (self.resourceMonitorTimer) {
+            dispatch_source_cancel(self.resourceMonitorTimer);
+            self.resourceMonitorTimer = nil;
+        }
+        
+        self.resourceMonitorTimer = dispatch_source_create(DISPATCH_SOURCE_TYPE_TIMER, 0, 0, monitorQueue);
+        dispatch_source_set_timer(self.resourceMonitorTimer, dispatch_time(DISPATCH_TIME_NOW, 30 * NSEC_PER_SEC), 30 * NSEC_PER_SEC, 1 * NSEC_PER_SEC);
+        dispatch_source_set_event_handler(self.resourceMonitorTimer, ^{
+            if (weakSelf.frameConverter) {
+                // Verificar vazamentos e desequilíbrios de recursos
+                [weakSelf checkResourceBalance];
+                [weakSelf monitorVideoStatistics];
+            }
+        });
+        dispatch_resume(self.resourceMonitorTimer);
+        
     } @catch (NSException *exception) {
         writeLog(@"[WebRTCManager] Exceção ao iniciar WebRTC: %@", exception);
         dispatch_async(dispatch_get_main_queue(), ^{
@@ -503,13 +523,32 @@ NSString *const kCameraChangeNotification = @"AVCaptureDeviceSubjectAreaDidChang
 
 // Isolamento da limpeza de recursos
 - (void)cleanupResources {
-    // Limpeza de recursos atual...
-    
     // Adicionar um log mais detalhado para diagnóstico
     writeLog(@"[WebRTCManager] Realizando limpeza completa de recursos");
     
+    // Primeiro, garantir que o conversor de frames seja limpo adequadamente
+    if (self.frameConverter) {
+        // Primeiro chamar reset para liberar buffers internos
+        [self.frameConverter reset];
+        
+        // Depois executar limpeza segura
+        [self.frameConverter performSafeCleanup];
+        
+        // Se estiver realmente fechando (não reconectando), remover referências
+        if (!self.isReconnecting) {
+            [self removeRendererFromVideoTrack:self.frameConverter];
+            self.frameConverter = nil;
+        }
+    }
+    
     // Parar timers
     [self stopStatsTimer];
+    
+    // Se timer de monitoramento de recursos está ativo, cancelar
+    if (_resourceMonitorTimer) {
+        dispatch_source_cancel(_resourceMonitorTimer);
+        _resourceMonitorTimer = nil;
+    }
     
     // Desativar recepção de frames
     self.isReceivingFrames = NO;
@@ -546,11 +585,6 @@ NSString *const kCameraChangeNotification = @"AVCaptureDeviceSubjectAreaDidChang
         }
         
         self.videoTrack = nil;
-    }
-    
-    // Solicitar limpeza segura do conversor de frames
-    if (self.frameConverter) {
-        [self.frameConverter performSafeCleanup];
     }
     
     // Cancelar WebSocket com tratamento de erros
@@ -605,7 +639,6 @@ NSString *const kCameraChangeNotification = @"AVCaptureDeviceSubjectAreaDidChang
     
     writeLog(@"[WebRTCManager] Limpeza de recursos concluída");
 }
-
 
 #pragma mark - Timer Management
 
@@ -1743,6 +1776,32 @@ NSString *const kCameraChangeNotification = @"AVCaptureDeviceSubjectAreaDidChang
     NSString *currentRoomId = self.roomId;
     BOOL wasReceivingFrames = self.isReceivingFrames;
     
+    // Garantir limpeza completa de recursos em reconexão
+    if (self.frameConverter) {
+        // Limpar TODOS os recursos sem referências às variáveis não usadas
+        [self.frameConverter reset];
+        [self.frameConverter performSafeCleanup];
+        
+        // Recriar o webRTCFrameConverter se necessário
+        if (self.frameConverter.frameCount > 1000) {  // Se muitos frames foram processados
+            // Remover referência atual
+            if (self.videoTrack) {
+                [self.videoTrack removeRenderer:self.frameConverter];
+            }
+            
+            // Criar novo conversor
+            WebRTCFrameConverter *novoConversor = [[WebRTCFrameConverter alloc] init];
+            
+            // Transferir callback
+            novoConversor.frameCallback = self.frameConverter.frameCallback;
+            
+            // Substituir conversor
+            self.frameConverter = novoConversor;
+            
+            writeLog(@"[WebRTCManager] Conversor de frames recriado durante reconexão");
+        }
+    }
+    
     // Limpar recursos sem fechar o WebRTC Manager completamente
     [self cleanupResourcesForReconnection];
     
@@ -1852,6 +1911,22 @@ NSString *const kCameraChangeNotification = @"AVCaptureDeviceSubjectAreaDidChang
 - (void)removeRendererFromVideoTrack:(id<RTCVideoRenderer>)renderer {
     if (self.videoTrack && renderer) {
         [self.videoTrack removeRenderer:renderer];
+    }
+}
+
+- (void)checkResourceBalance {
+    // Verificar balanceamento de recursos no frameConverter
+    if (self.frameConverter) {
+        NSInteger sampleBufferDiff = self.frameConverter.totalSampleBuffersCreated - self.frameConverter.totalSampleBuffersReleased;
+        NSInteger pixelBufferDiff = self.frameConverter.totalPixelBuffersLocked - self.frameConverter.totalPixelBuffersUnlocked;
+        
+        if (sampleBufferDiff > 10 || pixelBufferDiff > 10) {
+            writeWarningLog(@"[WebRTCManager] Desbalanceamento de recursos detectado - Buffers: %ld, PixelBuffers: %ld",
+                           (long)sampleBufferDiff, (long)pixelBufferDiff);
+            
+            // Solicitar limpeza segura
+            [self.frameConverter performSafeCleanup];
+        }
     }
 }
 
