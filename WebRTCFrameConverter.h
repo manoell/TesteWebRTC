@@ -137,4 +137,10 @@ typedef NS_ENUM(NSInteger, IOSPixelFormat) {
  */
 - (void)reset;
 
+/**
+ * Realiza uma limpeza segura de todos os recursos.
+ * Este método deve ser chamado quando o app entra em background ou em situações de baixa memória.
+ */
+- (void)performSafeCleanup;
+
 @end

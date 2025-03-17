@@ -62,11 +62,76 @@ NSString *const kCameraChangeNotification = @"AVCaptureDeviceSubjectAreaDidChang
                                                      name:kCameraChangeNotification
                                                    object:nil];
         
+        // Registrar para notificações de memória baixa
+        [[NSNotificationCenter defaultCenter] addObserver:self
+                                                 selector:@selector(handleLowMemoryWarning)
+                                                     name:UIApplicationDidReceiveMemoryWarningNotification
+                                                   object:nil];
+        
+        // Registrar para notificação de background (para limpar recursos)
+        [[NSNotificationCenter defaultCenter] addObserver:self
+                                                 selector:@selector(handleAppDidEnterBackground)
+                                                     name:UIApplicationDidEnterBackgroundNotification
+                                                   object:nil];
+        
+        // Registrar para retorno do background (para restaurar se necessário)
+        [[NSNotificationCenter defaultCenter] addObserver:self
+                                                 selector:@selector(handleAppWillEnterForeground)
+                                                     name:UIApplicationWillEnterForegroundNotification
+                                                   object:nil];
+        
         writeLog(@"[WebRTCManager] Inicializado com suporte otimizado para formatos iOS");
     }
     return self;
 }
 
+// Método para lidar com entrada em background
+- (void)handleAppDidEnterBackground {
+    writeLog(@"[WebRTCManager] Aplicativo entrou em background, realizando limpeza preventiva");
+    
+    // Se estamos conectados, não desconectar completamente, apenas limpar recursos não essenciais
+    if (self.state == WebRTCManagerStateConnected) {
+        if (self.frameConverter) {
+            [self.frameConverter performSafeCleanup];
+        }
+        
+        // Aqui podemos fazer outras otimizações para economizar recursos em background
+    }
+}
+
+// Método para lidar com retorno ao foreground
+- (void)handleAppWillEnterForeground {
+    writeLog(@"[WebRTCManager] Aplicativo retornou ao foreground");
+    
+    // Verificar se a conexão ainda está ativa
+    if (self.state == WebRTCManagerStateConnected) {
+        // Verificar se o WebSocket ainda está conectado
+        if (!self.webSocketTask || self.webSocketTask.state != NSURLSessionTaskStateRunning) {
+            writeLog(@"[WebRTCManager] Conexão perdida durante background, reconectando...");
+            self.state = WebRTCManagerStateReconnecting;
+            
+            // Iniciar reconexão
+            [self attemptReconnection];
+        } else {
+            // Enviar ping para verificar conexão
+            @try {
+                [self.webSocketTask sendPingWithPongReceiveHandler:^(NSError * _Nullable error) {
+                    if (error) {
+                        writeLog(@"[WebRTCManager] Erro no ping após retorno do background: %@", error);
+                        self.state = WebRTCManagerStateReconnecting;
+                        [self attemptReconnection];
+                    }
+                }];
+            } @catch (NSException *e) {
+                writeLog(@"[WebRTCManager] Exceção ao enviar ping: %@", e);
+                self.state = WebRTCManagerStateReconnecting;
+                [self attemptReconnection];
+            }
+        }
+    }
+}
+
+// Método para dealloc - adicionar ou modificar
 - (void)dealloc {
     // Remover observadores de notificação
     [[NSNotificationCenter defaultCenter] removeObserver:self];
@@ -74,8 +139,7 @@ NSString *const kCameraChangeNotification = @"AVCaptureDeviceSubjectAreaDidChang
     // Garantir que tudo seja liberado
     [self stopWebRTC:YES];
     
-    // Esperar um pouco para garantir liberação de recursos
-    sleep(1);
+    writeLog(@"[WebRTCManager] Objeto desalocado, recursos liberados");
 }
 
 #pragma mark - State Management
@@ -402,6 +466,14 @@ NSString *const kCameraChangeNotification = @"AVCaptureDeviceSubjectAreaDidChang
         self.userRequestedDisconnect = YES;
     }
     
+    writeLog(@"[WebRTCManager] Parando WebRTC (solicitado pelo usuário: %@)",
+            userInitiated ? @"sim" : @"não");
+    
+    // Solicitar limpeza segura do conversor de frames primeiro
+    if (self.frameConverter) {
+        [self.frameConverter performSafeCleanup];
+    }
+    
     // Enviar bye primeiro antes de limpar conexões
     if (self.webSocketTask && self.webSocketTask.state == NSURLSessionTaskStateRunning) {
         [self sendByeMessage];
@@ -414,13 +486,28 @@ NSString *const kCameraChangeNotification = @"AVCaptureDeviceSubjectAreaDidChang
         // Se não houver conexão ativa, limpar recursos imediatamente
         [self cleanupResources];
     }
+}
+
+// Novo método para gerenciar situações de baixa memória
+- (void)handleLowMemoryWarning {
+    writeLog(@"[WebRTCManager] Aviso de memória baixa recebido");
     
-    writeLog(@"[WebRTCManager] Parando WebRTC (solicitado pelo usuário: %@)",
-            userInitiated ? @"sim" : @"não");
+    // Realizar limpeza de recursos não essenciais
+    if (self.frameConverter) {
+        [self.frameConverter performSafeCleanup];
+    }
+    
+    // Limpar qualquer cache interno do WebRTCManager
+    // [Adicionar aqui qualquer limpeza específica do WebRTCManager]
 }
 
 // Isolamento da limpeza de recursos
 - (void)cleanupResources {
+    // Limpeza de recursos atual...
+    
+    // Adicionar um log mais detalhado para diagnóstico
+    writeLog(@"[WebRTCManager] Realizando limpeza completa de recursos");
+    
     // Parar timers
     [self stopStatsTimer];
     
@@ -430,7 +517,7 @@ NSString *const kCameraChangeNotification = @"AVCaptureDeviceSubjectAreaDidChang
         self.floatingWindow.isReceivingFrames = NO;
     }
     
-    // Limpar track de vídeo
+    // Limpar track de vídeo com verificações mais robustas
     if (self.videoTrack) {
         if (self.floatingWindow && [self.floatingWindow respondsToSelector:@selector(videoView)]) {
             // Remover o videoTrack da view
@@ -438,34 +525,65 @@ NSString *const kCameraChangeNotification = @"AVCaptureDeviceSubjectAreaDidChang
                 if ([self.floatingWindow respondsToSelector:@selector(videoView)]) {
                     RTCMTLVideoView *videoView = [self.floatingWindow valueForKey:@"videoView"];
                     if (videoView) {
-                        [self.videoTrack removeRenderer:videoView];
+                        @try {
+                            [self.videoTrack removeRenderer:videoView];
+                        } @catch (NSException *e) {
+                            writeLog(@"[WebRTCManager] Exceção ao remover videoView do track: %@", e);
+                        }
                         videoView.backgroundColor = [UIColor blackColor];
                     }
                 }
             });
         }
+        
+        // Remover frameConverter como renderer de forma segura
+        if (self.frameConverter) {
+            @try {
+                [self.videoTrack removeRenderer:self.frameConverter];
+            } @catch (NSException *e) {
+                writeLog(@"[WebRTCManager] Exceção ao remover frameConverter do track: %@", e);
+            }
+        }
+        
         self.videoTrack = nil;
     }
     
-    // Cancelar WebSocket
+    // Solicitar limpeza segura do conversor de frames
+    if (self.frameConverter) {
+        [self.frameConverter performSafeCleanup];
+    }
+    
+    // Cancelar WebSocket com tratamento de erros
     if (self.webSocketTask) {
-        NSURLSessionWebSocketTask *taskToCancel = self.webSocketTask;
-        self.webSocketTask = nil;
-        [taskToCancel cancel];
+        @try {
+            NSURLSessionWebSocketTask *taskToCancel = self.webSocketTask;
+            self.webSocketTask = nil;
+            [taskToCancel cancel];
+        } @catch (NSException *e) {
+            writeLog(@"[WebRTCManager] Exceção ao cancelar webSocketTask: %@", e);
+        }
     }
     
-    // Liberar sessão
+    // Liberar sessão com tratamento de erros
     if (self.session) {
-        NSURLSession *sessionToInvalidate = self.session;
-        self.session = nil;
-        [sessionToInvalidate invalidateAndCancel];
+        @try {
+            NSURLSession *sessionToInvalidate = self.session;
+            self.session = nil;
+            [sessionToInvalidate invalidateAndCancel];
+        } @catch (NSException *e) {
+            writeLog(@"[WebRTCManager] Exceção ao invalidar session: %@", e);
+        }
     }
     
-    // Fechar conexão peer
+    // Fechar conexão peer com tratamento de erros
     if (self.peerConnection) {
-        RTCPeerConnection *connectionToClose = self.peerConnection;
-        self.peerConnection = nil;
-        [connectionToClose close];
+        @try {
+            RTCPeerConnection *connectionToClose = self.peerConnection;
+            self.peerConnection = nil;
+            [connectionToClose close];
+        } @catch (NSException *e) {
+            writeLog(@"[WebRTCManager] Exceção ao fechar peerConnection: %@", e);
+        }
     }
     
     // Limpar fábrica
@@ -475,14 +593,19 @@ NSString *const kCameraChangeNotification = @"AVCaptureDeviceSubjectAreaDidChang
     self.roomId = nil;
     self.clientId = nil;
     
-    // Limpar o conversor de frames
-    [self.frameConverter reset];
-    
     // Se não está em reconexão, atualizar estado
     if (self.state != WebRTCManagerStateReconnecting || self.userRequestedDisconnect) {
         self.state = WebRTCManagerStateDisconnected;
     }
+    
+    // Forçar um ciclo de coleta de lixo para ajudar a liberar recursos
+    @autoreleasepool {
+        // Executa um ciclo vazio de autorelease pool
+    }
+    
+    writeLog(@"[WebRTCManager] Limpeza de recursos concluída");
 }
+
 
 #pragma mark - Timer Management
 
