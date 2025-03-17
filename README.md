@@ -57,11 +57,11 @@ Antes de avançar para a fase de substituição direta do feed da câmera, é ne
 - [✅] Configurar corretamente CMTimingInfo para preservar timing original
 - [✅] Adicionar suporte adequado para frames droppados
 
-### Etapa 3: Otimizações de Performance (Média Prioridade)
+### Etapa 3: Otimizações de Performance (Média Prioridade) ✅
 
-- [ ] Acelerar conversão de formatos nativos do iOS (especialmente YUV 4:2:0)
-- [ ] Maximizar uso de aceleração de hardware
-- [ ] Otimizar escalonamento de resolução e taxa de frames
+- [✅] Acelerar conversão de formatos nativos do iOS (especialmente YUV 4:2:0)
+- [✅] Maximizar uso de aceleração de hardware
+- [✅] Otimizar escalonamento de resolução e taxa de frames
 
 ### Etapa 4: Preparação para Substituição (Alta Prioridade)
 
