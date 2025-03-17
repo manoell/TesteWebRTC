@@ -275,4 +275,57 @@ typedef NS_ENUM(NSInteger, IOSPixelFormat) {
  */
 - (BOOL)applyMetadataToSampleBuffer:(CMSampleBufferRef)sampleBuffer metadata:(NSDictionary *)metadata;
 
+/**
+ * Converte um buffer YUV para RGB usando aceleração de hardware quando disponível.
+ * @param pixelBuffer Buffer YUV de entrada (420f ou 420v)
+ * @return Buffer RGB otimizado ou NULL em caso de erro
+ */
+- (CVPixelBufferRef)convertYUVToRGBWithHardwareAcceleration:(CVPixelBufferRef)pixelBuffer;
+
+/**
+ * Verifica se a aceleração de hardware está disponível para conversão de formato.
+ * @return TRUE se aceleração de hardware está disponível, FALSE caso contrário
+ */
+- (BOOL)isHardwareAccelerationAvailable;
+
+/**
+ * Configura e mantém um contexto de conversão colorSyncTransform para otimizar conversões repetidas.
+ * @param sourceFormat Formato OSType de origem (ex: kCVPixelFormatType_420YpCbCr8BiPlanarFullRange)
+ * @param destFormat Formato OSType de destino (ex: kCVPixelFormatType_32BGRA)
+ * @return TRUE se o contexto foi criado com sucesso
+ */
+- (BOOL)setupColorConversionContextFromFormat:(OSType)sourceFormat toFormat:(OSType)destFormat;
+
+/**
+ * Detecta e configura aceleração de hardware disponível no dispositivo.
+ * @return TRUE se aceleração de hardware foi configurada com sucesso
+ */
+- (BOOL)configureHardwareAcceleration;
+
+/**
+ * Otimiza uso de memória para o processamento de vídeo.
+ * @param optimize Se TRUE, otimiza para performance em detrimento da memória
+ */
+- (void)optimizeForPerformance:(BOOL)optimize;
+
+/**
+ * Escalona um buffer de pixels para a resolução alvo com otimização de hardware.
+ * @param pixelBuffer Buffer original a ser escalonado
+ * @return Novo buffer na resolução alvo ou NULL em caso de erro
+ */
+- (RTCCVPixelBuffer *)scalePixelBufferToTargetSize:(RTCCVPixelBuffer *)pixelBuffer;
+
+/**
+ * Controla a adaptação de taxa de frames para melhorar performance.
+ * @param newStrategy Estratégia de adaptação ("quality", "balanced", "performance")
+ */
+- (void)setFrameRateAdaptationStrategy:(NSString *)newStrategy;
+
+/**
+ * Determina se um frame deve ser processado com base em heurísticas de carga
+ * @param frame Frame a ser verificado
+ * @return TRUE se o frame deve ser processado, FALSE para descartar
+ */
+- (BOOL)shouldProcessFrame:(RTCVideoFrame *)frame;
+
 @end

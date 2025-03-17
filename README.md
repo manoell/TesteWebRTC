@@ -51,9 +51,9 @@ Antes de avançar para a fase de substituição direta do feed da câmera, é ne
 - [✅] Implementar rastreamento de recursos para evitar vazamentos
 - [✅] Otimizar sistema de cache de frames
 
-### Etapa 2: Sincronização e Precisão de Timing (Alta Prioridade)
+### Etapa 2: Sincronização e Precisão de Timing (Alta Prioridade) ✅
 
-- [✅] Implementar sincronização precisa de timestamps com relógio do sistema ✅
+- [✅] Implementar sincronização precisa de timestamps com relógio do sistema
 - [✅] Configurar corretamente CMTimingInfo para preservar timing original
 - [✅] Adicionar suporte adequado para frames droppados
 
