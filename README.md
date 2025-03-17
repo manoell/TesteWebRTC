@@ -44,18 +44,18 @@ O projeto encontra-se atualmente na **fase final de preparação antes da substi
 
 Antes de avançar para a fase de substituição direta do feed da câmera, é necessário realizar as seguintes otimizações:
 
-### Etapa 1: Correção de Gerenciamento de Recursos (Alta Prioridade)
+### Etapa 1: Correção de Gerenciamento de Recursos (Alta Prioridade) ✅
 
-- [ ] Revisar e corrigir liberação de memória para CMSampleBuffer
-- [ ] Verificar bloqueios/desbloqueios corretos de CVPixelBuffer
-- [ ] Implementar rastreamento de recursos para evitar vazamentos
-- [ ] Otimizar sistema de cache de frames
+- [✅] Revisar e corrigir liberação de memória para CMSampleBuffer
+- [✅] Verificar bloqueios/desbloqueios corretos de CVPixelBuffer
+- [✅] Implementar rastreamento de recursos para evitar vazamentos
+- [✅] Otimizar sistema de cache de frames
 
 ### Etapa 2: Sincronização e Precisão de Timing (Alta Prioridade)
 
-- [ ] Implementar sincronização precisa de timestamps com relógio do sistema
-- [ ] Configurar corretamente CMTimingInfo para preservar timing original
-- [ ] Adicionar suporte adequado para frames droppados
+- [✅] Implementar sincronização precisa de timestamps com relógio do sistema ✅
+- [✅] Configurar corretamente CMTimingInfo para preservar timing original
+- [✅] Adicionar suporte adequado para frames droppados
 
 ### Etapa 3: Otimizações de Performance (Média Prioridade)
 

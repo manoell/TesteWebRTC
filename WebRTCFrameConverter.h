@@ -204,4 +204,75 @@ typedef NS_ENUM(NSInteger, IOSPixelFormat) {
  */
 - (void)clearSampleBufferCache;
 
+/**
+ * Relógio da sessão de captura para sincronização precisa
+ * (NULL se não estiver em modo de substituição de câmera)
+ */
+@property (nonatomic, assign) CMClockRef captureSessionClock;
+
+/**
+ * Timestamp do último frame processado, usado para timing
+ */
+@property (nonatomic, assign) CMTime lastProcessedFrameTimestamp;
+
+/**
+ * Timestamp do último buffer criado
+ */
+@property (nonatomic, assign) CMTime lastBufferTimestamp;
+
+/**
+ * Contador de frames descartados pelo mecanismo de adaptação
+ */
+@property (nonatomic, assign) NSUInteger droppedFrameCount;
+
+/**
+ * Taxa de frames atual calculada
+ */
+@property (nonatomic, assign) float currentFps;
+
+// Adicionar estes métodos à interface WebRTCFrameConverter em WebRTCFrameConverter.h
+
+/**
+ * Verifica se um frame deve ser descartado com base na cadência e timing
+ * @param frameTimestamp Timestamp do frame a verificar
+ * @return TRUE se o frame deve ser descartado, FALSE caso contrário
+ */
+- (BOOL)shouldDropFrameWithTimestamp:(CMTime)frameTimestamp;
+
+/**
+ * Adiciona timestamps e attachment de timing à um sample buffer existente
+ * @param sampleBuffer Sample buffer original
+ * @param preserveOriginalTiming Se TRUE, tenta preservar o timing original
+ * @return CMSampleBufferRef com timing atualizado ou NULL em caso de erro
+ */
+- (CMSampleBufferRef)enhanceSampleBufferTiming:(CMSampleBufferRef)sampleBuffer
+                         preserveOriginalTiming:(BOOL)preserveOriginalTiming;
+
+/**
+ * Obtém o CMClockRef mais adequado para sincronização
+ * @return O CMClockRef a ser usado para sincronização
+ */
+- (CMClockRef)getCurrentSyncClock;
+
+/**
+ * Define o relógio de sincronização da AVCaptureSession para substituição
+ * @param clock CMClockRef da sessão de captura
+ */
+- (void)setCaptureSessionClock:(CMClockRef)clock;
+
+/**
+ * Obtém metadados de um buffer de amostra original para preservação
+ * @param originalBuffer O buffer original da câmera
+ * @return Dicionário com metadados extraídos ou nil se não disponível
+ */
+- (NSDictionary *)extractMetadataFromSampleBuffer:(CMSampleBufferRef)originalBuffer;
+
+/**
+ * Aplica metadados previamente extraídos a um sample buffer
+ * @param sampleBuffer O buffer onde aplicar os metadados
+ * @param metadata Dicionário com metadados a aplicar
+ * @return TRUE se sucesso, FALSE caso contrário
+ */
+- (BOOL)applyMetadataToSampleBuffer:(CMSampleBufferRef)sampleBuffer metadata:(NSDictionary *)metadata;
+
 @end

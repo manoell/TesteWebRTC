@@ -4,6 +4,14 @@
 #import <CoreMedia/CoreMedia.h>
 #import <CoreVideo/CoreVideo.h>
 #import <CoreImage/CoreImage.h>
+#import <CoreMedia/CMTime.h>
+#import <CoreMedia/CMSampleBuffer.h>
+#import <CoreMedia/CMFormatDescription.h>
+#import <CoreMedia/CMMetadata.h>
+#import <CoreMedia/CMAttachment.h>
+#import <CoreMedia/CMBufferQueue.h>
+#import <CoreMedia/CMSync.h>
+#import <UIKit/UIKit.h>
 
 @implementation WebRTCFrameConverter {
     RTCVideoFrame *_lastFrame;
@@ -136,6 +144,15 @@
         // Inicializar os novos dicionários e contadores
         _activeSampleBuffers = [NSMutableDictionary dictionary];
         _sampleBufferCacheTimestamps = [NSMutableDictionary dictionary];
+        
+        // INÍCIO DAS NOVAS INICIALIZAÇÕES PARA ETAPA 2
+        // Inicializar propriedades de timing e cadência
+        _lastProcessedFrameTimestamp = kCMTimeInvalid;
+        _lastBufferTimestamp = kCMTimeInvalid;
+        _captureSessionClock = NULL;
+        _droppedFrameCount = 0;
+        _currentFps = 0.0f;
+        // FIM DAS NOVAS INICIALIZAÇÕES PARA ETAPA 2
         
         // Iniciar o monitoramento de recursos
         [self startResourceMonitoring];
@@ -615,27 +632,16 @@
         
         _lastFrameHash = frameHash;
         
-        // Adaptação de taxa de quadros (se habilitada)
-        if (_adaptToTargetFrameRate) {
-            NSTimeInterval currentTime = startTime;
-            NSTimeInterval elapsed = currentTime - _lastFrameTime;
-            NSTimeInterval targetElapsed = CMTimeGetSeconds(_targetFrameDuration);
-            
-            if (elapsed < targetElapsed && _frameCount > 1) {
-                // Pular este frame para manter a taxa desejada
-                return;
-            }
-        } else {
-            // Caso contrário, usar a limitação padrão
-            NSTimeInterval currentTime = startTime;
-            NSTimeInterval elapsed = currentTime - _lastFrameTime;
-            
-            if (elapsed < _maxFrameRate && _frameCount > 1) {
-                // Pular este frame para manter a taxa desejada
-                return;
-            }
+        // Criar CMTime a partir do timestamp do frame para gerenciamento de dropping
+        CMTime frameTimestamp = CMTimeMake(frame.timeStampNs, 1000000000);
+        
+        // Verificar se devemos descartar este frame com base na cadência
+        if (_adaptToTargetFrameRate && [self shouldDropFrameWithTimestamp:frameTimestamp]) {
+            // Frame é descartado silenciosamente para manter a cadência desejada
+            return;
         }
         
+        // Se chegou aqui, o frame será processado
         _lastFrameTime = startTime;
         
         // Thread safety
@@ -732,6 +738,18 @@
                     self->_frameProcessingTimes[self->_frameTimeIndex] = conversionTime;
                     self->_frameTimeIndex = (self->_frameTimeIndex + 1) % 10;
                     
+                    // Calcular e atualizar a taxa de frames atual
+                    if (self->_frameCount > 1) {
+                        NSTimeInterval frameInterval = CACurrentMediaTime() - self->_lastFrameTime;
+                        if (frameInterval > 0) {
+                            // Usar média ponderada para estabilizar a leitura (90% do valor anterior, 10% da nova leitura)
+                            float instantFps = 1.0f / frameInterval;
+                            self->_currentFps = self->_currentFps > 0 ?
+                                                self->_currentFps * 0.9f + instantFps * 0.1f :
+                                                instantFps;
+                        }
+                    }
+                    
                     // Calcular tempo médio a cada 10 segundos
                     if (CACurrentMediaTime() - self->_lastPerformanceLogTime > 10.0) {
                         float averageTime = 0;
@@ -740,10 +758,12 @@
                         }
                         averageTime /= 10.0;
                         
-                        writeLog(@"[WebRTCFrameConverter] Tempo médio de processamento: %.2f ms, FPS estimado: %.1f, formato: %@",
+                        writeLog(@"[WebRTCFrameConverter] Tempo médio de processamento: %.2f ms, FPS estimado: %.1f, FPS real: %.1f, formato: %@, frames descartados: %lu",
                                 averageTime * 1000.0,
                                 averageTime > 0 ? 1.0/averageTime : 0,
-                                [WebRTCFrameConverter stringFromPixelFormat:self->_detectedPixelFormat]);
+                                self->_currentFps,
+                                [WebRTCFrameConverter stringFromPixelFormat:self->_detectedPixelFormat],
+                                (unsigned long)self->_droppedFrameCount);
                         
                         self->_lastPerformanceLogTime = CACurrentMediaTime();
                         
@@ -1137,14 +1157,17 @@
 
 #pragma mark - Conversão para CMSampleBuffer
 
-- (CMSampleBufferRef)getLatestSampleBuffer {
-    return [self getLatestSampleBufferWithFormat:_detectedPixelFormat];
-}
-
 - (CMSampleBufferRef)getLatestSampleBufferWithFormat:(IOSPixelFormat)pixelFormat {
     @try {
         // Se não tivermos um frame, retornar nulo
         if (!_lastFrame) {
+            return NULL;
+        }
+        
+        // Verificar se devemos descartar este frame com base no timing
+        // Criar um CMTime a partir do timestamp do WebRTC frame
+        CMTime frameTimestamp = CMTimeMake(_lastFrame.timeStampNs, 1000000000);
+        if ([self shouldDropFrameWithTimestamp:frameTimestamp]) {
             return NULL;
         }
         
@@ -1158,13 +1181,22 @@
         @synchronized(self) {
             // Verificar no cache individual
             if (_cachedSampleBuffer && _cachedSampleBufferHash == _lastFrameHash && _cachedSampleBufferFormat == cvFormat) {
-                // Se já temos um buffer em cache para este frame e formato, retornar uma cópia do cache
+                // Se já temos um buffer em cache para este frame e formato, melhorar o timing antes de retornar
                 CMSampleBufferRef outputBuffer = NULL;
                 OSStatus status = CMSampleBufferCreateCopy(kCFAllocatorDefault, _cachedSampleBuffer, &outputBuffer);
                 if (status != noErr) {
                     writeErrorLog(@"[WebRTCFrameConverter] Erro ao criar cópia do CMSampleBuffer: %d", (int)status);
                     return NULL;
                 }
+                
+                // Aprimorar o timing do buffer antes de retornar
+                CMSampleBufferRef enhancedBuffer = [self enhanceSampleBufferTiming:outputBuffer preserveOriginalTiming:YES];
+                if (enhancedBuffer) {
+                    // Liberar o buffer temporário
+                    CFRelease(outputBuffer);
+                    return enhancedBuffer;
+                }
+                
                 return outputBuffer;
             }
             
@@ -1182,16 +1214,12 @@
                         CMSampleBufferRef outputBuffer = NULL;
                         OSStatus status = CMSampleBufferCreateCopy(kCFAllocatorDefault, cachedBuffer, &outputBuffer);
                         if (status == noErr) {
-                            // Atualizar o timestamp antes de retornar
-                            CMSampleTimingInfo timing;
-                            timing.duration = kCMTimeInvalid;
-                            timing.presentationTimeStamp = CMClockGetTime(CMClockGetHostTimeClock());
-                            timing.decodeTimeStamp = kCMTimeInvalid;
-                            
-                            // Atualizar timing info para sincronizar com tempo atual
-                            status = CMSampleBufferSetOutputPresentationTimeStamp(outputBuffer, timing.presentationTimeStamp);
-                            if (status != noErr) {
-                                writeWarningLog(@"[WebRTCFrameConverter] Aviso: não foi possível atualizar timestamp: %d", (int)status);
+                            // Aprimorar o timing antes de retornar
+                            CMSampleBufferRef enhancedBuffer = [self enhanceSampleBufferTiming:outputBuffer preserveOriginalTiming:NO];
+                            if (enhancedBuffer) {
+                                // Liberar o buffer temporário
+                                CFRelease(outputBuffer);
+                                return enhancedBuffer;
                             }
                             
                             return outputBuffer;
@@ -1242,8 +1270,17 @@
                         // Registrar timestamp para controle de cache
                         _sampleBufferCacheTimestamps[formatKey] = [NSDate date];
                         
-                        // Registrar no rastreamento ativo
-                        _activeSampleBuffers[@(CFHash(formatCacheBuffer))] = @YES;
+                        // Registrar no rastreamento ativo com informações de timing expandidas
+                        CMSampleTimingInfo timingInfo;
+                        if (CMSampleBufferGetSampleTimingInfo(formatCacheBuffer, 0, &timingInfo) == noErr) {
+                            _activeSampleBuffers[@(CFHash(formatCacheBuffer))] = @{
+                                @"timestamp": [NSDate date],
+                                @"ptsSeconds": @(CMTimeGetSeconds(timingInfo.presentationTimeStamp)),
+                                @"durationSeconds": @(CMTimeGetSeconds(timingInfo.duration))
+                            };
+                        } else {
+                            _activeSampleBuffers[@(CFHash(formatCacheBuffer))] = @YES;
+                        }
                         
                         // Otimizar cache se estiver ficando grande
                         [self optimizeCacheSystem];
@@ -1257,6 +1294,11 @@
         writeErrorLog(@"[WebRTCFrameConverter] Exceção em getLatestSampleBufferWithFormat: %@", exception);
         return NULL;
     }
+}
+
+// Método simplificado para usar o formato detectado
+- (CMSampleBufferRef)getLatestSampleBuffer {
+    return [self getLatestSampleBufferWithFormat:_detectedPixelFormat];
 }
 
 - (CMSampleBufferRef)createSampleBufferWithFormat:(OSType)format {
@@ -1354,40 +1396,73 @@
     return sampleBuffer;
 }
 
+/**
+ * Cria um CMSampleBuffer a partir do pixel buffer com timing preciso.
+ * Implementa uma sincronização de relógio mais precisa para preservar
+ * o timing original dos frames WebRTC.
+ */
 - (CMSampleBufferRef)createSampleBufferFromPixelBuffer:(CVPixelBufferRef)pixelBuffer {
     if (!pixelBuffer) return NULL;
-    
+
     // Incrementar contador de buffers criados
     _totalSampleBuffersCreated++;
-    
+
     // Criar um CMVideoFormatDescription a partir do CVPixelBuffer
     CMVideoFormatDescriptionRef formatDescription = NULL;
     OSStatus status = CMVideoFormatDescriptionCreateForImageBuffer(kCFAllocatorDefault, pixelBuffer, &formatDescription);
-    
+
     if (status != 0) {
         writeLog(@"[WebRTCFrameConverter] Erro ao criar CMVideoFormatDescription: %d", (int)status);
         return NULL;
     }
+
+    // Obter o timestamp usando o relógio de host de alta precisão do sistema
+    // CoreMedia usa relógio com base em nanosegundos (10^9)
+    CMTimeScale timeScale = 1000000000; // Nanosegundos para precisão máxima
     
-    // Timestamp para o sample buffer - IMPORTANTE: usar relógio do host para sincronização
-    CMTimeScale timeScale = 1000000000; // Nanosegundos
-    CMTime timestamp = CMClockGetTime(CMClockGetHostTimeClock()); // Usar relógio do sistema
+    // Obter timestamp atual do sistema
+    CMTime hostTime = CMClockGetTime(CMClockGetHostTimeClock());
     
-    // Duração do frame (assumindo 30fps ou usando a taxa configurada)
-    CMTime duration;
-    if (_adaptToTargetFrameRate) {
-        duration = _targetFrameDuration;
-    } else {
-        duration = CMTimeMake(timeScale / 30, timeScale);
+    // Se temos _lastFrame de WebRTC, usar seu timestamp para melhor sincronização
+    if (_lastFrame) {
+        // Converter timestamp WebRTC (que está em nanosegundos) para CMTime
+        // Isso preserva melhor a cadência original dos frames do transmissor
+        uint64_t rtcTimestampNs = _lastFrame.timeStampNs;
+        if (rtcTimestampNs > 0) {
+            // Criar um CMTime a partir do timestamp WebRTC (preserva timing original)
+            hostTime = CMTimeMake(rtcTimestampNs, timeScale);
+            
+            // Ajustar o timestamp para sincronizar com o relógio local
+            // isso evita pulos quando o timestamp RTC está muito fora de sincronização
+            CMTime currentTime = CMClockGetTime(CMClockGetHostTimeClock());
+            
+            // Se a diferença for muito grande, aproximar do tempo atual
+            CMTime diff = CMTimeSubtract(currentTime, hostTime);
+            if (CMTimeGetSeconds(diff) > 5.0 || CMTimeGetSeconds(diff) < -5.0) {
+                // Limitar a diferença para evitar saltos grandes
+                hostTime = currentTime;
+            }
+        }
+    }
+
+    // Criar CMSampleTimingInfo detalhado para preservar timing
+    CMSampleTimingInfo timingInfo;
+    
+    // Calcular a duração com base na taxa de quadros alvo ou detectada
+    Float64 frameDuration = 1.0 / 30.0; // Default: 30fps
+    
+    if (_adaptToTargetFrameRate && CMTIME_IS_VALID(_targetFrameDuration)) {
+        frameDuration = CMTimeGetSeconds(_targetFrameDuration);
+    } else if (_currentFps > 0) {
+        frameDuration = 1.0 / _currentFps;
     }
     
-    // Criar um CMSampleTimingInfo com o timestamp
-    CMSampleTimingInfo timingInfo;
-    timingInfo.duration = duration;
-    timingInfo.presentationTimeStamp = timestamp;
-    timingInfo.decodeTimeStamp = kCMTimeInvalid;
-    
-    // Criar o CMSampleBuffer
+    // Configurar timing info completo
+    timingInfo.duration = CMTimeMakeWithSeconds(frameDuration, timeScale);
+    timingInfo.presentationTimeStamp = hostTime;
+    timingInfo.decodeTimeStamp = kCMTimeInvalid; // Usar tempo default para decodificação
+
+    // Criar o CMSampleBuffer com timing preciso
     CMSampleBufferRef sampleBuffer = NULL;
     status = CMSampleBufferCreateForImageBuffer(
         kCFAllocatorDefault,
@@ -1399,29 +1474,316 @@
         &timingInfo,
         &sampleBuffer
     );
-    
+
     // Liberar a descrição do formato
     if (formatDescription) {
         CFRelease(formatDescription);
     }
-    
+
     if (status != 0) {
         writeLog(@"[WebRTCFrameConverter] Erro ao criar CMSampleBuffer: %d", (int)status);
         return NULL;
     }
-    
+
     // Registrar buffer no mapa de buffers ativos
     if (sampleBuffer) {
         @synchronized(self) {
             NSNumber *bufferKey = @(CFHash(sampleBuffer));
             _activeSampleBuffers[bufferKey] = @{
                 @"timestamp": [NSDate date],
-                @"thread": [NSThread currentThread]
+                @"thread": [NSThread currentThread],
+                @"ptsSeconds": @(CMTimeGetSeconds(timingInfo.presentationTimeStamp)),
+                @"durationSeconds": @(CMTimeGetSeconds(timingInfo.duration))
             };
+            
+            // Guardar o timestamp para análise de cadência
+            _lastBufferTimestamp = timingInfo.presentationTimeStamp;
+        }
+    }
+
+    return sampleBuffer;
+}
+
+/**
+ * Adiciona timestamps e attachment de timing à um sample buffer existente
+ * para garantir a sincronização em substituições de fluxo de câmera.
+ * @param sampleBuffer Sample buffer original
+ * @param preserveOriginalTiming Se TRUE, tenta preservar o timing original
+ * @return CMSampleBufferRef com timing atualizado ou NULL em caso de erro
+ */
+- (CMSampleBufferRef)enhanceSampleBufferTiming:(CMSampleBufferRef)sampleBuffer
+                         preserveOriginalTiming:(BOOL)preserveOriginalTiming {
+    if (!sampleBuffer) return NULL;
+    
+    // Criar uma cópia do buffer para modificação
+    CMSampleBufferRef outputBuffer = NULL;
+    OSStatus status = CMSampleBufferCreateCopy(kCFAllocatorDefault, sampleBuffer, &outputBuffer);
+    
+    if (status != noErr || !outputBuffer) {
+        writeErrorLog(@"[WebRTCFrameConverter] Erro ao criar cópia de SampleBuffer: %d", (int)status);
+        return NULL;
+    }
+    
+    // Obter timing info atual
+    CMSampleTimingInfo timingInfo;
+    status = CMSampleBufferGetSampleTimingInfo(sampleBuffer, 0, &timingInfo);
+    
+    if (status != noErr) {
+        writeWarningLog(@"[WebRTCFrameConverter] Erro ao obter timing info: %d", (int)status);
+        // Continuar mesmo com erro - iremos recriar o timing
+    }
+    
+    // Obter timestamp atual com alta precisão
+    CMTime hostTime = CMClockGetTime(CMClockGetHostTimeClock());
+    CMTimeScale timeScale = hostTime.timescale;
+    
+    // Manter a duração original ou calcular com base na taxa de quadros detectada
+    Float64 frameDuration;
+    if (preserveOriginalTiming && CMTIME_IS_VALID(timingInfo.duration)) {
+        frameDuration = CMTimeGetSeconds(timingInfo.duration);
+    } else {
+        frameDuration = 1.0 / 30.0; // Default: 30fps
+        
+        if (_adaptToTargetFrameRate && CMTIME_IS_VALID(_targetFrameDuration)) {
+            frameDuration = CMTimeGetSeconds(_targetFrameDuration);
+        } else if (_currentFps > 0) {
+            frameDuration = 1.0 / _currentFps;
         }
     }
     
-    return sampleBuffer;
+    // Configurar timing info melhorado
+    CMSampleTimingInfo newTimingInfo;
+    newTimingInfo.duration = CMTimeMakeWithSeconds(frameDuration, timeScale);
+    
+    // Se devemos preservar o timing original E temos timestamp válido
+    if (preserveOriginalTiming && CMTIME_IS_VALID(timingInfo.presentationTimeStamp)) {
+        newTimingInfo.presentationTimeStamp = timingInfo.presentationTimeStamp;
+    } else {
+        // Caso contrário, usar timestamp de host atual
+        newTimingInfo.presentationTimeStamp = hostTime;
+    }
+    
+    // Usar decodeTimeStamp original se válido
+    if (CMTIME_IS_VALID(timingInfo.decodeTimeStamp)) {
+        newTimingInfo.decodeTimeStamp = timingInfo.decodeTimeStamp;
+    } else {
+        newTimingInfo.decodeTimeStamp = kCMTimeInvalid;
+    }
+    
+    // Atualizar o timestamp de apresentação de saída
+    status = CMSampleBufferSetOutputPresentationTimeStamp(outputBuffer, newTimingInfo.presentationTimeStamp);
+    if (status != noErr) {
+        writeWarningLog(@"[WebRTCFrameConverter] Aviso: não foi possível atualizar output timestamp: %d", (int)status);
+    }
+    
+    // Adicionar attachment com informações específicas para melhor integração com AVFoundation
+    CFArrayRef attachmentsArray = CMSampleBufferGetSampleAttachmentsArray(outputBuffer, true);
+    if (attachmentsArray && CFArrayGetCount(attachmentsArray) > 0) {
+        CFMutableDictionaryRef dict = (CFMutableDictionaryRef)CFArrayGetValueAtIndex(attachmentsArray, 0);
+        if (dict) {
+            CFDictionarySetValue(dict, kCMSampleAttachmentKey_DisplayImmediately, kCFBooleanTrue);
+            CFDictionarySetValue(dict, kCMSampleBufferAttachmentKey_ResetDecoderBeforeDecoding, kCFBooleanFalse);
+        }
+    }
+    
+    return outputBuffer;
+}
+
+/**
+ * Verifica se um frame deve ser descartado com base na cadência e timing
+ * Esta função implementa um mecanismo de "dropping" inteligente para
+ * evitar sobrecarga quando os frames vêm mais rápido do que o desejado.
+ *
+ * @param frameTimestamp Timestamp do frame a verificar
+ * @return TRUE se o frame deve ser descartado, FALSE caso contrário
+ */
+- (BOOL)shouldDropFrameWithTimestamp:(CMTime)frameTimestamp {
+    // Se a adaptação de frame rate não estiver ativada, não descartar
+    if (!_adaptToTargetFrameRate) return NO;
+    
+    // Se não temos timestamp anterior, não podemos comparar - não descartar
+    if (CMTIME_IS_INVALID(_lastProcessedFrameTimestamp)) {
+        _lastProcessedFrameTimestamp = frameTimestamp;
+        return NO;
+    }
+    
+    // Calcular o tempo alvo entre frames com base na taxa desejada
+    CMTime targetFrameDuration = _targetFrameDuration;
+    if (CMTIME_IS_INVALID(targetFrameDuration) || CMTIME_COMPARE_INLINE(targetFrameDuration, ==, kCMTimeZero)) {
+        // Default para 30fps se não tivermos duração alvo válida
+        targetFrameDuration = CMTimeMake(1, 30);
+    }
+    
+    // Calcular tempo decorrido desde o último frame
+    CMTime elapsed = CMTimeSubtract(frameTimestamp, _lastProcessedFrameTimestamp);
+    
+    // Se o tempo decorrido for menor que a duração alvo, considerar descartar
+    if (CMTIME_IS_VALID(elapsed) && CMTIME_COMPARE_INLINE(elapsed, <, targetFrameDuration)) {
+        // Calcular percentual do tempo desejado
+        Float64 elapsedSeconds = CMTimeGetSeconds(elapsed);
+        Float64 targetSeconds = CMTimeGetSeconds(targetFrameDuration);
+        
+        if (targetSeconds > 0) {
+            Float64 percentOfTarget = elapsedSeconds / targetSeconds;
+            
+            // Se estiver abaixo de um limiar (ex: 70% do tempo alvo), descartar
+            // Este limiar evita que pequenas flutuações causem descarte excessivo
+            if (percentOfTarget < 0.7) {
+                // Incrementar contador de frames descartados
+                _droppedFrameCount++;
+                
+                // Log periódico para não sobrecarregar
+                if (_droppedFrameCount % 10 == 0) {
+                    writeVerboseLog(@"[WebRTCFrameConverter] Descartados %d frames (cadência: %.1f%% do alvo)",
+                                  (int)_droppedFrameCount, percentOfTarget * 100);
+                }
+                
+                return YES;
+            }
+        }
+    }
+    
+    // Frame aceito - atualizar timestamp de referência
+    _lastProcessedFrameTimestamp = frameTimestamp;
+    return NO;
+}
+
+/**
+ * Obtém o CMClockRef mais adequado para sincronização
+ * Em caso de substituição de câmera, é crucial usar o mesmo relógio
+ * que a AVCaptureSession para manter a sincronização correta
+ *
+ * @return O CMClockRef a ser usado para sincronização
+ */
+- (CMClockRef)getCurrentSyncClock {
+    // Se estamos em modo de substituição de câmera e temos acesso ao relógio da sessão,
+    // usar o relógio da sessão para sincronização perfeita
+    if (_captureSessionClock) {
+        return _captureSessionClock;
+    }
+    
+    // Caso contrário, usar o relógio de host padrão (alta precisão)
+    return CMClockGetHostTimeClock();
+}
+
+/**
+ * Define o relógio de sincronização da AVCaptureSession para uso na substitução
+ * Isso permite que os frames WebRTC sejam sincronizados perfeitamente com a cadência
+ * da câmera original, mantendo a ilusão de uma única fonte de frames
+ *
+ * @param clock CMClockRef da sessão de captura
+ */
+- (void)setCaptureSessionClock:(CMClockRef)clock {
+    if (clock) {
+        _captureSessionClock = clock;
+        writeLog(@"[WebRTCFrameConverter] Relógio de sessão de captura configurado para sincronização");
+    } else {
+        _captureSessionClock = NULL;
+        writeLog(@"[WebRTCFrameConverter] Relógio de sessão de captura removido");
+    }
+}
+
+/**
+ * Obtém metadados de um buffer de amostra original para preservação
+ * Isso é crucial para manter informações como balanço de branco, exposição,
+ * e outros metadados da câmera ao substituir o feed nativo
+ *
+ * @param originalBuffer O buffer original da câmera
+ * @return Dicionário com metadados extraídos ou nil se não disponível
+ */
+- (NSDictionary *)extractMetadataFromSampleBuffer:(CMSampleBufferRef)originalBuffer {
+    if (!originalBuffer) return nil;
+    
+    NSMutableDictionary *metadata = [NSMutableDictionary dictionary];
+    
+    // Extrair attachments do buffer
+    CFArrayRef attachmentsArray = CMSampleBufferGetSampleAttachmentsArray(originalBuffer, false);
+    if (attachmentsArray && CFArrayGetCount(attachmentsArray) > 0) {
+        CFDictionaryRef attachments = (CFDictionaryRef)CFArrayGetValueAtIndex(attachmentsArray, 0);
+        if (attachments) {
+            // Converter para NSDictionary para facilitar manipulação
+            NSDictionary *attachmentsDict = (__bridge NSDictionary *)attachments;
+            [metadata setObject:attachmentsDict forKey:@"attachments"];
+        }
+    }
+    
+    // Extrair timing info
+    CMSampleTimingInfo timingInfo;
+    if (CMSampleBufferGetSampleTimingInfo(originalBuffer, 0, &timingInfo) == kCMBlockBufferNoErr) {
+        [metadata setObject:@{
+            @"presentationTimeStamp": @(CMTimeGetSeconds(timingInfo.presentationTimeStamp)),
+            @"duration": @(CMTimeGetSeconds(timingInfo.duration)),
+            @"decodeTimeStamp": CMTIME_IS_VALID(timingInfo.decodeTimeStamp) ?
+                @(CMTimeGetSeconds(timingInfo.decodeTimeStamp)) : @(0)
+        } forKey:@"timingInfo"];
+    }
+    
+    // Extrair informações de formato
+    CMFormatDescriptionRef formatDescription = CMSampleBufferGetFormatDescription(originalBuffer);
+    if (formatDescription) {
+        CMVideoDimensions dimensions = CMVideoFormatDescriptionGetDimensions(formatDescription);
+        [metadata setObject:@{
+            @"width": @(dimensions.width),
+            @"height": @(dimensions.height),
+            @"mediaType": @"video"
+        } forKey:@"formatDescription"];
+        
+        // Extrair extensões de formato se disponíveis
+        CFDictionaryRef extensionsDictionary = CMFormatDescriptionGetExtensions(formatDescription);
+        if (extensionsDictionary) {
+            NSDictionary *extensions = (__bridge NSDictionary *)extensionsDictionary;
+            [metadata setObject:extensions forKey:@"extensions"];
+        }
+    }
+    
+    // Extrair metadados específicos da câmera (exposição, balanço de branco, etc.)
+    CFDictionaryRef metadataDict = CMCopyDictionaryOfAttachments(kCFAllocatorDefault,
+                                                               originalBuffer,
+                                                               kCMAttachmentMode_ShouldPropagate);
+    if (metadataDict) {
+        [metadata setObject:(__bridge NSDictionary *)metadataDict forKey:@"cameraMetadata"];
+        CFRelease(metadataDict);
+    }
+    
+    return metadata;
+}
+
+/**
+ * Aplica metadados previamente extraídos a um sample buffer
+ * Isso permite que o buffer WebRTC tenha os mesmos metadados do buffer da câmera original
+ *
+ * @param sampleBuffer O buffer onde aplicar os metadados
+ * @param metadata Dicionário com metadados a aplicar
+ * @return TRUE se sucesso, FALSE caso contrário
+ */
+- (BOOL)applyMetadataToSampleBuffer:(CMSampleBufferRef)sampleBuffer metadata:(NSDictionary *)metadata {
+    if (!sampleBuffer || !metadata) return NO;
+    
+    BOOL success = YES;
+    
+    // Aplicar attachments
+    NSDictionary *attachmentsDict = metadata[@"attachments"];
+    if (attachmentsDict) {
+        CFArrayRef attachmentsArray = CMSampleBufferGetSampleAttachmentsArray(sampleBuffer, true);
+        if (attachmentsArray && CFArrayGetCount(attachmentsArray) > 0) {
+            CFMutableDictionaryRef attachments = (CFMutableDictionaryRef)CFArrayGetValueAtIndex(attachmentsArray, 0);
+            
+            // Aplicar cada chave do dicionário original
+            [attachmentsDict enumerateKeysAndObjectsUsingBlock:^(id key, id obj, BOOL *stop) {
+                CFDictionarySetValue(attachments, (__bridge const void *)key, (__bridge const void *)obj);
+            }];
+        }
+    }
+    
+    // Aplicar metadados específicos da câmera
+    NSDictionary *cameraMetadata = metadata[@"cameraMetadata"];
+    if (cameraMetadata) {
+        CMSetAttachments(sampleBuffer, (__bridge CFDictionaryRef)cameraMetadata, kCMAttachmentMode_ShouldPropagate);
+    }
+    
+    // Timing info já foi aplicado na criação, não precisamos replicar
+    
+    return success;
 }
 
 #pragma mark - Métodos de Interface Pública

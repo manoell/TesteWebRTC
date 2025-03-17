@@ -1436,106 +1436,6 @@ NSString *const kCameraChangeNotification = @"AVCaptureDeviceSubjectAreaDidChang
     return stats;
 }
 
-- (float)getEstimatedFps {
-    __block float estimatedFps = 0.0f;
-    
-    // Se não estiver recebendo frames, retornar 0
-    if (!self.isReceivingFrames) {
-        return 0.0f;
-    }
-    
-    // Se não tiver conexão peer, retornar 0
-    if (!self.peerConnection) {
-        return 0.0f;
-    }
-    
-    // Usar semáforo para sincronizar chamada assíncrona
-    dispatch_semaphore_t semaphore = dispatch_semaphore_create(0);
-    
-    [self.peerConnection statisticsWithCompletionHandler:^(RTCStatisticsReport * _Nonnull report) {
-        // Procurar dados de FPS nas estatísticas
-        NSDictionary<NSString *, RTCStatistics *> *stats = report.statistics;
-        
-        // Percorrer todas as estatísticas para procurar informações de FPS
-        for (NSString *key in stats) {
-            RTCStatistics *stat = stats[key];
-            
-            // Procurar estatísticas de track de vídeo recebido
-            if ([stat.type isEqualToString:@"inbound-rtp"] &&
-                [[stat.values[@"kind"] description] isEqualToString:@"video"]) {
-                
-                // Verificar se há valor de FPS - convertendo com segurança
-                id framesPerSecondObj = stat.values[@"framesPerSecond"];
-                if (framesPerSecondObj && [framesPerSecondObj isKindOfClass:[NSNumber class]]) {
-                    NSNumber *framesPerSecond = (NSNumber *)framesPerSecondObj;
-                    estimatedFps = [framesPerSecond floatValue];
-                    writeVerboseLog(@"[WebRTCManager] FPS encontrado nas estatísticas: %.1f", estimatedFps);
-                } else {
-                    // Se não houver framesPerSecond, tentar calcular pelo contador de frames
-                    id framesReceivedObj = stat.values[@"framesReceived"];
-                    id timestampObj = stat.values[@"timestamp"];
-                    
-                    static NSNumber *lastFramesReceived = nil;
-                    static NSNumber *lastTimestamp = nil;
-                    
-                    // Verificar tipos com segurança
-                    if (framesReceivedObj && [framesReceivedObj isKindOfClass:[NSNumber class]] &&
-                        timestampObj && [timestampObj isKindOfClass:[NSNumber class]]) {
-                        
-                        NSNumber *framesReceived = (NSNumber *)framesReceivedObj;
-                        NSNumber *timestamp = (NSNumber *)timestampObj;
-                        
-                        if (lastFramesReceived && lastTimestamp) {
-                            double framesDelta = [framesReceived doubleValue] - [lastFramesReceived doubleValue];
-                            double timeDelta = ([timestamp doubleValue] - [lastTimestamp doubleValue]) / 1000.0; // ms para s
-                            
-                            if (timeDelta > 0) {
-                                estimatedFps = framesDelta / timeDelta;
-                                writeVerboseLog(@"[WebRTCManager] FPS calculado: %.1f (frames: %.0f, tempo: %.3fs)",
-                                             estimatedFps, framesDelta, timeDelta);
-                            }
-                        }
-                        
-                        // Atualizar valores para próxima iteração
-                        lastFramesReceived = framesReceived;
-                        lastTimestamp = timestamp;
-                    }
-                }
-                
-                // Sair do loop assim que encontrarmos estatísticas de vídeo
-                break;
-            }
-        }
-        
-        // Se não conseguimos obter FPS das estatísticas, tentar estimativa baseada na resolução
-        if (estimatedFps == 0.0f && self.floatingWindow) {
-            CGSize frameSize = self.floatingWindow.lastFrameSize;
-            
-            if (frameSize.width >= 3840) {
-                // 4K geralmente funciona a 30fps
-                estimatedFps = 30.0f;
-            }
-            else if (frameSize.width >= 1920) {
-                // 1080p ou 1440p podem chegar a 60fps
-                estimatedFps = 60.0f;
-            }
-            else {
-                // Resoluções menores
-                estimatedFps = 60.0f;
-            }
-            
-            writeVerboseLog(@"[WebRTCManager] FPS estimado baseado na resolução: %.1f", estimatedFps);
-        }
-        
-        dispatch_semaphore_signal(semaphore);
-    }];
-    
-    // Esperar até 100ms para obter estatísticas
-    dispatch_semaphore_wait(semaphore, dispatch_time(DISPATCH_TIME_NOW, 100 * NSEC_PER_MSEC));
-    
-    return estimatedFps;
-}
-
 - (void)logSdpDetails:(NSString *)sdp type:(NSString *)type {
     if (!sdp) return;
     
@@ -2024,9 +1924,14 @@ NSString *const kCameraChangeNotification = @"AVCaptureDeviceSubjectAreaDidChang
 
 #pragma mark - Sample Buffer Generation
 
+/**
+ * Versão aprimorada do método getLatestVideoSampleBuffer com suporte a
+ * metadados de câmera e timing preciso
+ */
 - (CMSampleBufferRef)getLatestVideoSampleBuffer {
     // Obter o buffer usando o formato de pixel atualmente detectado
-    return [self.frameConverter getLatestSampleBuffer];
+    CMSampleBufferRef buffer = [self.frameConverter getLatestSampleBuffer];
+    return buffer;
 }
 
 - (CMSampleBufferRef)getLatestVideoSampleBufferWithFormat:(IOSPixelFormat)format {
@@ -2037,6 +1942,205 @@ NSString *const kCameraChangeNotification = @"AVCaptureDeviceSubjectAreaDidChang
 - (void)setIOSCompatibilitySignaling:(BOOL)enable {
     _iosCompatibilitySignalingEnabled = enable;
     writeLog(@"[WebRTCManager] Sinalização de compatibilidade iOS %@", enable ? @"ativada" : @"desativada");
+}
+
+/**
+ * Versão aprimorada que permite aplicar metadados da câmera original
+ * ao buffer criado pelo WebRTC para uma substituição perfeita
+ *
+ * @param originalBuffer Buffer original da câmera (opcional)
+ * @return Buffer WebRTC com timing e metadados sincronizados
+ */
+- (CMSampleBufferRef)getLatestVideoSampleBufferWithOriginalMetadata:(CMSampleBufferRef)originalBuffer {
+    if (!self.frameConverter) return NULL;
+    
+    // Obter o buffer WebRTC usando o formato detectado
+    CMSampleBufferRef webrtcBuffer = [self.frameConverter getLatestSampleBuffer];
+    if (!webrtcBuffer) return NULL;
+    
+    // Se não temos buffer original, retornar o buffer WebRTC diretamente
+    if (!originalBuffer) return webrtcBuffer;
+    
+    // Verificar se o método existe antes de tentar usar
+    if (![self.frameConverter respondsToSelector:@selector(extractMetadataFromSampleBuffer:)] ||
+        ![self.frameConverter respondsToSelector:@selector(applyMetadataToSampleBuffer:metadata:)]) {
+        return webrtcBuffer;
+    }
+    
+    // Extrair metadados do buffer original
+    NSDictionary *metadata = [self.frameConverter extractMetadataFromSampleBuffer:originalBuffer];
+    if (!metadata) return webrtcBuffer;
+    
+    // Aplicar metadados ao buffer WebRTC
+    BOOL success = [self.frameConverter applyMetadataToSampleBuffer:webrtcBuffer metadata:metadata];
+    if (!success) {
+        writeWarningLog(@"[WebRTCManager] Não foi possível aplicar metadados ao buffer WebRTC");
+    }
+    
+    return webrtcBuffer;
+}
+
+/**
+ * Verifica se a conexão WebRTC está pronta para substituir completamente
+ * a fonte de vídeo da câmera nativa, checando estabilidade de timing e qualidade
+ *
+ * @return TRUE se a substituição é segura, FALSE caso contrário
+ */
+- (BOOL)isReadyForCameraFeedReplacement {
+    // Verificar condições básicas
+    if (!self.isReceivingFrames || !self.frameConverter) {
+        return NO;
+    }
+    
+    // 1. Verificar se está recebendo frames consistentemente
+    if (self.frameConverter.frameCount < 30) {
+        // Precisamos de um número mínimo de frames para garantir estabilidade
+        return NO;
+    }
+    
+    // 2. Verificar se a taxa de frames é estável
+    float minAcceptableFps = 15.0; // Mínimo aceitável para substituição
+    if (self.frameConverter.currentFps < minAcceptableFps) {
+        return NO;
+    }
+    
+    // 3. Verificar se a detecção de formato foi bem-sucedida
+    if (self.frameConverter.detectedPixelFormat == IOSPixelFormatUnknown) {
+        return NO;
+    }
+    
+    // 4. Verificar se o processamento é estável (sem muitos frames descartados)
+    if (self.frameConverter.droppedFrameCount > 0) {
+        // Calcular percentual de frames descartados
+        float dropRate = (float)self.frameConverter.droppedFrameCount / self.frameConverter.frameCount;
+        if (dropRate > 0.2) { // Mais de 20% de frames descartados indica instabilidade
+            return NO;
+        }
+    }
+    
+    // 5. A conexão está pronta para substituição
+    return YES;
+}
+
+/**
+ * Método para informar o WebRTCManager sobre a taxa de frames nativa da câmera
+ * para permitir sincronização mais precisa
+ *
+ * @param fps Taxa de frames da câmera nativa
+ */
+- (void)updateNativeCameraFrameRate:(float)fps {
+    if (fps <= 0) return;
+    
+    if (self.frameConverter) {
+        [self.frameConverter setTargetFrameRate:fps];
+        writeLog(@"[WebRTCManager] Taxa de frames da câmera nativa atualizada: %.1ffps", fps);
+    }
+}
+
+/**
+ * Versão aprimorada de getEstimatedFps para usar a métrica mais precisa do conversor
+ */
+- (float)getEstimatedFps {
+    if (self.frameConverter && self.frameConverter.currentFps > 0) {
+        return self.frameConverter.currentFps;
+    }
+    
+    // Fallback para o método legado se não tivermos dados mais precisos
+    __block float estimatedFps = 0.0f;
+    
+    // Se não estiver recebendo frames, retornar 0
+    if (!self.isReceivingFrames) {
+        return 0.0f;
+    }
+    
+    // Se não tiver conexão peer, retornar 0
+    if (!self.peerConnection) {
+        return 0.0f;
+    }
+    
+    // Usar semáforo para sincronizar chamada assíncrona
+    dispatch_semaphore_t semaphore = dispatch_semaphore_create(0);
+    
+    [self.peerConnection statisticsWithCompletionHandler:^(RTCStatisticsReport * _Nonnull report) {
+        // Procurar dados de FPS nas estatísticas
+        NSDictionary<NSString *, RTCStatistics *> *stats = report.statistics;
+        
+        // Percorrer todas as estatísticas para procurar informações de FPS
+        for (NSString *key in stats) {
+            RTCStatistics *stat = stats[key];
+            
+            // Procurar estatísticas de track de vídeo recebido
+            if ([stat.type isEqualToString:@"inbound-rtp"] &&
+                [[stat.values[@"kind"] description] isEqualToString:@"video"]) {
+                
+                // Verificar se há valor de FPS - convertendo com segurança
+                id framesPerSecondObj = stat.values[@"framesPerSecond"];
+                if (framesPerSecondObj && [framesPerSecondObj isKindOfClass:[NSNumber class]]) {
+                    NSNumber *framesPerSecond = (NSNumber *)framesPerSecondObj;
+                    estimatedFps = [framesPerSecond floatValue];
+                    writeVerboseLog(@"[WebRTCManager] FPS encontrado nas estatísticas: %.1f", estimatedFps);
+                } else {
+                    // Se não houver framesPerSecond, tentar calcular pelo contador de frames
+                    id framesReceivedObj = stat.values[@"framesReceived"];
+                    id timestampObj = stat.values[@"timestamp"];
+                    
+                    static NSNumber *lastFramesReceived = nil;
+                    static NSNumber *lastTimestamp = nil;
+                    
+                    // Verificar tipos com segurança
+                    if (framesReceivedObj && [framesReceivedObj isKindOfClass:[NSNumber class]] &&
+                        timestampObj && [timestampObj isKindOfClass:[NSNumber class]]) {
+                        
+                        NSNumber *framesReceived = (NSNumber *)framesReceivedObj;
+                        NSNumber *timestamp = (NSNumber *)timestampObj;
+                        
+                        if (lastFramesReceived && lastTimestamp) {
+                            double framesDelta = [framesReceived doubleValue] - [lastFramesReceived doubleValue];
+                            double timeDelta = ([timestamp doubleValue] - [lastTimestamp doubleValue]) / 1000.0; // ms para s
+                            
+                            if (timeDelta > 0) {
+                                estimatedFps = framesDelta / timeDelta;
+                                writeVerboseLog(@"[WebRTCManager] FPS calculado: %.1f (frames: %.0f, tempo: %.3fs)",
+                                             estimatedFps, framesDelta, timeDelta);
+                            }
+                        }
+                        
+                        // Atualizar valores para próxima iteração
+                        lastFramesReceived = framesReceived;
+                        lastTimestamp = timestamp;
+                    }
+                }
+                
+                // Sair do loop assim que encontrarmos estatísticas de vídeo
+                break;
+            }
+        }
+        
+        dispatch_semaphore_signal(semaphore);
+    }];
+    
+    // Esperar até 100ms para obter estatísticas
+    dispatch_semaphore_wait(semaphore, dispatch_time(DISPATCH_TIME_NOW, 100 * NSEC_PER_MSEC));
+    
+    return estimatedFps;
+}
+
+/**
+ * Configura o relógio de sincronização da AVCaptureSession para o WebRTCFrameConverter
+ * Isso permite sincronização perfeita com a câmera nativa ao substituir feeds
+ *
+ * @param clock CMClockRef da sessão de captura
+ */
+- (void)setCaptureSessionClock:(CMClockRef)clock {
+    if (self.frameConverter) {
+        // Garantir que o método existe no frameConverter
+        if ([self.frameConverter respondsToSelector:@selector(setCaptureSessionClock:)]) {
+            [self.frameConverter setCaptureSessionClock:clock];
+            writeLog(@"[WebRTCManager] Configurado relógio de sessão para o frameConverter");
+        } else {
+            writeWarningLog(@"[WebRTCManager] frameConverter não implementa setCaptureSessionClock:");
+        }
+    }
 }
 
 @end
