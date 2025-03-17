@@ -321,8 +321,10 @@ function setupAdaptiveQuality() {
     
     let lastQualityCheckTime = Date.now();
     let connectionIssues = 0;
+    let lastFrameCount = 0;
+    let freezeDetectionCount = 0;
     
-    // Monitor de qualidade a cada 5 segundos
+    // Monitor de qualidade a cada 3 segundos
     const qualityInterval = setInterval(async () => {
         if (!peerConnection || !startButton.disabled) {
             clearInterval(qualityInterval);
@@ -334,22 +336,43 @@ function setupAdaptiveQuality() {
             let packetLoss = 0;
             let jitter = 0;
             let roundTripTime = 0;
+            let framesReceived = 0;
+            let framesDropped = 0;
             
             stats.forEach(stat => {
                 // Monitor de qualidade da conexão
-                if (stat.type === 'remote-inbound-rtp' && stat.kind === 'video') {
+                if (stat.type === 'outbound-rtp' && stat.kind === 'video') {
                     packetLoss = stat.packetsLost || 0;
-                    jitter = stat.jitter || 0;
+                    framesReceived = stat.framesEncoded || 0;
+                    framesDropped = stat.framesDropped || 0;
                 } else if (stat.type === 'candidate-pair' && stat.state === 'succeeded') {
                     roundTripTime = stat.currentRoundTripTime || 0;
+                    jitter = stat.jitter || 0;
                 }
             });
             
             const now = Date.now();
+            // Detecção de congelamento (se framesReceived não está aumentando)
+            if (lastFrameCount > 0 && framesReceived === lastFrameCount) {
+                freezeDetectionCount++;
+                console.warn(`Possível congelamento de vídeo detectado (${freezeDetectionCount}/3)`);
+                
+                if (freezeDetectionCount >= 3) {
+                    console.log("Congelamento de vídeo confirmado, tentando reiniciar stream");
+                    resetVideoStream();
+                    freezeDetectionCount = 0;
+                }
+            } else {
+                // Reset do contador se está recebendo frames
+                freezeDetectionCount = 0;
+            }
+            
+            lastFrameCount = framesReceived;
+            
             // Se temos problemas de conexão
-            if (packetLoss > 5 || jitter > 0.05 || roundTripTime > 0.3) {
+            if (packetLoss > 10 || jitter > 0.05 || roundTripTime > 0.3 || framesDropped > 5) {
                 connectionIssues++;
-                console.warn(`Problemas de conexão detectados: perda=${packetLoss}, jitter=${jitter}, RTT=${roundTripTime}`);
+                console.warn(`Problemas de conexão detectados: perda=${packetLoss}, jitter=${jitter}, RTT=${roundTripTime}, framesDropped=${framesDropped}`);
                 
                 // Se persistirem, tentar reconectar
                 if (connectionIssues >= 3 && (now - lastQualityCheckTime > 15000)) {
@@ -365,7 +388,7 @@ function setupAdaptiveQuality() {
         } catch (e) {
             console.error("Erro ao verificar qualidade da conexão:", e);
         }
-    }, 5000);
+    }, 3000); // Reduzido de 5s para 3s para detecção mais rápida
 }
 
 // Iniciar monitoramento de estatísticas
@@ -473,45 +496,69 @@ function startConnectionHealthCheck() {
 }
 
 // Adicione esta função no arquivo main.js
-function resetVideoStream() {
-    console.log("Resetando stream de vídeo após reconexão");
+async function resetVideoStream() {
+    console.log("Resetando stream de vídeo após problemas de conexão");
     
-    // Se temos um peerConnection ativo, primeiro limpamos a conexão atual
-    if (peerConnection) {
-        try {
-            // Remover a track existente do peerConnection
-            const senders = peerConnection.getSenders();
-            senders.forEach(sender => {
-                try {
-                    peerConnection.removeTrack(sender);
-                } catch (e) {
-                    console.warn("Erro ao remover track:", e);
+    try {
+        // 1. Fechar a conexão peer existente
+        if (peerConnection) {
+            try {
+                // Remover all tracks
+                const senders = peerConnection.getSenders();
+                for (const sender of senders) {
+                    try {
+                        peerConnection.removeTrack(sender);
+                    } catch (e) {
+                        console.warn("Erro ao remover track:", e);
+                    }
                 }
-            });
-            
-            // Fechar conexão peer para liberar recursos
-            peerConnection.close();
-        } catch (e) {
-            console.error("Erro ao limpar peerConnection:", e);
+                
+                // Fechar a conexão
+                peerConnection.close();
+                peerConnection = null;
+            } catch (e) {
+                console.error("Erro ao fechar conexão peer:", e);
+            }
         }
-        peerConnection = null;
-    }
-    
-    // Adicionar um pequeno delay antes de reconstruir
-    setTimeout(() => {
-        // Reconstruir a conexão peer
-        setupPeerConnection();
         
-        // Se ainda temos o stream local, readicionar suas tracks
+        // 2. Limpar WebSocket atual e reconectar
+        if (ws) {
+            try {
+                const oldWs = ws;
+                ws = null;
+                oldWs.close();
+            } catch (e) {
+                console.warn("Erro ao fechar WebSocket:", e);
+            }
+        }
+        
+        // Esperar um pouco para garantir limpeza
+        await new Promise(resolve => setTimeout(resolve, 1000));
+        
+        // 3. Restablecer stream local se necessário
         if (localStream) {
-            localStream.getTracks().forEach(track => {
-                console.log(`Readicionando track: ${track.kind}`);
-                peerConnection.addTrack(track, localStream);
-            });
+            try {
+                // Opcionalmente, também podemos reiniciar o stream local
+                const tracks = localStream.getTracks();
+                tracks.forEach(track => track.stop());
+                
+                // Obter stream de novo
+                await getLocalMediaStream();
+            } catch (e) {
+                console.error("Erro ao reiniciar stream local:", e);
+            }
         }
         
-        connectionInfo.textContent = 'Status da conexão: Reconectado, aguardando dispositivos';
-    }, 1000); // Delay de 1 segundo para garantir limpeza adequada
+        // 4. Recriar a conexão peer
+        await setupPeerConnection();
+        
+        // 5. Reconectar ao servidor
+        connectWebSocket();
+        
+        connectionInfo.textContent = 'Status da conexão: Reconectado, aguardando negociação';
+    } catch (e) {
+        console.error("Erro ao resetar stream de vídeo:", e);
+    }
 }
 
 // Conectar ao servidor WebSocket com reconexão automática
@@ -755,13 +802,13 @@ async function createAndSendOffer(optimizeForIOS = false) {
         let sdp = offer.sdp;
         
         // Obter bitrate apropriado baseado na qualidade selecionada
-        let bitrate = 5000; // Padrão 5Mbps
-        switch(videoQuality.value) {
-            case '2160p': bitrate = 12000; break; // 12Mbps para 4K
-            case '1440p': bitrate = 8000; break;  // 8Mbps para 1440p
-            case '1080p': bitrate = 5000; break;  // 5Mbps para 1080p
-            case '720p': bitrate = 2500; break;   // 2.5Mbps para 720p
-        }
+		let bitrate = 20000; // 20Mbps para 4K
+		switch(videoQuality.value) {
+			case '2160p': bitrate = 20000; break; // 20Mbps para 4K 
+			case '1440p': bitrate = 12000; break; // 12Mbps para 1440p
+			case '1080p': bitrate = 8000; break;  // 8Mbps para 1080p
+			case '720p': bitrate = 5000; break;   // 5Mbps para 720p
+		}
         
         // Aplicar modificações SDP com base nas configurações
         sdp = setMediaBitrate(sdp, 'video', bitrate);
@@ -800,7 +847,8 @@ async function createAndSendOffer(optimizeForIOS = false) {
             codec: videoCodec.value,
             profile: h264Profile.value,
             pixelFormat: pixelFormat.value,
-            optimizedForIOS: optimizeForIOS || iosOptimize.checked
+            optimizedForIOS: optimizeForIOS || iosOptimize.checked,
+            resolution: videoQuality.value
         };
 
         sendMessage({

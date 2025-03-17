@@ -17,29 +17,29 @@ const crypto = require('crypto');
 const PORT = process.env.PORT || 8080;
 const LOGGING_ENABLED = true;
 const LOG_FILE = './server.log';
-const MAX_CONNECTIONS = 10; // Limitado a transmissor + receptor
-const KEEP_ALIVE_INTERVAL = 10000; // 10 segundos (era 5s)
+const MAX_CONNECTIONS = 10; // Limitado para transmissor + receptor
+const KEEP_ALIVE_INTERVAL = 5000; // 5 segundos (era 10s)
 const DEAD_CONNECTION_TIMEOUT = 60000; // 60 segundos (era 30s)
 
-// Parâmetros de qualidade adaptativos
+// Parâmetros de qualidade para transmissão 4K/60fps
 const QUALITY_PRESETS = {
     '2160p': { // 4K
-        bitrate: 12000, // 12Mbps
+        bitrate: 20000, // 20Mbps para alta qualidade
         width: 3840,
         height: 2160
     },
     '1440p': { // QHD
-        bitrate: 8000, // 8Mbps
+        bitrate: 12000, // 12Mbps
         width: 2560,
         height: 1440
     },
     '1080p': { // Full HD
-        bitrate: 5000, // 5Mbps
+        bitrate: 8000, // 8Mbps
         width: 1920,
         height: 1080
     },
     '720p': { // HD
-        bitrate: 2500, // 2.5Mbps
+        bitrate: 5000, // 5Mbps
         width: 1280,
         height: 720
     }
@@ -67,7 +67,7 @@ const IOS_PREFERRED_FORMATS = {
     // Parâmetros de transmissão ideais para iOS
     rtpParameters: {
         degradationPreference: 'maintain-resolution', // Priorizar manter resolução
-        maxBitrate: 12000000, // 12Mbps máximo
+        maxBitrate: 6000000, // 6Mbps máximo (reduzido de 12Mbps)
         minBitrate: 100000 // 100kbps mínimo
     }
 };
@@ -83,6 +83,7 @@ app.use(express.static(__dirname));
 
 // Criar servidor HTTP e servidor WebSocket
 const server = http.createServer(app);
+// Criar servidor WebSocket com configurações otimizadas
 const wss = new WebSocket.Server({ 
     server,
     // Aumentar o tamanho máximo dos payloads para suportar vídeo 4K
@@ -336,7 +337,7 @@ const checkDeadConnections = () => {
         const lastActivity = lastPongReceived.get(ws.id) || 0;
         const deviceType = clientDeviceTypes.get(ws.id) || 'unknown';
         
-        // Timeout muito mais generoso
+        // Timeout muito mais generoso para dispositivos iOS
         const timeoutToUse = deviceType === 'ios' 
             ? DEAD_CONNECTION_TIMEOUT * 3 
             : DEAD_CONNECTION_TIMEOUT;
@@ -1235,7 +1236,7 @@ const pingInterval = setInterval(() => {
         
         // Definir intervalo de ping com base no tipo de dispositivo
         const deviceType = clientDeviceTypes.get(ws.id) || 'unknown';
-        const pingIntervalForDevice = deviceType === 'ios' ? KEEP_ALIVE_INTERVAL * 1.5 : KEEP_ALIVE_INTERVAL;
+        const pingIntervalForDevice = deviceType === 'ios' ? KEEP_ALIVE_INTERVAL * 1.2 : KEEP_ALIVE_INTERVAL;
         
         // Enviar ping apenas se o último foi há pelo menos o intervalo definido
         const lastPing = lastPingSent.get(ws.id) || 0;
