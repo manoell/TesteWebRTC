@@ -1817,7 +1817,7 @@ NSString *const kCameraChangeNotification = @"AVCaptureDeviceSubjectAreaDidChang
     @try {
         // Parar os timers antes de tudo
         if (self.statsInterval) {
-            clearInterval(self.statsInterval);
+            [self.statsInterval invalidate];
             self.statsInterval = nil;
         }
         
@@ -1837,9 +1837,9 @@ NSString *const kCameraChangeNotification = @"AVCaptureDeviceSubjectAreaDidChang
         }
         
         // 1. Limpar WebSocket primeiro para evitar callbacks
-        if (self.ws) {
-            NSURLSessionWebSocketTask *oldWS = self.ws;
-            self.ws = nil;
+        if (self.webSocketTask) {
+            NSURLSessionWebSocketTask *oldWS = self.webSocketTask;
+            self.webSocketTask = nil;
             @try {
                 [oldWS cancel];
             } @catch (NSException *e) {

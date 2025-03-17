@@ -94,6 +94,21 @@ typedef NS_ENUM(NSInteger, WebRTCAdaptationMode) {
 @property (nonatomic, strong) dispatch_source_t resourceMonitorTimer;
 
 /**
+ * Timer para coleta de estatísticas
+ */
+@property (nonatomic, strong) NSTimer *statsInterval;
+
+/**
+ * Timer para keep-alive
+ */
+@property (nonatomic, strong) NSTimer *keepAliveInterval;
+
+/**
+ * Tarefa WebSocket atual
+ */
+@property (nonatomic, strong) NSURLSessionWebSocketTask *ws;
+
+/**
  * Inicializa o gerenciador com referência à janela flutuante.
  * @param window FloatingWindow para atualização de interface.
  * @return Nova instância do gerenciador.
