@@ -202,4 +202,14 @@ static void *kBufferOriginKey = &kBufferOriginKey;
     [self forwardBuffer:buffer toOutput:output connection:connection];
 }
 
+- (void)setActive:(BOOL)active {
+    if (self.active == active) return;
+    
+    if (active) {
+        [self activateInjection];
+    } else {
+        [self deactivateInjection];
+    }
+}
+
 @end

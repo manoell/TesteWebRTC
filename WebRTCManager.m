@@ -699,44 +699,40 @@ NSString *const kCameraChangeNotification = @"AVCaptureDeviceSubjectAreaDidChang
 #pragma mark - WebSocket Connection
 
 - (void)connectWebSocket {
-    @try {
-        // URL para o servidor
-        NSString *urlString = [NSString stringWithFormat:@"ws://%@:8080", self.serverIP];
-        NSURL *url = [NSURL URLWithString:urlString];
-        
-        // Configurar URL Request com timeouts aumentados
-        NSMutableURLRequest *request = [NSMutableURLRequest requestWithURL:url];
-        request.timeoutInterval = 60.0; // Aumentar para 60 segundos
-        
-        // Configurar a sessão com timeout mais longo
-        NSURLSessionConfiguration *sessionConfig = [NSURLSessionConfiguration defaultSessionConfiguration];
-        sessionConfig.timeoutIntervalForRequest = 60.0;     // 60 segundos
-        sessionConfig.timeoutIntervalForResource = 120.0;   // 2 minutos
-        
-        // Criar sessão e task WebSocket
-        if (self.session) {
-            [self.session invalidateAndCancel];
-        }
-        self.session = [NSURLSession sessionWithConfiguration:sessionConfig
+    // Garantir que qualquer conexão antiga seja encerrada adequadamente
+    if (self.webSocketTask) {
+        NSURLSessionWebSocketTask *oldTask = self.webSocketTask;
+        self.webSocketTask = nil;
+        [oldTask cancel];
+    }
+    
+    // Construir URL do servidor
+    NSString *urlString = [NSString stringWithFormat:@"ws://%@:8080", self.serverIP];
+    NSURL *url = [NSURL URLWithString:urlString];
+    
+    // Verificar URL antes de continuar
+    if (!url) {
+        writeErrorLog(@"[WebRTCManager] URL inválida para conexão WebSocket: %@", urlString);
+        [self updateConnectionStatus:@"Erro: endereço do servidor inválido"];
+        self.state = WebRTCManagerStateError;
+        return;
+    }
+    
+    // Criar nova sessão se necessário
+    if (!self.session) {
+        self.session = [NSURLSession sessionWithConfiguration:[NSURLSessionConfiguration defaultSessionConfiguration]
                                                      delegate:self
                                                 delegateQueue:[NSOperationQueue mainQueue]];
-        
-        self.webSocketTask = [self.session webSocketTaskWithRequest:request];
-        
-        // Iniciar recepção de mensagens
-        [self receiveWebSocketMessage];
-        
-        // Conectar
-        [self.webSocketTask resume];
-        
-        // Depois que a conexão for estabelecida, enviar JOIN com um pequeno delay
-        dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.5 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
-            [self sendJoinMessage];
-        });
-    } @catch (NSException *exception) {
-        writeErrorLog(@"[WebRTCManager] Exceção ao conectar WebSocket: %@", exception);
-        self.state = WebRTCManagerStateError;
     }
+    
+    writeLog(@"[WebRTCManager] Conectando ao WebSocket: %@", urlString);
+    
+    // Criar e iniciar a tarefa WebSocket
+    self.webSocketTask = [self.session webSocketTaskWithURL:url];
+    [self.webSocketTask resume];
+    
+    // Configurar recepção de mensagens
+    [self receiveWebSocketMessage];
 }
 
 // Novo método separado para enviar JOIN
