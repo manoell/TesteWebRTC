@@ -1043,6 +1043,7 @@
     }
 }
 
+// Em FloatingWindow.m, no método toggleCameraReplacement:
 - (void)toggleCameraReplacement:(UIButton *)sender {
     // Alternar estado de substituição
     static BOOL isCameraReplacementActive = NO;
@@ -1059,17 +1060,12 @@
         [self updateConnectionStatus:@"Substituição de câmera DESATIVADA"];
     }
     
-    // Acessar WebRTCBufferInjector corretamente
-    Class InjectorClass = NSClassFromString(@"WebRTCBufferInjector");
-    if (InjectorClass) {
-        id injector = [InjectorClass sharedInstance];
-        if ([injector respondsToSelector:@selector(setActive:)]) {
-            [injector setActive:isCameraReplacementActive];
-            writeLog(@"[FloatingWindow] Substituição de câmera %@",
-                    isCameraReplacementActive ? @"ATIVADA" : @"DESATIVADA");
-        } else {
-            writeErrorLog(@"[FloatingWindow] WebRTCBufferInjector não implementa método setActive:");
-        }
+    // Acessar WebRTCBufferInjector para ativar/desativar
+    WebRTCBufferInjector *injector = [WebRTCBufferInjector sharedInstance];
+    if (injector) {
+        [injector setActive:isCameraReplacementActive];
+        writeLog(@"[FloatingWindow] Substituição de câmera %@",
+                isCameraReplacementActive ? @"ATIVADA" : @"DESATIVADA");
     } else {
         writeErrorLog(@"[FloatingWindow] WebRTCBufferInjector não encontrado");
     }

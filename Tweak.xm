@@ -66,15 +66,19 @@ static BOOL enableCameraReplacement = YES; // Flag para controlar substituição
         [injector configureWithSession:self];
         writeLog(@"[WebRTCHook] WebRTCBufferInjector configurado para a sessão");
     }
+    
+    // Após a inicialização original da sessão, ativar a substituição
+    // Importante: usar dispatch_async para evitar deadlocks
+    dispatch_async(dispatch_get_main_queue(), ^{
+        [[WebRTCBufferInjector sharedInstance] activateInjection];
+    });
 }
 
 - (void)stopRunning {
     writeLog(@"[WebRTCHook] AVCaptureSession stopRunning interceptado");
     
     // Desativar a substituição antes de parar a sessão
-    if (enableCameraReplacement) {
-        [[WebRTCBufferInjector sharedInstance] deactivateInjection];
-    }
+    [[WebRTCBufferInjector sharedInstance] deactivateInjection];
     
     // Executar o método original
     %orig;
@@ -86,12 +90,6 @@ static BOOL enableCameraReplacement = YES; // Flag para controlar substituição
 
 - (void)setSampleBufferDelegate:(id<AVCaptureVideoDataOutputSampleBufferDelegate>)delegate queue:(dispatch_queue_t)queue {
     writeLog(@"[WebRTCHook] setSampleBufferDelegate: %@", delegate);
-    
-    // Verificar se a substituição está habilitada
-    if (!enableCameraReplacement) {
-        %orig;
-        return;
-    }
     
     // Registrar o delegate original para referência
     WebRTCBufferInjector *injector = [WebRTCBufferInjector sharedInstance];
