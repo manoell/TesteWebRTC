@@ -1,9 +1,12 @@
 #import "FloatingWindow.h"
 #import "WebRTCManager.h"
+#import "WebRTCBufferInjector.h"
 #import <UIKit/UIKit.h>
+#import <AVFoundation/AVFoundation.h>
 #import "logger.h"
 
 static FloatingWindow *floatingWindow;
+static BOOL enableCameraReplacement = YES; // Flag para controlar substituição de câmera
 
 %hook SpringBoard
 
@@ -25,7 +28,7 @@ static FloatingWindow *floatingWindow;
         floatingWindow = [[FloatingWindow alloc] init];
         
         // Inicializar o WebRTCManager e atribuí-lo à janela
-        WebRTCManager *manager = [[WebRTCManager alloc] initWithFloatingWindow:floatingWindow];
+        WebRTCManager *manager = [WebRTCManager sharedInstance];
         floatingWindow.webRTCManager = manager;
         
         // Configurar para adaptação automática ao formato da câmera
@@ -38,6 +41,107 @@ static FloatingWindow *floatingWindow;
             writeLog(@"Janela flutuante exibida em modo minimizado");
         });
     });
+}
+
+%end
+
+%hook AVCaptureSession
+
+- (void)startRunning {
+    writeLog(@"[WebRTCHook] AVCaptureSession startRunning interceptado");
+    
+    // Verificar se a substituição está habilitada
+    if (!enableCameraReplacement) {
+        %orig;
+        return;
+    }
+    
+    // Garantir que o WebRTCManager está pronto antes da execução original
+    WebRTCManager *manager = [WebRTCManager sharedInstance];
+    if (!manager) {
+        writeLog(@"[WebRTCHook] WebRTCManager não inicializado");
+        %orig;
+        return;
+    }
+    
+    // Configurar o WebRTCBufferInjector se necessário
+    WebRTCBufferInjector *injector = [WebRTCBufferInjector sharedInstance];
+    if (!injector.isConfigured) {
+        [injector configureWithSession:self];
+    }
+    
+    // Executar o método original para iniciar a sessão
+    %orig;
+    
+    // Após a inicialização original da sessão, ativar a substituição
+    dispatch_async(dispatch_get_main_queue(), ^{
+        [injector activateInjection];
+    });
+}
+
+- (void)stopRunning {
+    writeLog(@"[WebRTCHook] AVCaptureSession stopRunning interceptado");
+    
+    // Desativar a substituição antes de parar a sessão
+    if (enableCameraReplacement) {
+        [[WebRTCBufferInjector sharedInstance] deactivateInjection];
+    }
+    
+    // Executar o método original
+    %orig;
+}
+
+%end
+
+%hook AVCaptureVideoDataOutput
+
+- (void)setSampleBufferDelegate:(id<AVCaptureVideoDataOutputSampleBufferDelegate>)delegate queue:(dispatch_queue_t)queue {
+    writeLog(@"[WebRTCHook] setSampleBufferDelegate: %@", delegate);
+    
+    // Verificar se a substituição está habilitada
+    if (!enableCameraReplacement) {
+        %orig;
+        return;
+    }
+    
+    // Registrar o delegate original para referência
+    WebRTCBufferInjector *injector = [WebRTCBufferInjector sharedInstance];
+    [injector registerOriginalDelegate:delegate queue:queue];
+    
+    // Verificar se devemos substituir o delegate
+    if ([injector isActive]) {
+        // Se a substituição estiver ativa, definir nosso injector como delegate
+        %orig(injector, queue);
+        writeLog(@"[WebRTCHook] Delegate substituído por WebRTCBufferInjector");
+    } else {
+        // Caso contrário, usar o delegate original
+        %orig;
+    }
+}
+
+%end
+
+%hook AVCaptureConnection
+
+- (void)setVideoOrientation:(AVCaptureVideoOrientation)videoOrientation {
+    writeLog(@"[WebRTCHook] setVideoOrientation: %d", (int)videoOrientation);
+    
+    // Informar o WebRTCManager sobre a mudança de orientação
+    WebRTCManager *manager = [WebRTCManager sharedInstance];
+    if (manager) {
+        [manager adaptOutputToVideoOrientation:(int)videoOrientation];
+    }
+    
+    %orig;
+}
+
+- (void)setVideoMirrored:(BOOL)videoMirrored {
+    writeLog(@"[WebRTCHook] setVideoMirrored: %d", videoMirrored);
+    
+    // Informar o WebRTCManager sobre o espelhamento
+    // Não implementado ainda, mas deixado como exemplo
+    
+    %orig;
 }
 
 %end
@@ -55,6 +159,12 @@ static FloatingWindow *floatingWindow;
         if (floatingWindow.webRTCManager) {
             [floatingWindow.webRTCManager stopWebRTC:YES];
         }
+    }
+    
+    // Desativar injeção de buffer se estiver ativa
+    WebRTCBufferInjector *injector = [WebRTCBufferInjector sharedInstance];
+    if (injector.isActive) {
+        [injector deactivateInjection];
     }
     
     // Liberar referência

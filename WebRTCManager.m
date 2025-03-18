@@ -28,9 +28,23 @@ NSString *const kCameraChangeNotification = @"AVCaptureDeviceSubjectAreaDidChang
 
 // Timer management
 @property (nonatomic, strong) NSTimer *statsTimer;
+
+@property (nonatomic, assign) BOOL videoMirrored;
 @end
 
 @implementation WebRTCManager
+
+#pragma mark - Singleton Implementation
+
++ (instancetype)sharedInstance {
+    static WebRTCManager *instance = nil;
+    static dispatch_once_t onceToken;
+    dispatch_once(&onceToken, ^{
+        // Criar instância sem FloatingWindow para uso como singleton
+        instance = [[self alloc] initWithFloatingWindow:nil];
+    });
+    return instance;
+}
 
 #pragma mark - Initialization & Lifecycle
 
@@ -1939,6 +1953,55 @@ NSString *const kCameraChangeNotification = @"AVCaptureDeviceSubjectAreaDidChang
     return [self.frameConverter getLatestSampleBufferWithFormat:format];
 }
 
+- (void)adaptOutputToVideoOrientation:(int)orientation {
+    // Orientação só é relevante se tivermos buffer converter
+    if (!self.frameConverter) return;
+    
+    writeVerboseLog(@"[WebRTCManager] Adaptando saída para orientação %d", orientation);
+    
+    // Atualizar orientação nos metadados
+    NSString *orientationStr;
+    switch (orientation) {
+        case 1: // AVCaptureVideoOrientationPortrait
+            orientationStr = @"Portrait";
+            break;
+        case 2: // AVCaptureVideoOrientationPortraitUpsideDown
+            orientationStr = @"PortraitUpsideDown";
+            break;
+        case 3: // AVCaptureVideoOrientationLandscapeRight
+            orientationStr = @"LandscapeRight";
+            break;
+        case 4: // AVCaptureVideoOrientationLandscapeLeft
+            orientationStr = @"LandscapeLeft";
+            break;
+        default:
+            orientationStr = @"Unknown";
+    }
+    
+    if (self.floatingWindow) {
+        dispatch_async(dispatch_get_main_queue(), ^{
+            [self.floatingWindow updateConnectionStatus:[NSString stringWithFormat:@"Orientação: %@", orientationStr]];
+        });
+    }
+}
+
+- (void)setVideoMirrored:(BOOL)mirrored {
+    writeLog(@"[WebRTCManager] Configurando espelhamento de vídeo: %@", mirrored ? @"SIM" : @"NÃO");
+    
+    // Armazenar configuração para uso ao processar frames
+    _videoMirrored = mirrored;
+    
+    // Atualizar configuração no frameConverter
+    [self setMirrorOutput:mirrored];
+    
+    // Atualizar status na FloatingWindow
+    if (self.floatingWindow) {
+        dispatch_async(dispatch_get_main_queue(), ^{
+            [self.floatingWindow updateConnectionStatus:[NSString stringWithFormat:@"Espelhamento: %@", mirrored ? @"Ativado" : @"Desativado"]];
+        });
+    }
+}
+
 - (void)setIOSCompatibilitySignaling:(BOOL)enable {
     _iosCompatibilitySignalingEnabled = enable;
     writeLog(@"[WebRTCManager] Sinalização de compatibilidade iOS %@", enable ? @"ativada" : @"desativada");
@@ -2139,6 +2202,18 @@ NSString *const kCameraChangeNotification = @"AVCaptureDeviceSubjectAreaDidChang
             writeLog(@"[WebRTCManager] Configurado relógio de sessão para o frameConverter");
         } else {
             writeWarningLog(@"[WebRTCManager] frameConverter não implementa setCaptureSessionClock:");
+        }
+    }
+}
+
+- (void)setMirrorOutput:(BOOL)mirror {
+    // Apenas encaminhar chamada para o frameConverter
+    if (self.frameConverter) {
+        // Só chamamos se o frameConverter já tiver o método
+        if ([self.frameConverter respondsToSelector:@selector(setMirrorOutput:)]) {
+            [self.frameConverter setMirrorOutput:mirror];
+        } else {
+            writeWarningLog(@"[WebRTCManager] frameConverter não implementa setMirrorOutput:");
         }
     }
 }

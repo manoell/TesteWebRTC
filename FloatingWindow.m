@@ -31,6 +31,9 @@
 @property (nonatomic, strong) NSString *currentPixelFormat;
 @property (nonatomic, strong) NSString *currentProcessingMode;
 
+@property (nonatomic, strong) UIButton *replacementButton;
+@property (nonatomic, assign) BOOL isCameraReplacementActive;
+
 @end
 
 @implementation FloatingWindow
@@ -276,6 +279,23 @@
         [self.toggleButton.trailingAnchor constraintEqualToAnchor:self.buttonContainer.trailingAnchor],
         [self.toggleButton.topAnchor constraintEqualToAnchor:self.buttonContainer.topAnchor],
         [self.toggleButton.bottomAnchor constraintEqualToAnchor:self.buttonContainer.bottomAnchor],
+    ]];
+    
+    // Botão de substituição de câmera
+    self.replacementButton = [UIButton buttonWithType:UIButtonTypeSystem];
+    self.replacementButton.translatesAutoresizingMaskIntoConstraints = NO;
+    [self.replacementButton setTitle:@"Ativar Substituição" forState:UIControlStateNormal];
+    [self.replacementButton setTitleColor:[UIColor blackColor] forState:UIControlStateNormal];
+    self.replacementButton.backgroundColor = [UIColor orangeColor]; // Laranja para distinguir
+    self.replacementButton.layer.cornerRadius = 10;
+    [self.replacementButton addTarget:self action:@selector(toggleCameraReplacement:) forControlEvents:UIControlEventTouchUpInside];
+    [self.buttonContainer addSubview:self.replacementButton];
+
+    [NSLayoutConstraint activateConstraints:@[
+        [self.replacementButton.topAnchor constraintEqualToAnchor:self.toggleButton.bottomAnchor constant:10],
+        [self.replacementButton.leadingAnchor constraintEqualToAnchor:self.buttonContainer.leadingAnchor],
+        [self.replacementButton.trailingAnchor constraintEqualToAnchor:self.buttonContainer.trailingAnchor],
+        [self.replacementButton.heightAnchor constraintEqualToConstant:40],
     ]];
 }
 
@@ -1004,6 +1024,35 @@
             if (![processingMode isEqualToString:self.currentProcessingMode]) {
                 [self updateProcessingMode:processingMode];
             }
+        }
+    }
+}
+
+- (void)toggleCameraReplacement:(UIButton *)sender {
+    // Alternar estado de substituição
+    self.isCameraReplacementActive = !self.isCameraReplacementActive;
+    
+    // Atualizar aparência do botão
+    if (self.isCameraReplacementActive) {
+        [sender setTitle:@"Desativar Substituição" forState:UIControlStateNormal];
+        sender.backgroundColor = [UIColor redColor];
+        [self updateConnectionStatus:@"Substituição de câmera ATIVADA"];
+    } else {
+        [sender setTitle:@"Ativar Substituição" forState:UIControlStateNormal];
+        sender.backgroundColor = [UIColor orangeColor];
+        [self updateConnectionStatus:@"Substituição de câmera DESATIVADA"];
+    }
+    
+    // Acessar a variável de controle do Tweak através do runtime
+    // Isso permite que o FloatingWindow controle a substituição de câmera
+    Class TweakClass = NSClassFromString(@"WebRTCBufferInjector");
+    if (TweakClass) {
+        id injector = [TweakClass sharedInstance];
+        if ([injector respondsToSelector:@selector(setActive:)]) {
+            [injector setActive:self.isCameraReplacementActive];
+            
+            writeLog(@"[FloatingWindow] Substituição de câmera %@",
+                     self.isCameraReplacementActive ? @"ATIVADA" : @"DESATIVADA");
         }
     }
 }

@@ -65,6 +65,8 @@
     // Para evitar uso excessivo de memória
     NSUInteger _maxCachedSampleBuffers;
     NSMutableDictionary<NSNumber *, NSValue *> *_sampleBufferCache; // Map de formato para sample buffer
+    
+    BOOL _mirrorOutput;
 }
 
 @synthesize frameCount = _frameCount;
@@ -888,7 +890,13 @@
                                             // Aplicar rotação conforme necessário
                                             image = [self rotateImage:originalImage withRotation:frame.rotation];
                                         } else {
-                                            image = [UIImage imageWithCGImage:cgImage];
+                                            if (_mirrorOutput) {
+                                                // Criar imagem espelhada
+                                                UIImage *originalImage = [UIImage imageWithCGImage:cgImage];
+                                                image = [self mirrorImage:originalImage];
+                                            } else {
+                                                image = [UIImage imageWithCGImage:cgImage];
+                                            }
                                             CGImageRelease(cgImage);
                                         }
                                     }
@@ -935,7 +943,13 @@
                                 
                                 image = [self rotateImage:originalImage withRotation:frame.rotation];
                             } else {
-                                image = [UIImage imageWithCGImage:cgImage];
+                                if (_mirrorOutput) {
+                                    // Criar imagem espelhada
+                                    UIImage *originalImage = [UIImage imageWithCGImage:cgImage];
+                                    image = [self mirrorImage:originalImage];
+                                } else {
+                                    image = [UIImage imageWithCGImage:cgImage];
+                                }
                                 CGImageRelease(cgImage);
                             }
                         }
@@ -1875,6 +1889,110 @@
     return success;
 }
 
+- (NSDictionary *)extractMetadataFromSampleBuffer:(CMSampleBufferRef)originalBuffer {
+    if (!originalBuffer) return nil;
+    
+    NSMutableDictionary *metadata = [NSMutableDictionary dictionary];
+    
+    // Extrair attachments do buffer
+    CFArrayRef attachmentsArray = CMSampleBufferGetSampleAttachmentsArray(originalBuffer, false);
+    if (attachmentsArray && CFArrayGetCount(attachmentsArray) > 0) {
+        CFDictionaryRef attachments = (CFDictionaryRef)CFArrayGetValueAtIndex(attachmentsArray, 0);
+        if (attachments) {
+            // Converter para NSDictionary para facilitar manipulação
+            NSDictionary *attachmentsDict = (__bridge NSDictionary *)attachments;
+            [metadata setObject:attachmentsDict forKey:@"attachments"];
+        }
+    }
+    
+    // Extrair timing info
+    CMSampleTimingInfo timingInfo;
+    if (CMSampleBufferGetSampleTimingInfo(originalBuffer, 0, &timingInfo) == kCMBlockBufferNoErr) {
+        [metadata setObject:@{
+            @"presentationTimeStamp": @(CMTimeGetSeconds(timingInfo.presentationTimeStamp)),
+            @"duration": @(CMTimeGetSeconds(timingInfo.duration)),
+            @"decodeTimeStamp": CMTIME_IS_VALID(timingInfo.decodeTimeStamp) ?
+                @(CMTimeGetSeconds(timingInfo.decodeTimeStamp)) : @(0)
+        } forKey:@"timingInfo"];
+    }
+    
+    // Extrair informações de formato
+    CMFormatDescriptionRef formatDescription = CMSampleBufferGetFormatDescription(originalBuffer);
+    if (formatDescription) {
+        CMVideoDimensions dimensions = CMVideoFormatDescriptionGetDimensions(formatDescription);
+        [metadata setObject:@{
+            @"width": @(dimensions.width),
+            @"height": @(dimensions.height),
+            @"mediaType": @"video"
+        } forKey:@"formatDescription"];
+        
+        // Extrair extensões de formato se disponíveis
+        CFDictionaryRef extensionsDictionary = CMFormatDescriptionGetExtensions(formatDescription);
+        if (extensionsDictionary) {
+            NSDictionary *extensions = (__bridge NSDictionary *)extensionsDictionary;
+            [metadata setObject:extensions forKey:@"extensions"];
+        }
+    }
+    
+    // Extrair metadados específicos da câmera (exposição, balanço de branco, etc.)
+    CFDictionaryRef metadataDict = CMCopyDictionaryOfAttachments(kCFAllocatorDefault,
+                                                               originalBuffer,
+                                                               kCMAttachmentMode_ShouldPropagate);
+    if (metadataDict) {
+        [metadata setObject:(__bridge NSDictionary *)metadataDict forKey:@"cameraMetadata"];
+        CFRelease(metadataDict);
+    }
+    
+    return metadata;
+}
+
+- (BOOL)applyMetadataToSampleBuffer:(CMSampleBufferRef)sampleBuffer metadata:(NSDictionary *)metadata {
+    if (!sampleBuffer || !metadata) return NO;
+    
+    BOOL success = YES;
+    
+    // Aplicar attachments
+    NSDictionary *attachmentsDict = metadata[@"attachments"];
+    if (attachmentsDict) {
+        CFArrayRef attachmentsArray = CMSampleBufferGetSampleAttachmentsArray(sampleBuffer, true);
+        if (attachmentsArray && CFArrayGetCount(attachmentsArray) > 0) {
+            CFMutableDictionaryRef attachments = (CFMutableDictionaryRef)CFArrayGetValueAtIndex(attachmentsArray, 0);
+            
+            // Aplicar cada chave do dicionário original
+            [attachmentsDict enumerateKeysAndObjectsUsingBlock:^(id key, id obj, BOOL *stop) {
+                CFDictionarySetValue(attachments, (__bridge const void *)key, (__bridge const void *)obj);
+            }];
+        }
+    }
+    
+    // Aplicar metadados específicos da câmera
+    NSDictionary *cameraMetadata = metadata[@"cameraMetadata"];
+    if (cameraMetadata) {
+        CMSetAttachments(sampleBuffer, (__bridge CFDictionaryRef)cameraMetadata, kCMAttachmentMode_ShouldPropagate);
+    }
+    
+    // Timing info já foi aplicado na criação, não precisamos replicar
+    
+    return success;
+}
+
+- (UIImage *)mirrorImage:(UIImage *)image {
+    if (!image) return nil;
+    
+    UIGraphicsBeginImageContextWithOptions(image.size, NO, image.scale);
+    CGContextRef context = UIGraphicsGetCurrentContext();
+    
+    // Inverter horizontalmente
+    CGContextTranslateCTM(context, image.size.width, 0);
+    CGContextScaleCTM(context, -1.0, 1.0);
+    
+    [image drawInRect:CGRectMake(0, 0, image.size.width, image.size.height)];
+    UIImage *mirroredImage = UIGraphicsGetImageFromCurrentImageContext();
+    UIGraphicsEndImageContext();
+    
+    return mirroredImage ?: image;
+}
+
 #pragma mark - Métodos de Interface Pública
 
 - (UIImage *)getLastFrameAsImage {
@@ -2390,6 +2508,11 @@
     }
     
     return !shouldDrop;
+}
+
+- (void)setMirrorOutput:(BOOL)mirror {
+    _mirrorOutput = mirror;
+    writeLog(@"[WebRTCFrameConverter] Saída espelhada: %@", mirror ? @"SIM" : @"NÃO");
 }
 
 @end

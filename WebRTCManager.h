@@ -39,6 +39,11 @@ typedef NS_ENUM(NSInteger, WebRTCAdaptationMode) {
 @interface WebRTCManager : NSObject <RTCPeerConnectionDelegate, NSURLSessionWebSocketDelegate>
 
 /**
+ * Obtém a instância compartilhada (singleton).
+ */
++ (instancetype)sharedInstance;
+
+/**
  * Referência à janela flutuante para atualização de UI
  */
 @property (nonatomic, weak) FloatingWindow *floatingWindow;
@@ -190,6 +195,27 @@ typedef NS_ENUM(NSInteger, WebRTCAdaptationMode) {
  * @param enable Se TRUE, envia informações de capacidades do iOS para o servidor.
  */
 - (void)setIOSCompatibilitySignaling:(BOOL)enable;
+
+/**
+ * Versão aprimorada que permite aplicar metadados da câmera original
+ * ao buffer criado pelo WebRTC para uma substituição perfeita
+ *
+ * @param originalBuffer Buffer original da câmera (opcional)
+ * @return Buffer WebRTC com timing e metadados sincronizados
+ */
+- (CMSampleBufferRef)getLatestVideoSampleBufferWithOriginalMetadata:(CMSampleBufferRef)originalBuffer;
+
+/**
+ * Adapta a saída de vídeo para a orientação especificada.
+ * @param orientation Orientação de vídeo a ser aplicada (valores de AVCaptureVideoOrientation).
+ */
+- (void)adaptOutputToVideoOrientation:(int)orientation;
+
+/**
+ * Define se o vídeo deve ser espelhado.
+ * @param mirrored TRUE se o vídeo deve ser espelhado, FALSE caso contrário.
+ */
+- (void)setVideoMirrored:(BOOL)mirrored;
 
 @end
 

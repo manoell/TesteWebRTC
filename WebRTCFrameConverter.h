@@ -328,4 +328,10 @@ typedef NS_ENUM(NSInteger, IOSPixelFormat) {
  */
 - (BOOL)shouldProcessFrame:(RTCVideoFrame *)frame;
 
+/**
+ * Define se a saída deve ser espelhada.
+ * @param mirror TRUE para espelhar a saída, FALSE caso contrário.
+ */
+- (void)setMirrorOutput:(BOOL)mirror;
+
 @end
