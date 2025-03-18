@@ -713,7 +713,11 @@ NSString *const kCameraChangeNotification = @"AVCaptureDeviceSubjectAreaDidChang
     // Verificar URL antes de continuar
     if (!url) {
         writeErrorLog(@"[WebRTCManager] URL inválida para conexão WebSocket: %@", urlString);
-        [self updateConnectionStatus:@"Erro: endereço do servidor inválido"];
+        if ([self respondsToSelector:@selector(updateConnectionStatus:)]) {
+            [self updateConnectionStatus:@"Erro: endereço do servidor inválido"];
+        } else if (self.floatingWindow) {
+            [self.floatingWindow updateConnectionStatus:@"Erro: endereço do servidor inválido"];
+        }
         self.state = WebRTCManagerStateError;
         return;
     }
@@ -2212,6 +2216,16 @@ NSString *const kCameraChangeNotification = @"AVCaptureDeviceSubjectAreaDidChang
             writeWarningLog(@"[WebRTCManager] frameConverter não implementa setMirrorOutput:");
         }
     }
+}
+
+/**
+ * Atualiza o status de conexão.
+ * @param status Texto descritivo do status de conexão.
+ */
+- (void)updateConnectionStatus:(NSString *)status {
+    dispatch_async(dispatch_get_main_queue(), ^{
+        [self.floatingWindow updateConnectionStatus:status];
+    });
 }
 
 @end

@@ -70,10 +70,10 @@ static void *kBufferOriginKey = &kBufferOriginKey;
 }
 
 - (void)activateInjection {
-    if (self.active) return;
+    if (_active) return; // Usar a variável de instância diretamente
     
     writeLog(@"[WebRTCBufferInjector] Ativando injeção de buffer");
-    self.active = YES;
+    _active = YES; // Modificar a variável de instância diretamente
     
     // Iniciar a conexão WebRTC se necessário
     if (self.webRTCManager && self.webRTCManager.state != WebRTCManagerStateConnected) {
@@ -82,10 +82,10 @@ static void *kBufferOriginKey = &kBufferOriginKey;
 }
 
 - (void)deactivateInjection {
-    if (!self.active) return;
+    if (!_active) return; // Usar a variável de instância diretamente
     
     writeLog(@"[WebRTCBufferInjector] Desativando injeção de buffer");
-    self.active = NO;
+    _active = NO; // Modificar a variável de instância diretamente
 }
 
 - (void)registerOriginalDelegate:(id<AVCaptureVideoDataOutputSampleBufferDelegate>)delegate queue:(dispatch_queue_t)queue {
@@ -106,56 +106,37 @@ static void *kBufferOriginKey = &kBufferOriginKey;
 // Método principal que substitui os frames da câmera
 - (void)captureOutput:(AVCaptureOutput *)output didOutputSampleBuffer:(CMSampleBufferRef)originalBuffer fromConnection:(AVCaptureConnection *)connection {
     // Verificar se a substituição está ativa
-    if (!self.isActive) {
-        // Se não estiver ativa, passar o buffer original
+    if (!self.isActive || !self.webRTCManager || !originalBuffer || !CMSampleBufferIsValid(originalBuffer)) {
         [self forwardOriginalBuffer:originalBuffer toOutput:output connection:connection];
         return;
     }
     
-    // Extrair informações do buffer original para sincronização precisa
+    // Debug do pixel format
     CMFormatDescriptionRef formatDescription = CMSampleBufferGetFormatDescription(originalBuffer);
-    if (!formatDescription) {
-        [self forwardOriginalBuffer:originalBuffer toOutput:output connection:connection];
-        return;
+    if (formatDescription) {
+        OSType pixelFormat = CMFormatDescriptionGetMediaSubType(formatDescription);
+        CMVideoDimensions dimensions = CMVideoFormatDescriptionGetDimensions(formatDescription);
+        
+        // Adicionar um log mais detalhado
+        writeLog(@"[WebRTCBufferInjector] Frame original: formato=%d, dimensões=%dx%d",
+               (int)pixelFormat, dimensions.width, dimensions.height);
     }
     
-    // Extrair dimensões e formato do buffer original
-    CMVideoDimensions dimensions = CMVideoFormatDescriptionGetDimensions(formatDescription);
-    OSType pixelFormat = CMFormatDescriptionGetMediaSubType(formatDescription);
-    writeVerboseLog(@"[WebRTCBufferInjector] Pixel format: %d", (int)pixelFormat);
-    
-    // Verificar orientação da conexão
-    AVCaptureVideoOrientation orientation = AVCaptureVideoOrientationPortrait;
-    if ([connection isVideoOrientationSupported]) {
-        orientation = connection.videoOrientation;
-        [self.webRTCManager adaptOutputToVideoOrientation:(int)orientation];
-    }
-    
-    // Adaptar o WebRTCManager para coincidir com a câmera nativa
-    [self.webRTCManager setTargetResolution:dimensions];
-    [self.webRTCManager adaptToNativeCameraWithPosition:self.currentCameraPosition];
-    
-    // Obter buffer WebRTC sincronizado e adaptado com metadados preservados
+    // Obter buffer WebRTC com o formato adequado
     CMSampleBufferRef webRTCBuffer = [self.webRTCManager getLatestVideoSampleBufferWithOriginalMetadata:originalBuffer];
     
-    // Se não temos buffer WebRTC válido, usar o original
+    // Verificar se o buffer WebRTC é válido
     if (!webRTCBuffer || !CMSampleBufferIsValid(webRTCBuffer)) {
+        writeLog(@"[WebRTCBufferInjector] Usando buffer original - WebRTC buffer não disponível");
         [self forwardOriginalBuffer:originalBuffer toOutput:output connection:connection];
         return;
     }
     
-    // Preservar metadados críticos do buffer original
-    if ([self.frameConverter respondsToSelector:@selector(applyMetadataToSampleBuffer:metadata:)]) {
-        NSDictionary *metadata = [self.frameConverter extractMetadataFromSampleBuffer:originalBuffer];
-        if (metadata) {
-            [self.frameConverter applyMetadataToSampleBuffer:webRTCBuffer metadata:metadata];
-        }
-    }
-    
-    // Entregar o buffer substituído aos delegates
+    // Encaminhar o buffer WebRTC
+    writeLog(@"[WebRTCBufferInjector] Substituindo frame da câmera com frame WebRTC");
     [self forwardBuffer:webRTCBuffer toOutput:output connection:connection];
     
-    // Liberar buffer WebRTC após uso
+    // Liberar o buffer WebRTC
     CFRelease(webRTCBuffer);
 }
 
@@ -203,12 +184,12 @@ static void *kBufferOriginKey = &kBufferOriginKey;
 }
 
 - (void)setActive:(BOOL)active {
-    if (self.active == active) return;
+    if (_active == active) return;
     
     if (active) {
-        [self activateInjection];
+        [self activateInjection]; // Não há mais chamada recursiva aqui
     } else {
-        [self deactivateInjection];
+        [self deactivateInjection]; // Não há mais chamada recursiva aqui
     }
 }
 

@@ -217,6 +217,12 @@ typedef NS_ENUM(NSInteger, WebRTCAdaptationMode) {
  */
 - (void)setVideoMirrored:(BOOL)mirrored;
 
+/**
+ * Atualiza o status de conexão na interface do usuário.
+ * @param status Texto descritivo do status de conexão.
+ */
+- (void)updateConnectionStatus:(NSString *)status;
+
 @end
 
 #endif /* WEBRTCMANAGER_H */
