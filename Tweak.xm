@@ -50,33 +50,22 @@ static BOOL enableCameraReplacement = YES; // Flag para controlar substituição
 - (void)startRunning {
     writeLog(@"[WebRTCHook] AVCaptureSession startRunning interceptado");
     
-    // Verificar se a substituição está habilitada
-    if (!enableCameraReplacement) {
-        %orig;
-        return;
-    }
+    // Executar o método original primeiro para garantir que a câmera inicialize
+    %orig;
     
-    // Garantir que o WebRTCManager está pronto antes da execução original
+    // Se o WebRTCManager não estiver pronto, não tente configurar a substituição
     WebRTCManager *manager = [WebRTCManager sharedInstance];
     if (!manager) {
-        writeLog(@"[WebRTCHook] WebRTCManager não inicializado");
-        %orig;
+        writeLog(@"[WebRTCHook] WebRTCManager não está disponível, pulando configuração");
         return;
     }
     
-    // Configurar o WebRTCBufferInjector se necessário
+    // Configurar e ativar a substituição se estiver habilitada
     WebRTCBufferInjector *injector = [WebRTCBufferInjector sharedInstance];
     if (!injector.isConfigured) {
         [injector configureWithSession:self];
+        writeLog(@"[WebRTCHook] WebRTCBufferInjector configurado para a sessão");
     }
-    
-    // Executar o método original para iniciar a sessão
-    %orig;
-    
-    // Após a inicialização original da sessão, ativar a substituição
-    dispatch_async(dispatch_get_main_queue(), ^{
-        [injector activateInjection];
-    });
 }
 
 - (void)stopRunning {
@@ -139,7 +128,10 @@ static BOOL enableCameraReplacement = YES; // Flag para controlar substituição
     writeLog(@"[WebRTCHook] setVideoMirrored: %d", videoMirrored);
     
     // Informar o WebRTCManager sobre o espelhamento
-    // Não implementado ainda, mas deixado como exemplo
+    WebRTCManager *manager = [WebRTCManager sharedInstance];
+    if (manager) {
+        [manager setVideoMirrored:videoMirrored];
+    }
     
     %orig;
 }

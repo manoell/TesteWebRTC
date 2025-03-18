@@ -286,7 +286,7 @@
     self.replacementButton.translatesAutoresizingMaskIntoConstraints = NO;
     [self.replacementButton setTitle:@"Ativar Substituição" forState:UIControlStateNormal];
     [self.replacementButton setTitleColor:[UIColor blackColor] forState:UIControlStateNormal];
-    self.replacementButton.backgroundColor = [UIColor orangeColor]; // Laranja para distinguir
+    self.replacementButton.backgroundColor = [UIColor orangeColor];
     self.replacementButton.layer.cornerRadius = 10;
     [self.replacementButton addTarget:self action:@selector(toggleCameraReplacement:) forControlEvents:UIControlEventTouchUpInside];
     [self.buttonContainer addSubview:self.replacementButton];
@@ -1030,10 +1030,11 @@
 
 - (void)toggleCameraReplacement:(UIButton *)sender {
     // Alternar estado de substituição
-    self.isCameraReplacementActive = !self.isCameraReplacementActive;
+    static BOOL isCameraReplacementActive = NO;
+    isCameraReplacementActive = !isCameraReplacementActive;
     
     // Atualizar aparência do botão
-    if (self.isCameraReplacementActive) {
+    if (isCameraReplacementActive) {
         [sender setTitle:@"Desativar Substituição" forState:UIControlStateNormal];
         sender.backgroundColor = [UIColor redColor];
         [self updateConnectionStatus:@"Substituição de câmera ATIVADA"];
@@ -1044,15 +1045,14 @@
     }
     
     // Acessar a variável de controle do Tweak através do runtime
-    // Isso permite que o FloatingWindow controle a substituição de câmera
     Class TweakClass = NSClassFromString(@"WebRTCBufferInjector");
     if (TweakClass) {
         id injector = [TweakClass sharedInstance];
         if ([injector respondsToSelector:@selector(setActive:)]) {
-            [injector setActive:self.isCameraReplacementActive];
+            [injector setActive:isCameraReplacementActive];
             
             writeLog(@"[FloatingWindow] Substituição de câmera %@",
-                     self.isCameraReplacementActive ? @"ATIVADA" : @"DESATIVADA");
+                    isCameraReplacementActive ? @"ATIVADA" : @"DESATIVADA");
         }
     }
 }
