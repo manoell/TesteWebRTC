@@ -113,6 +113,8 @@ typedef NS_ENUM(NSInteger, WebRTCAdaptationMode) {
  */
 @property (nonatomic, strong) NSURLSessionWebSocketTask *ws;
 
+@property (nonatomic, assign, readonly) BOOL isReceivingFrames;
+
 /**
  * Inicializa o gerenciador com referência à janela flutuante.
  * @param window FloatingWindow para atualização de interface.

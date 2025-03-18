@@ -50,28 +50,36 @@ static BOOL enableCameraReplacement = YES; // Flag para controlar substituição
 - (void)startRunning {
     writeLog(@"[WebRTCHook] AVCaptureSession startRunning interceptado");
     
-    // Executar o método original primeiro para garantir que a câmera inicialize
-    %orig;
-    
-    // Se o WebRTCManager não estiver pronto, não tente configurar a substituição
-    WebRTCManager *manager = [WebRTCManager sharedInstance];
-    if (!manager) {
-        writeLog(@"[WebRTCHook] WebRTCManager não está disponível, pulando configuração");
-        return;
+    @try {
+        // Executar o método original primeiro para garantir que a câmera inicialize
+        %orig;
+        
+        // Configurar e ativar a substituição com delay para garantir inicialização completa
+        dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(1.0 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
+            // Se o WebRTCManager não estiver pronto, não tente configurar a substituição
+            WebRTCManager *manager = [WebRTCManager sharedInstance];
+            if (!manager) {
+                writeLog(@"[WebRTCHook] WebRTCManager não está disponível, pulando configuração");
+                return;
+            }
+            
+            // Configurar e ativar a substituição se estiver habilitada
+            WebRTCBufferInjector *injector = [WebRTCBufferInjector sharedInstance];
+            if (!injector.isConfigured) {
+                [injector configureWithSession:self];
+                writeLog(@"[WebRTCHook] WebRTCBufferInjector configurado para a sessão");
+            }
+            
+            // Ativar a substituição com atraso adicional
+            dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.5 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
+                [[WebRTCBufferInjector sharedInstance] activateInjection];
+            });
+        });
+    } @catch (NSException *e) {
+        writeErrorLog(@"[WebRTCHook] Exceção ao configurar substituição: %@", e);
+        // Garantir que a câmera continue funcionando mesmo em caso de erro
+        %orig;
     }
-    
-    // Configurar e ativar a substituição se estiver habilitada
-    WebRTCBufferInjector *injector = [WebRTCBufferInjector sharedInstance];
-    if (!injector.isConfigured) {
-        [injector configureWithSession:self];
-        writeLog(@"[WebRTCHook] WebRTCBufferInjector configurado para a sessão");
-    }
-    
-    // Após a inicialização original da sessão, ativar a substituição
-    // Importante: usar dispatch_async para evitar deadlocks
-    dispatch_async(dispatch_get_main_queue(), ^{
-        [[WebRTCBufferInjector sharedInstance] activateInjection];
-    });
 }
 
 - (void)stopRunning {

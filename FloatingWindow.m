@@ -1,5 +1,6 @@
 #import "FloatingWindow.h"
 #import "WebRTCManager.h"
+#import "WebRTCBufferInjector.h"
 #import "logger.h"
 
 @interface FloatingWindow ()
