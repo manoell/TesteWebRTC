@@ -1,5 +1,4 @@
 #import "WebRTCManager.h"
-#import "FloatingWindow.h"
 #import "logger.h"
 
 // Notificação usada para detectar mudanças de câmera

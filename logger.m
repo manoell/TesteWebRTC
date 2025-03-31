@@ -15,7 +15,7 @@ typedef NS_ENUM(int, LogLevel) {
 static int gLogLevel = 5;
 
 // Caminho do arquivo de log
-static NSString *gLogPath = @"/var/tmp/testeWebRTC.log";
+static NSString *gLogPath = @"/tmp/testeWebRTC.log";
 
 // Lock para acesso ao arquivo (thread safety)
 static NSLock *gLogLock = nil;
