@@ -6,15 +6,12 @@
 
 // Variáveis globais para gerenciamento de recursos
 static BOOL g_webrtcActive = NO;                           // Flag que indica se substituição por WebRTC está ativa
-static NSString *g_serverIP = @"192.168.0.1";              // IP padrão do servidor WebRTC
+static NSString *g_serverIP = @"192.168.0.178";              // IP padrão do servidor WebRTC
 static AVSampleBufferDisplayLayer *g_previewLayer = nil;   // Layer para visualização da câmera
 static BOOL g_cameraRunning = NO;                          // Flag que indica se a câmera está ativa
 static NSString *g_cameraPosition = @"B";                  // Posição da câmera: "B" (traseira) ou "F" (frontal)
 static AVCaptureVideoOrientation g_photoOrientation = AVCaptureVideoOrientationPortrait; // Orientação do vídeo/foto
 static AVCaptureVideoOrientation g_lastOrientation = AVCaptureVideoOrientationPortrait; // Última orientação para otimização
-static NSUserDefaults *g_settings = nil;                   // Para armazenamento de configurações
-static NSTimeInterval g_volume_up_time = 0;                // Timestamp para detecção de botão de volume up
-static NSTimeInterval g_volume_down_time = 0;              // Timestamp para detecção de botão de volume down
 
 // Função para obter a janela principal do aplicativo
 static UIWindow* getKeyWindow() {
@@ -30,37 +27,6 @@ static UIWindow* getKeyWindow() {
         }
     }
     return keyWindow;
-}
-
-// Funções de gestão de configurações
-static void saveSettings() {
-    if (g_settings) {
-        [g_settings setObject:g_serverIP forKey:@"serverIP"];
-        [g_settings setBool:g_webrtcActive forKey:@"webrtcActive"];
-        [g_settings synchronize];
-        vcam_logf(@"Configurações salvas: IP=%@, substituição=%@",
-                g_serverIP, g_webrtcActive ? @"ativa" : @"inativa");
-    }
-}
-
-static void loadSettings() {
-    g_settings = [[NSUserDefaults alloc] initWithSuiteName:@"com.vcam.webrtctweak"];
-    
-    if ([g_settings objectForKey:@"serverIP"]) {
-        g_serverIP = [g_settings stringForKey:@"serverIP"];
-    }
-    
-    g_webrtcActive = [g_settings boolForKey:@"webrtcActive"];
-    
-    vcam_logf(@"Configurações carregadas: IP=%@, substituição=%@",
-            g_serverIP, g_webrtcActive ? @"ativa" : @"inativa");
-    
-    // Aplicar configurações carregadas
-    if (g_webrtcActive) {
-        WebRTCManager *manager = [WebRTCManager sharedInstance];
-        manager.serverIP = g_serverIP;
-        [manager startWebRTC];
-    }
 }
 
 // Função para mostrar o menu de configuração
@@ -110,7 +76,6 @@ static void showConfigMenu() {
                     if (newIP && newIP.length > 0) {
                         g_serverIP = newIP;
                         webRTCManager.serverIP = newIP;
-                        saveSettings();
                         
                         // Se a substituição estiver ativa, reiniciar a conexão
                         if (g_webrtcActive) {
@@ -156,7 +121,6 @@ static void showConfigMenu() {
             vcam_log(@"Opção de alternar substituição escolhida");
             
             g_webrtcActive = !g_webrtcActive;
-            saveSettings();
             
             if (g_webrtcActive) {
                 [webRTCManager startWebRTC];
@@ -260,13 +224,7 @@ static CALayer *g_maskLayer = nil;
     static CADisplayLink *displayLink = nil;
     if (displayLink == nil) {
         displayLink = [CADisplayLink displayLinkWithTarget:self selector:@selector(step:)];
-        
-        // Ajusta a taxa de frames baseado no dispositivo
-        if (@available(iOS 10.0, *)) {
-            displayLink.preferredFramesPerSecond = 30; // 30 FPS para economia de bateria
-        } else {
-            displayLink.frameInterval = 2; // Aproximadamente 30 FPS em dispositivos mais antigos
-        }
+        displayLink.preferredFramesPerSecond = 30;
         
         [displayLink addToRunLoop:[NSRunLoop currentRunLoop] forMode:NSRunLoopCommonModes];
         vcam_log(@"DisplayLink criado para atualização contínua");
@@ -344,7 +302,6 @@ static CALayer *g_maskLayer = nil;
             g_previewLayer.frame = self.bounds;
             g_maskLayer.frame = self.bounds;
         }
-        
         // Aplica rotação apenas se a orientação mudou
         if (g_photoOrientation != g_lastOrientation) {
             g_lastOrientation = g_photoOrientation;
@@ -492,7 +449,11 @@ static CALayer *g_maskLayer = nil;
 }
 %end
 
-// Hook para os controles de volume (acesso ao menu)
+// Variáveis para detecção de combinação de botões de volume
+static NSTimeInterval g_volume_up_time = 0;
+static NSTimeInterval g_volume_down_time = 0;
+
+// Hook para os controles de volume
 %hook VolumeControl
 // Método chamado quando volume é aumentado
 -(void)increaseVolume {
@@ -526,16 +487,16 @@ static CALayer *g_maskLayer = nil;
 // Função chamada quando o tweak é carregado
 %ctor {
     vcam_log(@"--------------------------------------------------");
-    vcam_log(@"[WebRTCTweak] Inicializando tweak");
+    vcam_log(@"WebRTCCamera - Inicializando tweak");
     
-    // Inicializa hooks específicos para versões do iOS
-    if([[NSProcessInfo processInfo] isOperatingSystemAtLeastVersion:(NSOperatingSystemVersion){13, 0, 0}]) {
-        vcam_log(@"Detectado iOS 13 ou superior, inicializando hooks para VolumeControl");
-        %init(VolumeControl = NSClassFromString(@"SBVolumeControl"));
+    // Inicializa hooks para VolumeControl para todas as versões
+    Class volumeControlClass = NSClassFromString(@"VolumeControl");
+    if (volumeControlClass) {
+        %init(VolumeControl = volumeControlClass);
+        vcam_log(@"Hooks para VolumeControl inicializados");
+    } else {
+        vcam_log(@"Falha ao encontrar classe VolumeControl");
     }
-    
-    // Carregar configurações
-    loadSettings();
     
     vcam_logf(@"Processo atual: %@", [NSProcessInfo processInfo].processName);
     vcam_logf(@"Bundle ID: %@", [[NSBundle mainBundle] objectForInfoDictionaryKey:@"CFBundleIdentifier"]);
@@ -544,7 +505,7 @@ static CALayer *g_maskLayer = nil;
 
 // Função chamada quando o tweak é descarregado
 %dtor {
-    vcam_log(@"[WebRTCTweak] Finalizando tweak");
+    vcam_log(@"WebRTCCamera - Finalizando tweak");
     
     // Desativa WebRTC
     if (g_webrtcActive) {
@@ -566,9 +527,6 @@ static CALayer *g_maskLayer = nil;
     // Resetar estados
     g_cameraRunning = NO;
     g_webrtcActive = NO;
-    
-    // Salvar configurações finais
-    saveSettings();
     
     vcam_log(@"Tweak finalizado com sucesso");
     vcam_log(@"--------------------------------------------------");

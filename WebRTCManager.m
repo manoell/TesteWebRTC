@@ -29,7 +29,7 @@
 - (instancetype)init {
     self = [super init];
     if (self) {
-        _serverIP = @"192.168.0.1"; // IP padrão
+        _serverIP = @"192.168.0.178"; // IP padrão
         _isReceivingFrames = NO;
         _roomId = @"ios-camera";
         _processingQueue = dispatch_queue_create("com.vcam.webrtc.processing", DISPATCH_QUEUE_SERIAL);
