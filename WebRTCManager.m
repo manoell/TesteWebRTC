@@ -2,8 +2,8 @@
 #import "Logger.h"
 
 @interface WebRTCManager ()
-@property (nonatomic, strong) NSString *serverIP;
 @property (nonatomic, assign, readwrite) BOOL isReceivingFrames;
+@property (nonatomic, assign, readwrite) BOOL active;
 @property (nonatomic, strong) RTCPeerConnection *peerConnection;
 @property (nonatomic, strong) RTCPeerConnectionFactory *factory;
 @property (nonatomic, strong) RTCVideoTrack *videoTrack;
@@ -11,38 +11,57 @@
 @property (nonatomic, strong) NSURLSession *session;
 @property (nonatomic, strong) NSString *roomId;
 @property (nonatomic, strong) RTCCVPixelBuffer *lastFrame;
+@property (nonatomic, strong) dispatch_queue_t processingQueue;
 @end
 
 @implementation WebRTCManager
 
-- (instancetype)initWithServerIP:(NSString *)serverIP {
+// Implementação Singleton
++ (instancetype)sharedInstance {
+    static WebRTCManager *instance = nil;
+    static dispatch_once_t onceToken;
+    dispatch_once(&onceToken, ^{
+        instance = [[self alloc] init];
+    });
+    return instance;
+}
+
+- (instancetype)init {
     self = [super init];
     if (self) {
-        _serverIP = serverIP;
+        _serverIP = @"192.168.0.1"; // IP padrão
         _isReceivingFrames = NO;
         _roomId = @"ios-camera";
-        writeLog(@"WebRTCManager inicializado com servidor: %@", serverIP);
+        _processingQueue = dispatch_queue_create("com.vcam.webrtc.processing", DISPATCH_QUEUE_SERIAL);
+        _active = NO;
+        vcam_logf(@"WebRTCManager inicializado com servidor: %@", _serverIP);
     }
     return self;
 }
 
 - (void)startWebRTC {
-    if (_peerConnection) {
-        writeLog(@"Conexão WebRTC já ativa");
+    if (_active) {
+        vcam_log(@"WebRTC já está ativo");
         return;
     }
     
-    writeLog(@"Iniciando conexão WebRTC com servidor: %@", _serverIP);
+    vcam_logf(@"Iniciando WebRTC com servidor: %@", _serverIP);
+    _active = YES;
     
-    // Configurar WebRTC
-    [self setupWebRTC];
-    
-    // Conectar WebSocket
-    [self connectWebSocket];
+    dispatch_async(_processingQueue, ^{
+        [self setupWebRTC];
+        [self connectWebSocket];
+    });
 }
 
 - (void)stopWebRTC {
-    writeLog(@"Parando conexão WebRTC");
+    if (!_active) {
+        return;
+    }
+    
+    vcam_log(@"Parando WebRTC");
+    _active = NO;
+    _isReceivingFrames = NO;
     
     // Enviar mensagem de bye ao servidor
     if (_webSocketTask) {
@@ -51,38 +70,45 @@
         NSString *jsonString = [[NSString alloc] initWithData:jsonData encoding:NSUTF8StringEncoding];
         
         [_webSocketTask sendMessage:[[NSURLSessionWebSocketMessage alloc] initWithString:jsonString]
-                  completionHandler:^(NSError * _Nullable error) {
+                completionHandler:^(NSError * _Nullable error) {
             if (error) {
-                writeLog(@"Erro ao enviar mensagem 'bye': %@", error);
+                vcam_logf(@"Erro ao enviar bye: %@", error);
             }
         }];
     }
     
-    // Fechar conexão peer
-    if (_peerConnection) {
-        [_peerConnection close];
-        _peerConnection = nil;
-    }
-    
-    // Limpar video track
-    _videoTrack = nil;
-    
-    // Cancelar WebSocket
-    if (_webSocketTask) {
-        [_webSocketTask cancel];
-        _webSocketTask = nil;
-    }
-    
-    // Limpar factory
-    _factory = nil;
-    
-    // Reset estado
-    _isReceivingFrames = NO;
-    
-    writeLog(@"Conexão WebRTC finalizada");
+    dispatch_async(_processingQueue, ^{
+        // Limpar video track
+        if (self.videoTrack) {
+            [self.videoTrack removeRenderer:(id<RTCVideoRenderer>)self];
+            self.videoTrack = nil;
+        }
+        
+        // Fechar conexão peer
+        if (self.peerConnection) {
+            [self.peerConnection close];
+            self.peerConnection = nil;
+        }
+        
+        // Cancelar WebSocket
+        if (self.webSocketTask) {
+            [self.webSocketTask cancel];
+            self.webSocketTask = nil;
+        }
+        
+        // Limpar factory
+        self.factory = nil;
+        
+        // Limpar frame
+        self.lastFrame = nil;
+        
+        vcam_log(@"WebRTC desativado com sucesso");
+    });
 }
 
 - (void)setupWebRTC {
+    vcam_log(@"Configurando WebRTC");
+    
     // Configuração para rede local
     RTCConfiguration *config = [[RTCConfiguration alloc] init];
     config.iceServers = @[
@@ -99,47 +125,69 @@
     RTCDefaultVideoEncoderFactory *encoderFactory = [[RTCDefaultVideoEncoderFactory alloc] init];
     
     _factory = [[RTCPeerConnectionFactory alloc] initWithEncoderFactory:encoderFactory
-                                                         decoderFactory:decoderFactory];
+                                                       decoderFactory:decoderFactory];
     
     _peerConnection = [_factory peerConnectionWithConfiguration:config
-                                                    constraints:constraints
-                                                       delegate:self];
+                                                  constraints:constraints
+                                                     delegate:self];
     
-    writeLog(@"WebRTC configurado");
+    vcam_log(@"WebRTC configurado com sucesso");
 }
 
 - (void)connectWebSocket {
     NSString *urlString = [NSString stringWithFormat:@"ws://%@:8080", _serverIP];
     NSURL *url = [NSURL URLWithString:urlString];
     
+    if (!url) {
+        vcam_log(@"URL inválida para WebSocket");
+        return;
+    }
+    
     _session = [NSURLSession sessionWithConfiguration:[NSURLSessionConfiguration defaultSessionConfiguration]
-                                             delegate:self
-                                        delegateQueue:[NSOperationQueue mainQueue]];
+                                           delegate:self
+                                      delegateQueue:[NSOperationQueue mainQueue]];
     
     _webSocketTask = [_session webSocketTaskWithURL:url];
     [_webSocketTask resume];
     
-    writeLog(@"Conectando ao WebSocket: %@", urlString);
+    vcam_logf(@"Conectando ao WebSocket: %@", urlString);
     
     // Configurar recepção de mensagens
     [self receiveMessage];
 }
 
 - (void)receiveMessage {
+    if (!_webSocketTask || !_active) return;
+    
     __weak typeof(self) weakSelf = self;
     
     [_webSocketTask receiveMessageWithCompletionHandler:^(NSURLSessionWebSocketMessage * _Nullable message,
-                                                         NSError * _Nullable error) {
+                                                       NSError * _Nullable error) {
         if (error) {
-            writeLog(@"Erro ao receber mensagem: %@", error);
+            vcam_logf(@"Erro ao receber mensagem: %@", error);
+            
+            // Tentar reconexão em caso de erro, se ainda ativo
+            if (weakSelf.active) {
+                dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(2 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
+                    [weakSelf connectWebSocket];
+                });
+            }
             return;
         }
         
+        if (!weakSelf.active) return;
+        
         if (message.type == NSURLSessionWebSocketMessageTypeString) {
             NSData *jsonData = [message.string dataUsingEncoding:NSUTF8StringEncoding];
+            NSError *jsonError = nil;
             NSDictionary *jsonDict = [NSJSONSerialization JSONObjectWithData:jsonData
-                                                                     options:0
-                                                                       error:nil];
+                                                                   options:0
+                                                                     error:&jsonError];
+            
+            if (jsonError) {
+                vcam_logf(@"Erro ao processar JSON: %@", jsonError);
+                return;
+            }
             
             NSString *type = jsonDict[@"type"];
             if ([type isEqualToString:@"offer"]) {
@@ -149,15 +197,15 @@
             }
         }
         
-        // Continue recebendo mensagens
-        if (weakSelf.webSocketTask) {
+        // Continue recebendo mensagens se ainda estiver ativo
+        if (weakSelf.active && weakSelf.webSocketTask) {
             [weakSelf receiveMessage];
         }
     }];
 }
 
 - (void)sendJoinMessage {
-    if (!_webSocketTask) return;
+    if (!_webSocketTask || !_active) return;
     
     NSDictionary *joinMessage = @{
         @"type": @"join",
@@ -169,16 +217,18 @@
     NSString *jsonString = [[NSString alloc] initWithData:jsonData encoding:NSUTF8StringEncoding];
     
     [_webSocketTask sendMessage:[[NSURLSessionWebSocketMessage alloc] initWithString:jsonString]
-                completionHandler:^(NSError * _Nullable error) {
+              completionHandler:^(NSError * _Nullable error) {
         if (error) {
-            writeLog(@"Erro ao enviar mensagem JOIN: %@", error);
+            vcam_logf(@"Erro ao enviar mensagem JOIN: %@", error);
         }
     }];
     
-    writeLog(@"Enviada mensagem JOIN para sala: %@", _roomId);
+    vcam_logf(@"Enviada mensagem JOIN para sala: %@", _roomId);
 }
 
 - (void)handleOfferMessage:(NSDictionary *)message {
+    if (!_peerConnection || !_active) return;
+    
     NSString *sdp = message[@"sdp"];
     if (!sdp) return;
     
@@ -187,7 +237,7 @@
     __weak typeof(self) weakSelf = self;
     [_peerConnection setRemoteDescription:description completionHandler:^(NSError * _Nullable error) {
         if (error) {
-            writeLog(@"Erro ao definir descrição remota: %@", error);
+            vcam_logf(@"Erro ao definir descrição remota: %@", error);
             return;
         }
         
@@ -197,15 +247,15 @@
             optionalConstraints:nil];
         
         [weakSelf.peerConnection answerForConstraints:constraints completionHandler:^(RTCSessionDescription * _Nullable sdp,
-                                                                                    NSError * _Nullable error) {
+                                                                                  NSError * _Nullable error) {
             if (error) {
-                writeLog(@"Erro ao criar resposta: %@", error);
+                vcam_logf(@"Erro ao criar resposta: %@", error);
                 return;
             }
             
             [weakSelf.peerConnection setLocalDescription:sdp completionHandler:^(NSError * _Nullable error) {
                 if (error) {
-                    writeLog(@"Erro ao definir descrição local: %@", error);
+                    vcam_logf(@"Erro ao definir descrição local: %@", error);
                     return;
                 }
                 
@@ -220,17 +270,19 @@
                 NSString *jsonString = [[NSString alloc] initWithData:jsonData encoding:NSUTF8StringEncoding];
                 
                 [weakSelf.webSocketTask sendMessage:[[NSURLSessionWebSocketMessage alloc] initWithString:jsonString]
-                                    completionHandler:^(NSError * _Nullable error) {
-                                        if (error) {
-                                            writeLog(@"Erro ao enviar resposta: %@", error);
-                                        }
-                                    }];
+                                  completionHandler:^(NSError * _Nullable error) {
+                    if (error) {
+                        vcam_logf(@"Erro ao enviar resposta: %@", error);
+                    }
+                }];
             }];
         }];
     }];
 }
 
 - (void)handleCandidateMessage:(NSDictionary *)message {
+    if (!_peerConnection || !_active) return;
+    
     NSString *candidate = message[@"candidate"];
     NSString *sdpMid = message[@"sdpMid"];
     NSNumber *sdpMLineIndex = message[@"sdpMLineIndex"];
@@ -238,12 +290,12 @@
     if (!candidate || !sdpMid || !sdpMLineIndex) return;
     
     RTCIceCandidate *iceCandidate = [[RTCIceCandidate alloc] initWithSdp:candidate
-                                                         sdpMLineIndex:[sdpMLineIndex intValue]
-                                                                sdpMid:sdpMid];
+                                                       sdpMLineIndex:[sdpMLineIndex intValue]
+                                                              sdpMid:sdpMid];
     
     [_peerConnection addIceCandidate:iceCandidate completionHandler:^(NSError * _Nullable error) {
         if (error) {
-            writeLog(@"Erro ao adicionar candidato ICE: %@", error);
+            vcam_logf(@"Erro ao adicionar candidato ICE: %@", error);
         }
     }];
 }
@@ -251,36 +303,51 @@
 #pragma mark - NSURLSessionWebSocketDelegate
 
 - (void)URLSession:(NSURLSession *)session webSocketTask:(NSURLSessionWebSocketTask *)webSocketTask
-   didOpenWithProtocol:(NSString *)protocol {
-    writeLog(@"WebSocket conectado");
+ didOpenWithProtocol:(NSString *)protocol {
+    vcam_log(@"WebSocket conectado com sucesso");
     
     // Enviar JOIN
     [self sendJoinMessage];
 }
 
 - (void)URLSession:(NSURLSession *)session webSocketTask:(NSURLSessionWebSocketTask *)webSocketTask
-   didCloseWithCode:(NSURLSessionWebSocketCloseCode)closeCode reason:(NSData *)reason {
-    writeLog(@"WebSocket fechado");
+ didCloseWithCode:(NSURLSessionWebSocketCloseCode)closeCode reason:(NSData *)reason {
+    vcam_log(@"WebSocket fechado");
+    
+    NSString *reasonStr = reason ? [[NSString alloc] initWithData:reason encoding:NSUTF8StringEncoding] : @"Desconhecido";
+    vcam_logf(@"Razão do fechamento: %@", reasonStr);
     
     _webSocketTask = nil;
     _isReceivingFrames = NO;
+    
+    // Tentar reconectar se ainda estiver ativo
+    if (_active) {
+        dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(3 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
+            [self connectWebSocket];
+        });
+    }
 }
 
 #pragma mark - RTCPeerConnectionDelegate
 
 - (void)peerConnection:(RTCPeerConnection *)peerConnection didAddStream:(RTCMediaStream *)stream {
+    if (!_active) return;
+    
+    vcam_logf(@"Stream adicionada: %@ (áudio: %lu, vídeo: %lu)",
+            stream.streamId, (unsigned long)stream.audioTracks.count, (unsigned long)stream.videoTracks.count);
+    
     if (stream.videoTracks.count > 0) {
         _videoTrack = stream.videoTracks[0];
-        writeLog(@"Stream de vídeo recebida");
+        vcam_logf(@"Faixa de vídeo recebida: %@", _videoTrack.trackId);
         
-        // Configurar recepção de frames
+        // Adicionar self como renderer para receber frames
         [_videoTrack addRenderer:(id<RTCVideoRenderer>)self];
         _isReceivingFrames = YES;
     }
 }
 
 - (void)peerConnection:(RTCPeerConnection *)peerConnection didGenerateIceCandidate:(RTCIceCandidate *)candidate {
-    if (!_webSocketTask) return;
+    if (!_webSocketTask || !_active) return;
     
     NSDictionary *message = @{
         @"type": @"ice-candidate",
@@ -294,19 +361,42 @@
     NSString *jsonString = [[NSString alloc] initWithData:jsonData encoding:NSUTF8StringEncoding];
     
     [_webSocketTask sendMessage:[[NSURLSessionWebSocketMessage alloc] initWithString:jsonString]
-                   completionHandler:^(NSError * _Nullable error) {
-                       if (error) {
-                           writeLog(@"Erro ao enviar candidato ICE: %@", error);
-                       }
-                   }];
+                 completionHandler:^(NSError * _Nullable error) {
+        if (error) {
+            vcam_logf(@"Erro ao enviar candidato ICE: %@", error);
+        }
+    }];
 }
 
 - (void)peerConnection:(RTCPeerConnection *)peerConnection didChangeIceConnectionState:(RTCIceConnectionState)newState {
+    NSString *stateString = @"Desconhecido";
+    switch (newState) {
+        case RTCIceConnectionStateNew: stateString = @"Novo"; break;
+        case RTCIceConnectionStateChecking: stateString = @"Verificando"; break;
+        case RTCIceConnectionStateConnected: stateString = @"Conectado"; break;
+        case RTCIceConnectionStateCompleted: stateString = @"Completo"; break;
+        case RTCIceConnectionStateFailed: stateString = @"Falha"; break;
+        case RTCIceConnectionStateDisconnected: stateString = @"Desconectado"; break;
+        case RTCIceConnectionStateClosed: stateString = @"Fechado"; break;
+        default: break;
+    }
+    
+    vcam_logf(@"Estado da conexão ICE alterado: %@", stateString);
+    
     if (newState == RTCIceConnectionStateConnected || newState == RTCIceConnectionStateCompleted) {
-        writeLog(@"Conexão ICE estabelecida");
+        vcam_log(@"Conexão WebRTC estabelecida com sucesso");
     } else if (newState == RTCIceConnectionStateFailed || newState == RTCIceConnectionStateDisconnected) {
-        writeLog(@"Conexão ICE perdida");
+        vcam_log(@"Conexão WebRTC perdida, irá tentar reconectar");
         _isReceivingFrames = NO;
+        
+        // Tentar reconectar se ainda estiver ativo
+        if (_active) {
+            [self stopWebRTC];
+            
+            dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(3 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
+                [self startWebRTC];
+            });
+        }
     }
 }
 
@@ -318,25 +408,26 @@
 - (void)peerConnection:(RTCPeerConnection *)peerConnection didOpenDataChannel:(RTCDataChannel *)dataChannel {}
 - (void)peerConnection:(RTCPeerConnection *)peerConnection didRemoveIceCandidates:(NSArray<RTCIceCandidate *> *)candidates {}
 
-#pragma mark - RTCVideoRenderer (para receber frames)
+#pragma mark - RTCVideoRenderer
 
 - (void)setSize:(CGSize)size {
-    // Apenas para conformidade com o protocolo
+    vcam_logf(@"WebRTC: Tamanho do frame definido para %@", NSStringFromCGSize(size));
 }
 
 - (void)renderFrame:(RTCVideoFrame *)frame {
-    if (!frame) return;
+    if (!_active) return;
     
     // Armazenar último frame recebido
     if ([frame.buffer isKindOfClass:[RTCCVPixelBuffer class]]) {
         _lastFrame = (RTCCVPixelBuffer *)frame.buffer;
+        _isReceivingFrames = YES;
     }
 }
 
 #pragma mark - Obtenção de frames
 
 - (CMSampleBufferRef)getLatestVideoSampleBuffer {
-    if (!_lastFrame || !_lastFrame.pixelBuffer) {
+    if (!_lastFrame || !_lastFrame.pixelBuffer || !_active || !_isReceivingFrames) {
         return NULL;
     }
     
@@ -346,14 +437,16 @@
         kCFAllocatorDefault, _lastFrame.pixelBuffer, &formatDescription);
     
     if (status != 0) {
+        vcam_logf(@"Erro ao criar descrição de formato: %d", (int)status);
         return NULL;
     }
     
     // Criar timing info
-    CMSampleTimingInfo timingInfo = {0};
-    timingInfo.duration = CMTimeMake(1, 30); // 30fps
-    timingInfo.presentationTimeStamp = CMClockGetTime(CMClockGetHostTimeClock());
-    timingInfo.decodeTimeStamp = kCMTimeInvalid;
+    CMSampleTimingInfo timingInfo = {
+        .duration = CMTimeMake(1, 30),
+        .presentationTimeStamp = CMClockGetTime(CMClockGetHostTimeClock()),
+        .decodeTimeStamp = kCMTimeInvalid
+    };
     
     // Criar sample buffer
     CMSampleBufferRef sampleBuffer = NULL;
@@ -372,10 +465,17 @@
     CFRelease(formatDescription);
     
     if (status != 0) {
+        vcam_logf(@"Erro ao criar sample buffer: %d", (int)status);
         return NULL;
     }
     
     return sampleBuffer;
+}
+
+- (BOOL)isConnected {
+    return _active && _isReceivingFrames && _peerConnection &&
+           (_peerConnection.iceConnectionState == RTCIceConnectionStateConnected ||
+            _peerConnection.iceConnectionState == RTCIceConnectionStateCompleted);
 }
 
 @end

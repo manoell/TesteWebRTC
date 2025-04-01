@@ -1,108 +1,55 @@
 #import "Logger.h"
-#import <UIKit/UIKit.h>
 
-// Caminho do arquivo de log
-static NSString *gLogPath = @"/tmp/webrtc_camera.log";
-
-// Lock para acesso ao arquivo (thread safety)
-static NSLock *gLogLock = nil;
-
-// Inicialização
-__attribute__((constructor))
-static void initialize() {
-    gLogLock = [[NSLock alloc] init];
+// Função para registrar logs no arquivo
+void vcam_log(NSString *message) {
+    static dispatch_queue_t logQueue = nil;
+    static NSDateFormatter *dateFormatter = nil;
+    static dispatch_once_t onceToken;
     
-    // Criar cabeçalho de início de sessão
-    NSDateFormatter *formatter = [[NSDateFormatter alloc] init];
-    [formatter setDateFormat:@"yyyy-MM-dd HH:mm:ss"];
+    dispatch_once(&onceToken, ^{
+        // Cria uma fila dedicada para operações de log
+        logQueue = dispatch_queue_create("com.vcam.log", DISPATCH_QUEUE_SERIAL);
+        
+        // Inicializa o formatador de data
+        dateFormatter = [[NSDateFormatter alloc] init];
+        [dateFormatter setDateFormat:@"yyyy-MM-dd HH:mm:ss.SSS"];
+    });
     
-    UIDevice *device = [UIDevice currentDevice];
-    NSString *sessionHeader = [NSString stringWithFormat:
-                              @"\n\n=== NOVA SESSÃO - %@ ===\n"
-                              @"Device: %@ (%@)\n"
-                              @"iOS: %@\n"
-                              @"=================================\n\n",
-                              [formatter stringFromDate:[NSDate date]],
-                              device.model,
-                              device.systemName,
-                              device.systemVersion];
-    
-    // Escrever cabeçalho se o arquivo de log existir, ou criá-lo
-    NSFileManager *fileManager = [NSFileManager defaultManager];
-    BOOL fileExists = [fileManager fileExistsAtPath:gLogPath];
-    
-    if (fileExists) {
-        [gLogLock lock];
-        @try {
-            NSFileHandle *fileHandle = [NSFileHandle fileHandleForWritingAtPath:gLogPath];
-            [fileHandle seekToEndOfFile];
-            [fileHandle writeData:[sessionHeader dataUsingEncoding:NSUTF8StringEncoding]];
-            [fileHandle closeFile];
-        } @catch (NSException *e) {
-            NSLog(@"[WebRTCTweak] Erro ao inicializar log: %@", e);
-        } @finally {
-            [gLogLock unlock];
+    dispatch_async(logQueue, ^{
+        // Obtém a data e hora atual
+        NSString *timestamp = [dateFormatter stringFromDate:[NSDate date]];
+        
+        // Formata a mensagem de log com timestamp
+        NSString *logMessage = [NSString stringWithFormat:@"[%@] %@\n", timestamp, message];
+        
+        // Caminho para o arquivo de log
+        NSString *logPath = @"/tmp/vcam_debug.log";
+        
+        // Verifica se o arquivo existe, se não, cria-o
+        if (![[NSFileManager defaultManager] fileExistsAtPath:logPath]) {
+            [@"" writeToFile:logPath atomically:YES encoding:NSUTF8StringEncoding error:nil];
         }
-    } else {
-        // Criar novo arquivo com cabeçalho
-        [sessionHeader writeToFile:gLogPath atomically:YES encoding:NSUTF8StringEncoding error:nil];
-    }
-}
-
-// Função interna para escrita de log
-static void writeLogInternal(NSString *prefix, NSString *message) {
-    if (!message) return;
-    
-    // Adicionar timestamp
-    NSDateFormatter *dateFormatter = [[NSDateFormatter alloc] init];
-    [dateFormatter setDateFormat:@"yyyy-MM-dd HH:mm:ss.SSS"];
-    NSString *timestamp = [dateFormatter stringFromDate:[NSDate date]];
-    
-    // Incluir thread ID para ajudar na depuração
-    NSString *threadIdentifier = [NSString stringWithFormat:@"%p", [NSThread currentThread]];
-    
-    NSString *logMessage = [NSString stringWithFormat:@"[%@][%@]%@ %@\n",
-                          timestamp,
-                          threadIdentifier,
-                          prefix,
-                          message];
-    
-    // Log no console
-    NSLog(@"[WebRTCTweak]%@ %@", prefix, message);
-    
-    // Log em arquivo
-    [gLogLock lock];
-    @try {
-        NSFileHandle *fileHandle = [NSFileHandle fileHandleForWritingAtPath:gLogPath];
+        
+        // Abre o arquivo em modo de anexação
+        NSFileHandle *fileHandle = [NSFileHandle fileHandleForWritingAtPath:logPath];
         if (fileHandle) {
             [fileHandle seekToEndOfFile];
             [fileHandle writeData:[logMessage dataUsingEncoding:NSUTF8StringEncoding]];
             [fileHandle closeFile];
-        } else {
-            // Tentar criar o arquivo se não existir
-            [logMessage writeToFile:gLogPath atomically:YES encoding:NSUTF8StringEncoding error:nil];
         }
-    } @catch (NSException *e) {
-        NSLog(@"[WebRTCTweak] Erro ao escrever log: %@", e);
-    } @finally {
-        [gLogLock unlock];
-    }
+        
+        // Também exibe no console para facilitar diagnóstico
+        NSLog(@"[WebRTCCamera] %@", message);
+    });
 }
 
-void writeLog(NSString *format, ...) {
+// Função para registrar logs com formato, semelhante a NSLog
+void vcam_logf(NSString *format, ...) {
     va_list args;
     va_start(args, format);
     NSString *message = [[NSString alloc] initWithFormat:format arguments:args];
     va_end(args);
     
-    writeLogInternal(@"[INFO]", message);
-}
-
-void writeErrorLog(NSString *format, ...) {
-    va_list args;
-    va_start(args, format);
-    NSString *message = [[NSString alloc] initWithFormat:format arguments:args];
-    va_end(args);
-    
-    writeLogInternal(@"[ERROR]", message);
+    // Usa a função vcam_log para registrar a mensagem formatada
+    vcam_log(message);
 }

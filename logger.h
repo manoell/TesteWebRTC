@@ -3,15 +3,16 @@
 
 #import <Foundation/Foundation.h>
 
+// Adiciona extern "C" para compatibilidade com C++
 #ifdef __cplusplus
 extern "C" {
 #endif
 
-// Função para escrever log normal
-void writeLog(NSString *format, ...);
+// Função para registrar logs no arquivo
+void vcam_log(NSString *message);
 
-// Função para escrever log de erro
-void writeErrorLog(NSString *format, ...);
+// Função para registrar logs com formato, semelhante a NSLog
+void vcam_logf(NSString *format, ...);
 
 #ifdef __cplusplus
 }

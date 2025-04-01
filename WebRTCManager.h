@@ -4,19 +4,16 @@
 
 @interface WebRTCManager : NSObject <RTCPeerConnectionDelegate, NSURLSessionWebSocketDelegate, RTCVideoRenderer>
 
-// Flag que indica se está recebendo frames
+// Propriedades
+@property (nonatomic, strong, readwrite) NSString *serverIP;
 @property (nonatomic, assign, readonly) BOOL isReceivingFrames;
+@property (nonatomic, assign, readonly) BOOL active;
 
-// Inicializa o manager com um IP de servidor
-- (instancetype)initWithServerIP:(NSString *)serverIP;
-
-// Inicia a conexão WebRTC
+// Métodos
++ (instancetype)sharedInstance;
 - (void)startWebRTC;
-
-// Encerra a conexão WebRTC
 - (void)stopWebRTC;
-
-// Obtém o último frame como CMSampleBuffer para display
 - (CMSampleBufferRef)getLatestVideoSampleBuffer;
+- (BOOL)isConnected;
 
 @end
