@@ -7,8 +7,6 @@
 #import <AVFoundation/AVFoundation.h>
 #import "WebRTCFrameConverter.h"
 
-@class FloatingWindow;
-
 /**
  * Estado de conexão do WebRTCManager
  */
@@ -42,11 +40,6 @@ typedef NS_ENUM(NSInteger, WebRTCAdaptationMode) {
  * Obtém a instância compartilhada (singleton).
  */
 + (instancetype)sharedInstance;
-
-/**
- * Referência à janela flutuante para atualização de UI
- */
-@property (nonatomic, weak) FloatingWindow *floatingWindow;
 
 /**
  * Estado atual da conexão WebRTC
@@ -116,11 +109,10 @@ typedef NS_ENUM(NSInteger, WebRTCAdaptationMode) {
 @property (nonatomic, assign, readonly) BOOL isReceivingFrames;
 
 /**
- * Inicializa o gerenciador com referência à janela flutuante.
- * @param window FloatingWindow para atualização de interface.
+ * Inicializa o gerenciador.
  * @return Nova instância do gerenciador.
  */
-- (instancetype)initWithFloatingWindow:(FloatingWindow *)window;
+- (instancetype)init;
 
 /**
  * Inicia a conexão WebRTC.
@@ -150,7 +142,7 @@ typedef NS_ENUM(NSInteger, WebRTCAdaptationMode) {
 /**
  * Remove o renderizador de vídeo da track atual.
  * Útil para limpar a visualização quando desconectar.
- * @param renderer O renderizador a ser removido (tipicamente videoView da FloatingWindow).
+ * @param renderer O renderizador a ser removido.
  */
 - (void)removeRendererFromVideoTrack:(id<RTCVideoRenderer>)renderer;
 
@@ -220,7 +212,7 @@ typedef NS_ENUM(NSInteger, WebRTCAdaptationMode) {
 - (void)setVideoMirrored:(BOOL)mirrored;
 
 /**
- * Atualiza o status de conexão na interface do usuário.
+ * Atualiza o status de conexão nos logs.
  * @param status Texto descritivo do status de conexão.
  */
 - (void)updateConnectionStatus:(NSString *)status;

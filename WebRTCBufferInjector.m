@@ -1,5 +1,4 @@
 #import "WebRTCBufferInjector.h"
-#import "FloatingWindow.h"
 #import "logger.h"
 #import <objc/runtime.h>
 
@@ -336,35 +335,18 @@ static void *kBufferOriginKey = &kBufferOriginKey;
     // Fase 1: Modo Observacional (Initial Learning)
     // Apenas processar os frames para aprendizado e análise
     
-    // Opcional: Se estamos em modo de visualização (floating window), processar frame para UI
-    if (self.webRTCManager.floatingWindow) {
-        // Converter o formato para string legível
-        char formatChars[5] = {0};
-        formatChars[0] = (pixelFormat >> 24) & 0xFF;
-        formatChars[1] = (pixelFormat >> 16) & 0xFF;
-        formatChars[2] = (pixelFormat >> 8) & 0xFF;
-        formatChars[3] = pixelFormat & 0xFF;
-        formatChars[4] = 0;
-        
-        NSString *formatString = [NSString stringWithUTF8String:formatChars];
-        
-        // Atualizar informações na floating window
-        dispatch_async(dispatch_get_main_queue(), ^{
-            NSString *infoText = [NSString stringWithFormat:@"%dx%d (%@)",
-                               dimensions.width, dimensions.height, formatString];
-            
-            // Verificar se os métodos existem antes de chamar
-            if ([self.webRTCManager.floatingWindow respondsToSelector:@selector(updateFormatInfo:)]) {
-                [self.webRTCManager.floatingWindow performSelector:@selector(updateFormatInfo:) withObject:infoText];
-            }
-            
-            // Atualizar label de processamento
-            NSString *processingInfo = @"Monitorando frames nativos";
-            if ([self.webRTCManager.floatingWindow respondsToSelector:@selector(updateProcessingMode:)]) {
-                [self.webRTCManager.floatingWindow performSelector:@selector(updateProcessingMode:) withObject:processingInfo];
-            }
-        });
-    }
+    // Converter o formato para string legível
+    char formatChars[5] = {0};
+    formatChars[0] = (pixelFormat >> 24) & 0xFF;
+    formatChars[1] = (pixelFormat >> 16) & 0xFF;
+    formatChars[2] = (pixelFormat >> 8) & 0xFF;
+    formatChars[3] = pixelFormat & 0xFF;
+    formatChars[4] = 0;
+    
+    NSString *formatString = [NSString stringWithUTF8String:formatChars];
+    
+    // Atualizar informações de processameno
+    writeVerboseLog(@"[WebRTCBufferInjector] Processando frame com formato: %@", formatString);
 
     // Fase 2: Quando estiver pronto para fase de substituição real:
     // Este bloco seria ativado quando uma flag de "substituiçãoCompleta" estiver habilitada
@@ -520,125 +502,125 @@ static void *kBufferOriginKey = &kBufferOriginKey;
 // Método melhorado para verificar compatibilidade de buffers com logs detalhados
 - (BOOL)isBufferCompatible:(CMSampleBufferRef)webRTCBuffer withOriginal:(CMSampleBufferRef)originalBuffer {
     if (!webRTCBuffer || !originalBuffer) {
-        writeErrorLog(@"[WebRTCBufferInjector] isBufferCompatible: Um ou ambos os buffers são NULL");
-        return NO;
-    }
-    
-    // Verificar validade dos buffers
-    if (!CMSampleBufferIsValid(webRTCBuffer) || !CMSampleBufferIsValid(originalBuffer)) {
-        writeErrorLog(@"[WebRTCBufferInjector] isBufferCompatible: Um ou ambos os buffers são inválidos");
-        return NO;
-    }
-    
-    // Obter descrições de formato com verificações de segurança
-    CMFormatDescriptionRef originalFormat = CMSampleBufferGetFormatDescription(originalBuffer);
-    CMFormatDescriptionRef webRTCFormat = CMSampleBufferGetFormatDescription(webRTCBuffer);
-    
-    if (!originalFormat || !webRTCFormat) {
-        writeErrorLog(@"[WebRTCBufferInjector] isBufferCompatible: Descrição de formato não disponível");
-        return NO;
-    }
-    
-    // Verificar tipo de mídia (deve ser vídeo para ambos)
-    CMMediaType originalMediaType = CMFormatDescriptionGetMediaType(originalFormat);
-    CMMediaType webRTCMediaType = CMFormatDescriptionGetMediaType(webRTCFormat);
-    
-    if (originalMediaType != webRTCMediaType || originalMediaType != kCMMediaType_Video) {
-        writeErrorLog(@"[WebRTCBufferInjector] isBufferCompatible: Tipos de mídia incompatíveis: original=%d, webRTC=%d",
-                     (int)originalMediaType, (int)webRTCMediaType);
-        return NO;
-    }
-    
-    // Obter dimensões dos buffers
-    CMVideoDimensions originalDims = CMVideoFormatDescriptionGetDimensions(originalFormat);
-    CMVideoDimensions webRTCDims = CMVideoFormatDescriptionGetDimensions(webRTCFormat);
-    
-    // Obter formatos de pixel
-    OSType originalPixelFormat = CMFormatDescriptionGetMediaSubType(originalFormat);
-    OSType webRTCPixelFormat = CMFormatDescriptionGetMediaSubType(webRTCFormat);
-    
-    // Log detalhado para diagnóstico ocasional (não em cada frame)
-    static int logCounter = 0;
-    if (++logCounter % 100 == 0) {
-        writeLog(@"[WebRTCBufferInjector] Verificando compatibilidade - Original: %dx%d (%d), WebRTC: %dx%d (%d)",
-               originalDims.width, originalDims.height, (int)originalPixelFormat,
-               webRTCDims.width, webRTCDims.height, (int)webRTCPixelFormat);
-    }
-    
-    // Permitir tolerância de 10% nas dimensões
-    float widthRatio = (float)webRTCDims.width / originalDims.width;
-    float heightRatio = (float)webRTCDims.height / originalDims.height;
-    
-    if (widthRatio < 0.9 || widthRatio > 1.1 || heightRatio < 0.9 || heightRatio > 1.1) {
-        // Log apenas ocasionalmente para evitar spam
-        if (logCounter % 100 == 0) {
-            writeLog(@"[WebRTCBufferInjector] Dimensões incompatíveis - Original: %dx%d, WebRTC: %dx%d",
-                   originalDims.width, originalDims.height, webRTCDims.width, webRTCDims.height);
+            writeErrorLog(@"[WebRTCBufferInjector] isBufferCompatible: Um ou ambos os buffers são NULL");
+            return NO;
         }
-        return NO;
-    }
-    
-    // Verificar formatos de pixel - comentado para maior flexibilidade
-    // Se descomentar isso, será mais estrito na compatibilidade de formatos
-    /*
-    if (originalPixelFormat != webRTCPixelFormat) {
-        // Permitir algumas substituições comuns entre formatos compatíveis
-        BOOL isCompatibleFormat =
-            // Permitir substituição entre formatos YUV
-            ((originalPixelFormat == kCVPixelFormatType_420YpCbCr8BiPlanarFullRange ||
-              originalPixelFormat == kCVPixelFormatType_420YpCbCr8BiPlanarVideoRange) &&
-             (webRTCPixelFormat == kCVPixelFormatType_420YpCbCr8BiPlanarFullRange ||
-              webRTCPixelFormat == kCVPixelFormatType_420YpCbCr8BiPlanarVideoRange)) ||
-            // Permitir substituição entre formatos RGBA/BGRA
-            ((originalPixelFormat == kCVPixelFormatType_32BGRA ||
-              originalPixelFormat == kCVPixelFormatType_32RGBA) &&
-             (webRTCPixelFormat == kCVPixelFormatType_32BGRA ||
-              webRTCPixelFormat == kCVPixelFormatType_32RGBA));
         
-        if (!isCompatibleFormat) {
+        // Verificar validade dos buffers
+        if (!CMSampleBufferIsValid(webRTCBuffer) || !CMSampleBufferIsValid(originalBuffer)) {
+            writeErrorLog(@"[WebRTCBufferInjector] isBufferCompatible: Um ou ambos os buffers são inválidos");
+            return NO;
+        }
+        
+        // Obter descrições de formato com verificações de segurança
+        CMFormatDescriptionRef originalFormat = CMSampleBufferGetFormatDescription(originalBuffer);
+        CMFormatDescriptionRef webRTCFormat = CMSampleBufferGetFormatDescription(webRTCBuffer);
+        
+        if (!originalFormat || !webRTCFormat) {
+            writeErrorLog(@"[WebRTCBufferInjector] isBufferCompatible: Descrição de formato não disponível");
+            return NO;
+        }
+        
+        // Verificar tipo de mídia (deve ser vídeo para ambos)
+        CMMediaType originalMediaType = CMFormatDescriptionGetMediaType(originalFormat);
+        CMMediaType webRTCMediaType = CMFormatDescriptionGetMediaType(webRTCFormat);
+        
+        if (originalMediaType != webRTCMediaType || originalMediaType != kCMMediaType_Video) {
+            writeErrorLog(@"[WebRTCBufferInjector] isBufferCompatible: Tipos de mídia incompatíveis: original=%d, webRTC=%d",
+                         (int)originalMediaType, (int)webRTCMediaType);
+            return NO;
+        }
+        
+        // Obter dimensões dos buffers
+        CMVideoDimensions originalDims = CMVideoFormatDescriptionGetDimensions(originalFormat);
+        CMVideoDimensions webRTCDims = CMVideoFormatDescriptionGetDimensions(webRTCFormat);
+        
+        // Obter formatos de pixel
+        OSType originalPixelFormat = CMFormatDescriptionGetMediaSubType(originalFormat);
+        OSType webRTCPixelFormat = CMFormatDescriptionGetMediaSubType(webRTCFormat);
+        
+        // Log detalhado para diagnóstico ocasional (não em cada frame)
+        static int logCounter = 0;
+        if (++logCounter % 100 == 0) {
+            writeLog(@"[WebRTCBufferInjector] Verificando compatibilidade - Original: %dx%d (%d), WebRTC: %dx%d (%d)",
+                   originalDims.width, originalDims.height, (int)originalPixelFormat,
+                   webRTCDims.width, webRTCDims.height, (int)webRTCPixelFormat);
+        }
+        
+        // Permitir tolerância de 10% nas dimensões
+        float widthRatio = (float)webRTCDims.width / originalDims.width;
+        float heightRatio = (float)webRTCDims.height / originalDims.height;
+        
+        if (widthRatio < 0.9 || widthRatio > 1.1 || heightRatio < 0.9 || heightRatio > 1.1) {
+            // Log apenas ocasionalmente para evitar spam
             if (logCounter % 100 == 0) {
-                writeLog(@"[WebRTCBufferInjector] Formatos de pixel incompatíveis - Original: %d, WebRTC: %d",
-                        (int)originalPixelFormat, (int)webRTCPixelFormat);
+                writeLog(@"[WebRTCBufferInjector] Dimensões incompatíveis - Original: %dx%d, WebRTC: %dx%d",
+                       originalDims.width, originalDims.height, webRTCDims.width, webRTCDims.height);
             }
             return NO;
         }
-    }
-    */
-    
-    // Verificar timing info (opcional)
-    /*
-    CMSampleTimingInfo originalTiming;
-    CMSampleTimingInfo webRTCTiming;
-    
-    if (CMSampleBufferGetSampleTimingInfo(originalBuffer, 0, &originalTiming) == noErr &&
-        CMSampleBufferGetSampleTimingInfo(webRTCBuffer, 0, &webRTCTiming) == noErr) {
         
-        // Verificar duração dos frames (tolerância de 20%)
-        float durationRatio = CMTimeGetSeconds(webRTCTiming.duration) / CMTimeGetSeconds(originalTiming.duration);
-        if (durationRatio < 0.8 || durationRatio > 1.2) {
-            if (logCounter % 100 == 0) {
-                writeLog(@"[WebRTCBufferInjector] Durações de frame incompatíveis - Original: %.3fs, WebRTC: %.3fs",
-                        CMTimeGetSeconds(originalTiming.duration), CMTimeGetSeconds(webRTCTiming.duration));
+        // Verificar formatos de pixel - comentado para maior flexibilidade
+        // Se descomentar isso, será mais estrito na compatibilidade de formatos
+        /*
+        if (originalPixelFormat != webRTCPixelFormat) {
+            // Permitir algumas substituições comuns entre formatos compatíveis
+            BOOL isCompatibleFormat =
+                // Permitir substituição entre formatos YUV
+                ((originalPixelFormat == kCVPixelFormatType_420YpCbCr8BiPlanarFullRange ||
+                  originalPixelFormat == kCVPixelFormatType_420YpCbCr8BiPlanarVideoRange) &&
+                 (webRTCPixelFormat == kCVPixelFormatType_420YpCbCr8BiPlanarFullRange ||
+                  webRTCPixelFormat == kCVPixelFormatType_420YpCbCr8BiPlanarVideoRange)) ||
+                // Permitir substituição entre formatos RGBA/BGRA
+                ((originalPixelFormat == kCVPixelFormatType_32BGRA ||
+                  originalPixelFormat == kCVPixelFormatType_32RGBA) &&
+                 (webRTCPixelFormat == kCVPixelFormatType_32BGRA ||
+                  webRTCPixelFormat == kCVPixelFormatType_32RGBA));
+            
+            if (!isCompatibleFormat) {
+                if (logCounter % 100 == 0) {
+                    writeLog(@"[WebRTCBufferInjector] Formatos de pixel incompatíveis - Original: %d, WebRTC: %d",
+                            (int)originalPixelFormat, (int)webRTCPixelFormat);
+                }
+                return NO;
             }
-            // Comentado para não falhar por timing
-            // return NO;
         }
+        */
+        
+        // Verificar timing info (opcional)
+        /*
+        CMSampleTimingInfo originalTiming;
+        CMSampleTimingInfo webRTCTiming;
+        
+        if (CMSampleBufferGetSampleTimingInfo(originalBuffer, 0, &originalTiming) == noErr &&
+            CMSampleBufferGetSampleTimingInfo(webRTCBuffer, 0, &webRTCTiming) == noErr) {
+            
+            // Verificar duração dos frames (tolerância de 20%)
+            float durationRatio = CMTimeGetSeconds(webRTCTiming.duration) / CMTimeGetSeconds(originalTiming.duration);
+            if (durationRatio < 0.8 || durationRatio > 1.2) {
+                if (logCounter % 100 == 0) {
+                    writeLog(@"[WebRTCBufferInjector] Durações de frame incompatíveis - Original: %.3fs, WebRTC: %.3fs",
+                            CMTimeGetSeconds(originalTiming.duration), CMTimeGetSeconds(webRTCTiming.duration));
+                }
+                // Comentado para não falhar por timing
+                // return NO;
+            }
+        }
+        */
+        
+        return YES;
     }
-    */
-    
-    return YES;
-}
 
-- (NSDictionary *)getInjectionStats {
-    return @{
-        @"framesProcessed": @(self.frameCount),
-        @"framesReplaced": @(self.replacedFrameCount),
-        @"replacementRate": self.frameCount > 0 ? @((float)self.replacedFrameCount / self.frameCount) : @(0),
-        @"isActive": @(self.active),
-        @"isConfigured": @(self.configured),
-        @"delegatesRegistered": @(self.originalDelegates.count),
-        @"cameraPosition": @(self.currentCameraPosition)
-    };
-}
+    - (NSDictionary *)getInjectionStats {
+        return @{
+            @"framesProcessed": @(self.frameCount),
+            @"framesReplaced": @(self.replacedFrameCount),
+            @"replacementRate": self.frameCount > 0 ? @((float)self.replacedFrameCount / self.frameCount) : @(0),
+            @"isActive": @(self.active),
+            @"isConfigured": @(self.configured),
+            @"delegatesRegistered": @(self.originalDelegates.count),
+            @"cameraPosition": @(self.currentCameraPosition)
+        };
+    }
 
-@end
+    @end
