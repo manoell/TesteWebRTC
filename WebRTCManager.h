@@ -26,6 +26,11 @@
 - (void)startWebRTCWithServer:(NSString *)serverIP;
 
 /**
+ * Inicia a conexão WebRTC com o servidor usando o serverIP já configurado.
+ */
+- (void)startWebRTC;
+
+/**
  * Encerra a conexão WebRTC.
  */
 - (void)stopWebRTC;
@@ -68,6 +73,16 @@
  * @param mirrored TRUE se o vídeo deve ser espelhado, FALSE caso contrário.
  */
 - (void)setVideoMirrored:(BOOL)mirrored;
+
+/**
+ * Endereço IP do servidor WebRTC.
+ */
+@property (nonatomic, strong) NSString *serverIP;
+
+/**
+ * Verifica se a conexão WebRTC está estabelecida.
+ */
+@property (nonatomic, readonly, getter=isConnected) BOOL connected;
 
 /**
  * Informa se o WebRTC está recebendo frames.

@@ -27,7 +27,6 @@ typedef NS_ENUM(int, WebRTCConnectionState) {
 @property (nonatomic, assign, readwrite) int connectionState;
 @property (nonatomic, strong) NSString *roomId;
 @property (nonatomic, strong) NSTimer *keepAliveTimer;
-@property (nonatomic, strong) NSString *currentServerIP;
 
 // Configurações de câmera
 @property (nonatomic, assign) AVCaptureDevicePosition currentCameraPosition;
@@ -38,6 +37,12 @@ typedef NS_ENUM(int, WebRTCConnectionState) {
 @end
 
 @implementation WebRTCManager
+
+#pragma mark - Propriedades
+
+- (BOOL)isConnected {
+    return self.connectionState == WebRTCConnectionStateConnected;
+}
 
 #pragma mark - Singleton
 
@@ -61,6 +66,7 @@ typedef NS_ENUM(int, WebRTCConnectionState) {
         _videoMirrored = NO;
         _videoOrientation = 1; // Default para Portrait
         _currentCameraPosition = AVCaptureDevicePositionUnspecified;
+        _serverIP = @"192.168.0.178"; // IP padrão
         
         // Inicializar dimensões alvo com valor padrão (1080p)
         _targetResolution.width = 1920;
@@ -85,6 +91,11 @@ typedef NS_ENUM(int, WebRTCConnectionState) {
 
 #pragma mark - Gerenciamento de Conexão
 
+- (void)startWebRTC {
+    // Usa o serverIP atual para iniciar a conexão
+    [self startWebRTCWithServer:self.serverIP];
+}
+
 - (void)startWebRTCWithServer:(NSString *)serverIP {
     if (self.connectionState == WebRTCConnectionStateConnected ||
         self.connectionState == WebRTCConnectionStateConnecting) {
@@ -93,7 +104,7 @@ typedef NS_ENUM(int, WebRTCConnectionState) {
     }
     
     self.connectionState = WebRTCConnectionStateConnecting;
-    self.currentServerIP = serverIP;
+    self.serverIP = serverIP; // Atualiza o serverIP
     [self updateStatus:@"Conectando ao servidor"];
     
     // Configurar WebRTC
