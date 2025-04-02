@@ -92,20 +92,23 @@ typedef NS_ENUM(int, WebRTCConnectionState) {
 #pragma mark - Gerenciamento de Conexão
 
 - (void)startWebRTC {
+    // Evita múltiplas tentativas de conexão simultâneas
+    if (self.connectionState == WebRTCConnectionStateConnected ||
+        self.connectionState == WebRTCConnectionStateConnecting) {
+        NSLog(@"[WebRTCManager] Já conectado ou conectando ao servidor");
+        [self updateStatus:@"Já conectado ou conectando"];
+        return;
+    }
+    
     // Usa o serverIP atual para iniciar a conexão
     [self startWebRTCWithServer:self.serverIP];
 }
 
 - (void)startWebRTCWithServer:(NSString *)serverIP {
-    if (self.connectionState == WebRTCConnectionStateConnected ||
-        self.connectionState == WebRTCConnectionStateConnecting) {
-        [self updateStatus:@"Já conectado ou conectando"];
-        return;
-    }
-    
     self.connectionState = WebRTCConnectionStateConnecting;
     self.serverIP = serverIP; // Atualiza o serverIP
     [self updateStatus:@"Conectando ao servidor"];
+    NSLog(@"[WebRTCManager] Conectando ao servidor: %@", serverIP);
     
     // Configurar WebRTC
     [self setupWebRTC];
@@ -116,6 +119,7 @@ typedef NS_ENUM(int, WebRTCConnectionState) {
 
 - (void)stopWebRTC {
     [self updateStatus:@"Desconectando"];
+    NSLog(@"[WebRTCManager] Desconectando do servidor");
     
     // Parar keep-alive timer
     if (self.keepAliveTimer) {
@@ -173,6 +177,7 @@ typedef NS_ENUM(int, WebRTCConnectionState) {
     self.connectionState = WebRTCConnectionStateDisconnected;
     
     [self updateStatus:@"Desconectado"];
+    NSLog(@"[WebRTCManager] Desconectado do servidor");
 }
 
 - (void)setupWebRTC {
@@ -199,22 +204,22 @@ typedef NS_ENUM(int, WebRTCConnectionState) {
     RTCDefaultVideoEncoderFactory *encoderFactory = [[RTCDefaultVideoEncoderFactory alloc] init];
     
     self.factory = [[RTCPeerConnectionFactory alloc] initWithEncoderFactory:encoderFactory
-                                                             decoderFactory:decoderFactory];
+                                                           decoderFactory:decoderFactory];
     
     // Constraints para conexão (receber apenas vídeo, sem áudio)
     RTCMediaConstraints *constraints = [[RTCMediaConstraints alloc]
-                                     initWithMandatoryConstraints:@{
-                                         @"OfferToReceiveVideo": @"true",
-                                         @"OfferToReceiveAudio": @"false"
-                                     }
-                                     optionalConstraints:@{
-                                         @"DtlsSrtpKeyAgreement": @"true"
-                                     }];
+                                   initWithMandatoryConstraints:@{
+                                       @"OfferToReceiveVideo": @"true",
+                                       @"OfferToReceiveAudio": @"false"
+                                   }
+                                   optionalConstraints:@{
+                                       @"DtlsSrtpKeyAgreement": @"true"
+                                   }];
     
     // Criar a conexão Peer
     self.peerConnection = [self.factory peerConnectionWithConfiguration:config
-                                                          constraints:constraints
-                                                             delegate:self];
+                                                        constraints:constraints
+                                                           delegate:self];
     
     NSLog(@"[WebRTCManager] WebRTC configurado");
 }
@@ -234,8 +239,8 @@ typedef NS_ENUM(int, WebRTCConnectionState) {
     
     // Criar sessão URLSession
     self.session = [NSURLSession sessionWithConfiguration:[NSURLSessionConfiguration defaultSessionConfiguration]
-                                                 delegate:self
-                                            delegateQueue:[NSOperationQueue mainQueue]];
+                                               delegate:self
+                                          delegateQueue:[NSOperationQueue mainQueue]];
     
     // Criar tarefa WebSocket
     self.webSocketTask = [self.session webSocketTaskWithURL:wsURL];
@@ -245,6 +250,20 @@ typedef NS_ENUM(int, WebRTCConnectionState) {
     [self receiveMessages];
     
     NSLog(@"[WebRTCManager] Conectando ao WebSocket: %@", wsURLString);
+    
+    // Configurar timeout para a conexão (15 segundos)
+    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(15 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
+        if (self.connectionState == WebRTCConnectionStateConnecting) {
+            NSLog(@"[WebRTCManager] Timeout de conexão WebSocket");
+            self.connectionState = WebRTCConnectionStateError;
+            [self updateStatus:@"Timeout na conexão com servidor"];
+            
+            if (self.webSocketTask) {
+                [self.webSocketTask cancel];
+                self.webSocketTask = nil;
+            }
+        }
+    });
 }
 
 - (void)startKeepAliveTimer {
@@ -255,10 +274,10 @@ typedef NS_ENUM(int, WebRTCConnectionState) {
     
     // Criar novo timer para enviar pings a cada 5 segundos
     self.keepAliveTimer = [NSTimer scheduledTimerWithTimeInterval:5.0
-                                                           target:self
-                                                         selector:@selector(sendKeepAlive)
-                                                         userInfo:nil
-                                                          repeats:YES];
+                                                         target:self
+                                                       selector:@selector(sendKeepAlive)
+                                                       userInfo:nil
+                                                        repeats:YES];
 }
 
 - (void)sendKeepAlive {
@@ -286,6 +305,13 @@ typedef NS_ENUM(int, WebRTCConnectionState) {
         if (error) {
             NSLog(@"[WebRTCManager] Erro ao receber mensagem: %@", error);
             
+            // Verifica se é um erro de conexão
+            if ([error.domain isEqualToString:NSURLErrorDomain]) {
+                weakSelf.connectionState = WebRTCConnectionStateError;
+                [weakSelf updateStatus:[NSString stringWithFormat:@"Erro de conexão: %@", error.localizedDescription]];
+                return;
+            }
+            
             if (weakSelf.webSocketTask) {
                 // Tentar receber mais mensagens mesmo com erro
                 [weakSelf receiveMessages];
@@ -297,12 +323,13 @@ typedef NS_ENUM(int, WebRTCConnectionState) {
             NSData *data = [message.string dataUsingEncoding:NSUTF8StringEncoding];
             NSError *jsonError = nil;
             NSDictionary *jsonDict = [NSJSONSerialization JSONObjectWithData:data
-                                                                     options:0
-                                                                       error:&jsonError];
+                                                                   options:0
+                                                                     error:&jsonError];
             
             if (jsonError) {
                 NSLog(@"[WebRTCManager] Erro ao analisar mensagem JSON: %@", jsonError);
             } else {
+                NSLog(@"[WebRTCManager] Recebida mensagem JSON tipo: %@", jsonDict[@"type"]);
                 [weakSelf handleSignalingMessage:jsonDict];
             }
         }
@@ -322,8 +349,8 @@ typedef NS_ENUM(int, WebRTCConnectionState) {
     
     NSError *error = nil;
     NSData *jsonData = [NSJSONSerialization dataWithJSONObject:message
-                                                       options:0
-                                                         error:&error];
+                                                     options:0
+                                                       error:&error];
     
     if (error) {
         NSLog(@"[WebRTCManager] Erro ao serializar mensagem: %@", error);
@@ -385,14 +412,14 @@ typedef NS_ENUM(int, WebRTCConnectionState) {
         
         // Criar resposta
         RTCMediaConstraints *constraints = [[RTCMediaConstraints alloc]
-                                         initWithMandatoryConstraints:@{
-                                             @"OfferToReceiveVideo": @"true",
-                                             @"OfferToReceiveAudio": @"false"
-                                         }
-                                         optionalConstraints:nil];
+                                       initWithMandatoryConstraints:@{
+                                           @"OfferToReceiveVideo": @"true",
+                                           @"OfferToReceiveAudio": @"false"
+                                       }
+                                       optionalConstraints:nil];
         
         [weakSelf.peerConnection answerForConstraints:constraints
-                             completionHandler:^(RTCSessionDescription * _Nullable sdp, NSError * _Nullable error) {
+                           completionHandler:^(RTCSessionDescription * _Nullable sdp, NSError * _Nullable error) {
             if (error) {
                 NSLog(@"[WebRTCManager] Erro ao criar resposta: %@", error);
                 weakSelf.connectionState = WebRTCConnectionStateError;
@@ -431,8 +458,8 @@ typedef NS_ENUM(int, WebRTCConnectionState) {
     }
     
     RTCIceCandidate *iceCandidate = [[RTCIceCandidate alloc] initWithSdp:candidate
-                                                        sdpMLineIndex:[sdpMLineIndex intValue]
-                                                               sdpMid:sdpMid];
+                                                      sdpMLineIndex:[sdpMLineIndex intValue]
+                                                             sdpMid:sdpMid];
     
     [self.peerConnection addIceCandidate:iceCandidate completionHandler:^(NSError * _Nullable error) {
         if (error) {
@@ -548,7 +575,6 @@ typedef NS_ENUM(int, WebRTCConnectionState) {
 
 - (void)peerConnection:(RTCPeerConnection *)peerConnection didOpenDataChannel:(RTCDataChannel *)dataChannel {
     NSLog(@"[WebRTCManager] Data channel aberto: %@", dataChannel.label);
-    // Adicione implementação específica aqui se necessário
 }
 
 - (void)peerConnection:(RTCPeerConnection *)peerConnection didRemoveIceCandidates:(NSArray<RTCIceCandidate *> *)candidates {
@@ -565,34 +591,6 @@ typedef NS_ENUM(int, WebRTCConnectionState) {
 
 - (void)peerConnectionShouldNegotiate:(RTCPeerConnection *)peerConnection {
     // Não é necessário implementar para este caso
-}
-
-#pragma mark - Adaptação de câmera
-
-- (void)adaptToNativeCameraWithPosition:(AVCaptureDevicePosition)position {
-    self.currentCameraPosition = position;
-    
-    NSLog(@"[WebRTCManager] Adaptando para câmera: %@",
-          position == AVCaptureDevicePositionFront ? @"frontal" : @"traseira");
-}
-
-- (void)setTargetResolution:(CMVideoDimensions)resolution {
-    _targetResolution = resolution;
-    
-    NSLog(@"[WebRTCManager] Definindo resolução alvo: %dx%d",
-          resolution.width, resolution.height);
-}
-
-- (void)adaptOutputToVideoOrientation:(int)orientation {
-    self.videoOrientation = orientation;
-    
-    NSLog(@"[WebRTCManager] Adaptando para orientação: %d", orientation);
-}
-
-- (void)setVideoMirrored:(BOOL)mirrored {
-    _videoMirrored = mirrored;
-    
-    NSLog(@"[WebRTCManager] Espelhamento: %@", mirrored ? @"ativado" : @"desativado");
 }
 
 #pragma mark - Video Frames
@@ -614,6 +612,18 @@ typedef NS_ENUM(int, WebRTCConnectionState) {
     return NULL;
 }
 
+#pragma mark - Utilidades
+
+- (void)updateStatus:(NSString *)status {
+    NSLog(@"[WebRTCManager] Status: %@", status);
+    
+    if (self.statusUpdateCallback) {
+        dispatch_async(dispatch_get_main_queue(), ^{
+            self.statusUpdateCallback(status);
+        });
+    }
+}
+
 - (CMSampleBufferRef)getLatestVideoSampleBufferWithOriginalMetadata:(CMSampleBufferRef)originalBuffer {
     if (!self.isReceivingFrames || !self.videoTrack) {
         return NULL;
@@ -628,22 +638,64 @@ typedef NS_ENUM(int, WebRTCConnectionState) {
     }
     
     // Aplicar metadados do buffer original ao buffer WebRTC
-    // Este é um placeholder - a implementação completa seria mais complexa
-    // e envolveria extração e aplicação de metadados específicos da câmera
+    // Este é um método simplificado - adaptamos o timing
+    CMSampleBufferRef resultBuffer = NULL;
     
+    CVImageBufferRef pixelBuffer = CMSampleBufferGetImageBuffer(buffer);
+    if (pixelBuffer) {
+        // Obter informações de timing do buffer original
+        CMSampleTimingInfo timing;
+        OSStatus timingStatus = CMSampleBufferGetSampleTimingInfo(originalBuffer, 0, &timing);
+        
+        if (timingStatus == noErr) {
+            // Criar descrição de formato de vídeo para o novo buffer
+            CMVideoFormatDescriptionRef videoFormatDescription = NULL;
+            OSStatus status = CMVideoFormatDescriptionCreateForImageBuffer(kCFAllocatorDefault, pixelBuffer, &videoFormatDescription);
+            
+            if (status == noErr && videoFormatDescription) {
+                // Criar um novo buffer com o pixelBuffer do WebRTC mas com o timing do original
+                status = CMSampleBufferCreateForImageBuffer(kCFAllocatorDefault, pixelBuffer, true, NULL, NULL, videoFormatDescription, &timing, &resultBuffer);
+                
+                CFRelease(videoFormatDescription);
+                
+                if (status == noErr && resultBuffer) {
+                    CFRelease(buffer);
+                    return resultBuffer;
+                }
+            }
+        }
+    }
+    
+    // Se falhou a adaptação, retorna o buffer original do WebRTC
     return buffer;
 }
 
-#pragma mark - Utilidades
-
-- (void)updateStatus:(NSString *)status {
-    NSLog(@"[WebRTCManager] Status: %@", status);
+- (void)adaptToNativeCameraWithPosition:(AVCaptureDevicePosition)position {
+    self.currentCameraPosition = position;
     
-    if (self.statusUpdateCallback) {
-        dispatch_async(dispatch_get_main_queue(), ^{
-            self.statusUpdateCallback(status);
-        });
-    }
+    // Aqui você poderia implementar lógica para adaptar o stream
+    // baseado na posição da câmera (frontal ou traseira)
+    NSLog(@"[WebRTCManager] Adaptando para câmera: %@",
+          position == AVCaptureDevicePositionFront ? @"frontal" : @"traseira");
+}
+
+- (void)setTargetResolution:(CMVideoDimensions)resolution {
+    _targetResolution = resolution;
+    
+    NSLog(@"[WebRTCManager] Definindo resolução alvo: %dx%d",
+          resolution.width, resolution.height);
+}
+
+- (void)adaptOutputToVideoOrientation:(int)orientation {
+    self.videoOrientation = orientation;
+    
+    NSLog(@"[WebRTCManager] Adaptando para orientação: %d", orientation);
+}
+
+- (void)setVideoMirrored:(BOOL)mirrored {
+    _videoMirrored = mirrored;
+    
+    NSLog(@"[WebRTCManager] Espelhamento: %@", mirrored ? @"ativado" : @"desativado");
 }
 
 @end

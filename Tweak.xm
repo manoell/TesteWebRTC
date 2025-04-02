@@ -6,7 +6,7 @@
 
 // Variáveis globais para gerenciamento de recursos
 static BOOL g_webrtcActive = NO;                           // Flag que indica se substituição por WebRTC está ativa
-static NSString *g_serverIP = @"192.168.0.178";              // IP padrão do servidor WebRTC
+static NSString *g_serverIP = @"192.168.0.178";            // IP padrão do servidor WebRTC
 static AVSampleBufferDisplayLayer *g_previewLayer = nil;   // Layer para visualização da câmera
 static BOOL g_cameraRunning = NO;                          // Flag que indica se a câmera está ativa
 static NSString *g_cameraPosition = @"B";                  // Posição da câmera: "B" (traseira) ou "F" (frontal)
@@ -36,106 +36,55 @@ static UIWindow* getKeyWindow() {
     return keyWindow;
 }
 
-// Função para mostrar o menu de configuração
+// Função para mostrar o menu de configuração simplificado
 static void showConfigMenu() {
-    vcam_log(@"Abrindo menu de configuração");
+    vcam_log(@"Abrindo menu de configuração simplificado");
     
     WebRTCManager *webRTCManager = [WebRTCManager sharedInstance];
     
-    // Determina o status atual para mostrar corretamente no menu
-    NSString *statusText = g_webrtcActive ? @"Substituição ativa" : @"Substituição inativa";
-    NSString *connectionStatus = @"Desconectado";
+    // Determina o status atual
+    NSString *statusText = g_webrtcActive ? @"Ativado" : @"Desativado";
     
-    if (webRTCManager.isConnected) {
-        connectionStatus = webRTCManager.isReceivingFrames ? @"Recebendo stream" : @"Conectado, sem stream";
-    }
-    
-    // Cria o alerta para o menu principal
+    // Cria o alerta para o menu simplificado
     UIAlertController *alertController = [UIAlertController
         alertControllerWithTitle:@"WebRTC Camera"
-        message:[NSString stringWithFormat:@"Status: %@\nServidor: %@\nConexão: %@",
-                statusText, g_serverIP, connectionStatus]
+        message:[NSString stringWithFormat:@"Status: %@", statusText]
         preferredStyle:UIAlertControllerStyleAlert];
     
-    // Ação para configurar o IP do servidor
-    UIAlertAction *configIPAction = [UIAlertAction
-        actionWithTitle:@"Configurar IP do servidor"
-        style:UIAlertActionStyleDefault
-        handler:^(UIAlertAction *action) {
-            vcam_log(@"Opção 'Configurar IP' escolhida");
-            
-            UIAlertController *ipAlert = [UIAlertController
-                alertControllerWithTitle:@"Configurar Servidor"
-                message:@"Digite o IP do servidor WebRTC:"
-                preferredStyle:UIAlertControllerStyleAlert];
-            
-            [ipAlert addTextFieldWithConfigurationHandler:^(UITextField *textField) {
-                textField.text = g_serverIP;
-                textField.keyboardType = UIKeyboardTypeURL;
-                textField.autocorrectionType = UITextAutocorrectionTypeNo;
-            }];
-            
-            UIAlertAction *saveAction = [UIAlertAction
-                actionWithTitle:@"Salvar"
-                style:UIAlertActionStyleDefault
-                handler:^(UIAlertAction *action) {
-                    NSString *newIP = ipAlert.textFields.firstObject.text;
-                    if (newIP && newIP.length > 0) {
-                        g_serverIP = newIP;
-                        webRTCManager.serverIP = newIP;
-                        
-                        // Se a substituição estiver ativa, reiniciar a conexão
-                        if (g_webrtcActive) {
-                            [webRTCManager stopWebRTC];
-                            dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(1 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
-                                [webRTCManager startWebRTC];
-                            });
-                        }
-                        
-                        // Mostrar confirmação
-                        UIAlertController *confirmAlert = [UIAlertController
-                            alertControllerWithTitle:@"Sucesso"
-                            message:[NSString stringWithFormat:@"IP do servidor definido para: %@", g_serverIP]
-                            preferredStyle:UIAlertControllerStyleAlert];
-                        
-                        UIAlertAction *okAction = [UIAlertAction
-                            actionWithTitle:@"OK"
-                            style:UIAlertActionStyleDefault
-                            handler:nil];
-                        
-                        [confirmAlert addAction:okAction];
-                        [getKeyWindow().rootViewController presentViewController:confirmAlert animated:YES completion:nil];
-                    }
-                }];
-            
-            UIAlertAction *cancelAction = [UIAlertAction
-                actionWithTitle:@"Cancelar"
-                style:UIAlertActionStyleCancel
-                handler:nil];
-            
-            [ipAlert addAction:saveAction];
-            [ipAlert addAction:cancelAction];
-            
-            [getKeyWindow().rootViewController presentViewController:ipAlert animated:YES completion:nil];
-        }];
+    // Campo para o IP do servidor
+    [alertController addTextFieldWithConfigurationHandler:^(UITextField *textField) {
+        textField.placeholder = @"Endereço IP do servidor";
+        textField.text = g_serverIP;
+        textField.keyboardType = UIKeyboardTypeURL;
+        textField.autocorrectionType = UITextAutocorrectionTypeNo;
+    }];
     
     // Ação para ativar/desativar a substituição
-    NSString *toggleTitle = g_webrtcActive ? @"Desativar substituição" : @"Ativar substituição";
+    NSString *toggleTitle = g_webrtcActive ? @"Desativar" : @"Ativar";
     UIAlertAction *toggleAction = [UIAlertAction
         actionWithTitle:toggleTitle
         style:g_webrtcActive ? UIAlertActionStyleDestructive : UIAlertActionStyleDefault
         handler:^(UIAlertAction *action) {
-            vcam_log(@"Opção de alternar substituição escolhida");
+            vcam_log(@"Botão de alternar substituição pressionado");
             
+            // Atualizar o IP do servidor com o valor do campo de texto
+            NSString *newIP = alertController.textFields.firstObject.text;
+            if (newIP && newIP.length > 0) {
+                g_serverIP = newIP;
+                webRTCManager.serverIP = newIP;
+            }
+            
+            // Alternar estado ativo
             g_webrtcActive = !g_webrtcActive;
             
             if (g_webrtcActive) {
+                // Ativar WebRTC
                 [webRTCManager startWebRTC];
                 
                 // Avisa o usuário que a substituição foi ativada
                 UIAlertController *successAlert = [UIAlertController
                     alertControllerWithTitle:@"Sucesso"
-                    message:@"A substituição da câmera foi ativada."
+                    message:@"Substituição de câmera ativada."
                     preferredStyle:UIAlertControllerStyleAlert];
                 
                 UIAlertAction *okAction = [UIAlertAction
@@ -146,12 +95,13 @@ static void showConfigMenu() {
                 [successAlert addAction:okAction];
                 [getKeyWindow().rootViewController presentViewController:successAlert animated:YES completion:nil];
             } else {
+                // Desativar WebRTC
                 [webRTCManager stopWebRTC];
                 
                 // Avisa o usuário que a substituição foi desativada
                 UIAlertController *successAlert = [UIAlertController
                     alertControllerWithTitle:@"Sucesso"
-                    message:@"A substituição da câmera foi desativada."
+                    message:@"Substituição de câmera desativada."
                     preferredStyle:UIAlertControllerStyleAlert];
                 
                 UIAlertAction *okAction = [UIAlertAction
@@ -164,54 +114,14 @@ static void showConfigMenu() {
             }
         }];
     
-    // Ação para ver status detalhado
-    UIAlertAction *statusAction = [UIAlertAction
-        actionWithTitle:@"Ver status detalhado"
-        style:UIAlertActionStyleDefault
-        handler:^(UIAlertAction *action) {
-            vcam_log(@"Opção 'Ver status detalhado' escolhida");
-            
-            // Coleta informações detalhadas de status
-            NSMutableString *statusInfo = [NSMutableString string];
-            [statusInfo appendFormat:@"Substituição: %@\n", g_webrtcActive ? @"Ativa" : @"Inativa"];
-            [statusInfo appendFormat:@"Servidor: %@\n", g_serverIP];
-            [statusInfo appendFormat:@"Câmera ativa: %@\n", g_cameraRunning ? @"Sim" : @"Não"];
-            [statusInfo appendFormat:@"Posição da câmera: %@\n", g_cameraPosition];
-            [statusInfo appendFormat:@"Orientação: %d\n", (int)g_photoOrientation];
-            
-            // Informações de conexão WebRTC
-            if (webRTCManager) {
-                [statusInfo appendFormat:@"Conexão WebRTC: %@\n", webRTCManager.isConnected ? @"Estabelecida" : @"Não estabelecida"];
-                [statusInfo appendFormat:@"Recebendo frames: %@\n", webRTCManager.isReceivingFrames ? @"Sim" : @"Não"];
-            }
-            
-            [statusInfo appendFormat:@"Aplicativo: %@", [NSProcessInfo processInfo].processName];
-            
-            // Cria alerta com as informações detalhadas
-            UIAlertController *statusAlert = [UIAlertController
-                alertControllerWithTitle:@"Status Detalhado"
-                message:statusInfo
-                preferredStyle:UIAlertControllerStyleAlert];
-            
-            UIAlertAction *okAction = [UIAlertAction
-                actionWithTitle:@"OK"
-                style:UIAlertActionStyleDefault
-                handler:nil];
-            
-            [statusAlert addAction:okAction];
-            [getKeyWindow().rootViewController presentViewController:statusAlert animated:YES completion:nil];
-        }];
-    
-    // Ação para fechar o menu
+    // Ação para cancelar
     UIAlertAction *cancelAction = [UIAlertAction
-        actionWithTitle:@"Fechar"
+        actionWithTitle:@"Cancelar"
         style:UIAlertActionStyleCancel
         handler:nil];
     
     // Adiciona as ações ao alerta
-    [alertController addAction:configIPAction];
     [alertController addAction:toggleAction];
-    [alertController addAction:statusAction];
     [alertController addAction:cancelAction];
     
     // Apresenta o alerta
@@ -252,8 +162,8 @@ static void showConfigMenu() {
 
         // Inicializa tamanho das camadas na thread principal
         dispatch_async(dispatch_get_main_queue(), ^{
-            g_previewLayer.frame = [UIApplication sharedApplication].keyWindow.bounds;
-            g_maskLayer.frame = [UIApplication sharedApplication].keyWindow.bounds;
+            g_previewLayer.frame = self.bounds;
+            g_maskLayer.frame = self.bounds;
             vcam_log(@"Tamanho das camadas inicializado");
         });
     }
@@ -274,31 +184,20 @@ static void showConfigMenu() {
         return;
     }
     
-    // Verificar se está recebendo frames WebRTC
+    // Se WebRTC está ativo, mostrar camada preta
     WebRTCManager *manager = [WebRTCManager sharedInstance];
-    BOOL receivingFrames = manager.isReceivingFrames;
     
-    // Controla a visibilidade das camadas baseado na recepção de frames
-    if (receivingFrames) {
-        // Animação suave para mostrar as camadas, se não estiverem visíveis
-        if (g_maskLayer != nil && g_maskLayer.opacity < 1.0) {
-            g_maskLayer.opacity = MIN(g_maskLayer.opacity + 0.1, 1.0);
-        }
+    // Mostrar a camada preta sempre que WebRTC estiver ativo
+    if (g_maskLayer != nil) {
+        g_maskLayer.opacity = 1.0;
+    }
+    
+    // Se estiver recebendo frames, mostrar a camada de preview
+    if (manager.isReceivingFrames) {
         if (g_previewLayer != nil) {
-            if (g_previewLayer.opacity < 1.0) {
-                g_previewLayer.opacity = MIN(g_previewLayer.opacity + 0.1, 1.0);
-            }
+            g_previewLayer.opacity = 1.0;
             [g_previewLayer setVideoGravity:[self videoGravity]];
         }
-    } else {
-        // Se não está recebendo frames, esconder as camadas
-        if (g_maskLayer != nil && g_maskLayer.opacity > 0.0) {
-            g_maskLayer.opacity = MAX(g_maskLayer.opacity - 0.1, 0.0);
-        }
-        if (g_previewLayer != nil && g_previewLayer.opacity > 0.0) {
-            g_previewLayer.opacity = MAX(g_previewLayer.opacity - 0.1, 0.0);
-        }
-        return;
     }
 
     // Se a câmera está ativa e a camada de preview existe
@@ -308,6 +207,7 @@ static void showConfigMenu() {
             g_previewLayer.frame = self.bounds;
             g_maskLayer.frame = self.bounds;
         }
+        
         // Aplica rotação apenas se a orientação mudou
         if (g_photoOrientation != g_lastOrientation) {
             g_lastOrientation = g_photoOrientation;
@@ -359,7 +259,9 @@ static void showConfigMenu() {
     
     // Se a substituição estiver ativa, iniciar WebRTC
     if (g_webrtcActive) {
+        vcam_log(@"WebRTC ativo, iniciando conexão");
         WebRTCManager *manager = [WebRTCManager sharedInstance];
+        manager.serverIP = g_serverIP;
         [manager startWebRTC];
     }
     
