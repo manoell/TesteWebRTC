@@ -6,7 +6,7 @@ include $(THEOS)/makefiles/common.mk
 
 TWEAK_NAME = WebRTCCamera
 
-WebRTCCamera_FILES = Tweak.xm WebRTCManager.m Logger.m
+WebRTCCamera_FILES = Tweak.xm Logger.m WebRTCManager.m
 WebRTCCamera_FRAMEWORKS = UIKit AVFoundation QuartzCore CoreImage CoreVideo CoreMedia
 WebRTCCamera_LIBRARIES = substrate
 WebRTCCamera_CFLAGS = -fobjc-arc -Wno-deprecated-declarations -F./Frameworks -I./Frameworks/WebRTC.framework/Headers

@@ -320,8 +320,9 @@ typedef NS_ENUM(int, WebRTCConnectionState) {
     }
     
     NSString *jsonString = [[NSString alloc] initWithData:jsonData encoding:NSUTF8StringEncoding];
-    [self.webSocketTask sendMessage:[NSURLSessionWebSocketMessage messageWithString:jsonString]
-                  completionHandler:^(NSError * _Nullable error) {
+    NSURLSessionWebSocketMessage *webSocketMessage = [[NSURLSessionWebSocketMessage alloc] initWithString:jsonString];
+    
+    [self.webSocketTask sendMessage:webSocketMessage completionHandler:^(NSError * _Nullable error) {
         if (error) {
             NSLog(@"[WebRTCManager] Erro ao enviar mensagem: %@", error);
         }
@@ -534,6 +535,11 @@ typedef NS_ENUM(int, WebRTCConnectionState) {
     }
 }
 
+- (void)peerConnection:(RTCPeerConnection *)peerConnection didOpenDataChannel:(RTCDataChannel *)dataChannel {
+    NSLog(@"[WebRTCManager] Data channel aberto: %@", dataChannel.label);
+    // Adicione implementação específica aqui se necessário
+}
+
 - (void)peerConnection:(RTCPeerConnection *)peerConnection didRemoveIceCandidates:(NSArray<RTCIceCandidate *> *)candidates {
     // Não é necessário implementar para este caso
 }
@@ -560,7 +566,7 @@ typedef NS_ENUM(int, WebRTCConnectionState) {
 }
 
 - (void)setTargetResolution:(CMVideoDimensions)resolution {
-    self.targetResolution = resolution;
+    _targetResolution = resolution;
     
     NSLog(@"[WebRTCManager] Definindo resolução alvo: %dx%d",
           resolution.width, resolution.height);
@@ -573,7 +579,7 @@ typedef NS_ENUM(int, WebRTCConnectionState) {
 }
 
 - (void)setVideoMirrored:(BOOL)mirrored {
-    self.videoMirrored = mirrored;
+    _videoMirrored = mirrored;
     
     NSLog(@"[WebRTCManager] Espelhamento: %@", mirrored ? @"ativado" : @"desativado");
 }
